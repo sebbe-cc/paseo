@@ -567,6 +567,31 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   return initialConfig;
 }
 
+export async function resolveAgentMcpScope(
+  req: Pick<express.Request, "headers" | "query" | "body">,
+  storage: Pick<AgentStorage, "get">,
+): Promise<{ callerAgentId?: string } | null> {
+  if (!req.body || Array.isArray(req.body)) return null;
+  const discovery = ["initialize", "notifications/initialized", "ping", "tools/list"].includes(req.body.method);
+  const queryId = req.query.callerAgentId;
+  if (queryId !== undefined && (typeof queryId !== "string" || !z.guid().safeParse(queryId).success)) return null;
+  const agentHeader = req.headers["x-paseo-agent-id"];
+  const workspaceHeader = req.headers["x-paseo-workspace-id"];
+  const headerScoped = agentHeader !== undefined || workspaceHeader !== undefined;
+  if (headerScoped && (
+    typeof agentHeader !== "string" || !z.guid().safeParse(agentHeader).success ||
+    typeof workspaceHeader !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceHeader) ||
+    (queryId !== undefined && queryId !== agentHeader)
+  )) return null;
+  const callerAgentId = headerScoped ? agentHeader as string : queryId as string | undefined;
+  if (!callerAgentId) return discovery ? {} : null;
+  const record = await storage.get(callerAgentId);
+  // Providers can discover tools before their new agent record is registered.
+  if (!record) return discovery ? { callerAgentId } : null;
+  if (record.archivedAt || (headerScoped && record.workspaceId !== workspaceHeader)) return null;
+  return { callerAgentId };
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
@@ -1521,14 +1546,12 @@ export async function createPaseoDaemon(
           });
           return;
         }
-        const callerAgentIdRaw = req.query.callerAgentId;
-        let callerAgentId: string | undefined;
-        if (typeof callerAgentIdRaw === "string") {
-          callerAgentId = callerAgentIdRaw;
-        } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
-          callerAgentId = callerAgentIdRaw[0];
+        const scope = await resolveAgentMcpScope(req, agentStorage);
+        if (!scope) {
+          res.status(403).json({ error: "Invalid or missing Agent MCP scope" });
+          return;
         }
-        const { server, transport } = await createAgentMcpSession(callerAgentId);
+        const { server, transport } = await createAgentMcpSession(scope.callerAgentId);
         res.on("close", () => {
           void transport.close();
           void server.close();
