@@ -578,28 +578,50 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   return initialConfig;
 }
 
+type AgentMcpHeaderScope =
+  | { headerScoped: false }
+  | { headerScoped: true; agentId: string; workspaceId: string };
+
+function readAgentMcpHeaderScope(
+  headers: express.Request["headers"],
+  queryId: string | undefined,
+): AgentMcpHeaderScope | null {
+  const agentHeader = headers["x-paseo-agent-id"];
+  const workspaceHeader = headers["x-paseo-workspace-id"];
+  if (agentHeader === undefined && workspaceHeader === undefined) return { headerScoped: false };
+  if (typeof agentHeader !== "string" || !z.guid().safeParse(agentHeader).success) return null;
+  if (
+    typeof workspaceHeader !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceHeader)
+  )
+    return null;
+  if (queryId !== undefined && queryId !== agentHeader) return null;
+  return { headerScoped: true, agentId: agentHeader, workspaceId: workspaceHeader };
+}
+
 export async function resolveAgentMcpScope(
   req: Pick<express.Request, "headers" | "query" | "body">,
   storage: Pick<AgentStorage, "get">,
 ): Promise<{ callerAgentId?: string } | null> {
   if (!req.body || Array.isArray(req.body)) return null;
-  const discovery = ["initialize", "notifications/initialized", "ping", "tools/list"].includes(req.body.method);
+  const discovery = ["initialize", "notifications/initialized", "ping", "tools/list"].includes(
+    req.body.method,
+  );
   const queryId = req.query.callerAgentId;
-  if (queryId !== undefined && (typeof queryId !== "string" || !z.guid().safeParse(queryId).success)) return null;
-  const agentHeader = req.headers["x-paseo-agent-id"];
-  const workspaceHeader = req.headers["x-paseo-workspace-id"];
-  const headerScoped = agentHeader !== undefined || workspaceHeader !== undefined;
-  if (headerScoped && (
-    typeof agentHeader !== "string" || !z.guid().safeParse(agentHeader).success ||
-    typeof workspaceHeader !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceHeader) ||
-    (queryId !== undefined && queryId !== agentHeader)
-  )) return null;
-  const callerAgentId = headerScoped ? agentHeader as string : queryId as string | undefined;
+  if (
+    queryId !== undefined &&
+    (typeof queryId !== "string" || !z.guid().safeParse(queryId).success)
+  )
+    return null;
+  const scope = readAgentMcpHeaderScope(req.headers, queryId);
+  if (!scope) return null;
+  const callerAgentId = scope.headerScoped ? scope.agentId : queryId;
   if (!callerAgentId) return discovery ? {} : null;
   const record = await storage.get(callerAgentId);
   // Providers can discover tools before their new agent record is registered.
   if (!record) return discovery ? { callerAgentId } : null;
-  if (record.archivedAt || (headerScoped && record.workspaceId !== workspaceHeader)) return null;
+  if (record.archivedAt || (scope.headerScoped && record.workspaceId !== scope.workspaceId))
+    return null;
   return { callerAgentId };
 }
 
