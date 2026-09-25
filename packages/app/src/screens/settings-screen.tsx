@@ -33,6 +33,7 @@ import {
   Puzzle,
   Plus,
   FolderGit2,
+  Folder,
   SquareTerminal,
   Code2,
   Smartphone,
@@ -121,6 +122,8 @@ import { HostPluginsPage } from "@/screens/settings/plugins-page";
 import { MetadataGenerationPage } from "@/screens/settings/metadata-generation-page";
 import ProjectsScreen from "@/screens/projects-screen";
 import ProjectSettingsScreen from "@/screens/project-settings-screen";
+import { ProjectContainerSettingsScreen } from "@/project-containers/files/settings-screen";
+import { PROJECT_CONTAINER_ID_PREFIX } from "@getpaseo/protocol/project-containers";
 import { SETTINGS_DESKTOP_SIDEBAR_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import {
@@ -201,6 +204,32 @@ const HOST_SECTION_ITEMS: HostSectionItem[] = [
   { id: "terminals", labelKey: "settings.hostSections.terminals", icon: SquareTerminal },
   { id: "plugins", labelKey: "settings.hostSections.plugins", icon: Blocks },
 ];
+
+/** `pcnt_` ids are project containers; anything else is a repository's settings. */
+function renderProjectSettingsContent(
+  view: Extract<SettingsView, { kind: "project" }>,
+  onBack: () => void,
+  showBack: boolean,
+): ReactNode {
+  if (view.projectId.startsWith(PROJECT_CONTAINER_ID_PREFIX)) {
+    return (
+      <ProjectContainerSettingsScreen
+        serverId={view.serverId}
+        containerId={view.projectId}
+        onBack={onBack}
+        showBack={showBack}
+      />
+    );
+  }
+  return (
+    <ProjectSettingsScreen
+      serverId={view.serverId}
+      projectId={view.projectId}
+      onBackToProjects={onBack}
+      showBackToProjects={showBack}
+    />
+  );
+}
 
 function renderHostSettingsContent(
   view: Extract<SettingsView, { kind: "host" }>,
@@ -1488,7 +1517,8 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
       return { title: t(item.labelKey), Icon: item.icon };
     }
     if (view.kind === "project") {
-      return { title: t("settings.projects"), Icon: FolderGit2 };
+      const isContainer = view.projectId.startsWith(PROJECT_CONTAINER_ID_PREFIX);
+      return { title: t("settings.projects"), Icon: isContainer ? Folder : FolderGit2 };
     }
     return null;
   })();
@@ -1510,14 +1540,7 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
         return renderHostSettingsContent(view, handleHostRemoved);
       }
       if (view.kind === "project") {
-        return (
-          <ProjectSettingsScreen
-            serverId={view.serverId}
-            projectId={view.projectId}
-            onBackToProjects={handleBackFromDetail}
-            showBackToProjects={!isCompactLayout}
-          />
-        );
+        return renderProjectSettingsContent(view, handleBackFromDetail, !isCompactLayout);
       }
       if (view.kind === "section") {
         switch (view.section) {
