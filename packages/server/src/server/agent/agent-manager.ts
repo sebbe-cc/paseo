@@ -330,6 +330,8 @@ export interface AgentManagerOptions {
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
   appendSystemPrompt?: string;
+  /** Fork: the project context block appended after `appendSystemPrompt` for agents in `cwd`. */
+  resolveProjectContextPrompt?: (cwd: string) => Promise<string | null>;
   agentStreamCoalesceWindowMs?: number;
   rescueTimeouts?: AgentManagerRescueTimeouts;
   beforeSteerUnavailableFallback?: (input: {
@@ -747,6 +749,7 @@ export class AgentManager {
     provider: AgentProvider,
   ) => ProviderPaseoToolsPolicy | undefined;
   private appendSystemPrompt: string;
+  private readonly resolveProjectContextPrompt: AgentManagerOptions["resolveProjectContextPrompt"];
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
   private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
@@ -767,6 +770,7 @@ export class AgentManager {
     this.configurePaseoTools(options);
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
+    this.resolveProjectContextPrompt = options.resolveProjectContextPrompt;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     this.rescueTimeouts = {
       reloadSessionCloseMs:
@@ -5168,6 +5172,7 @@ export class AgentManager {
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
+    const projectPrompt = await this.projectContextPrompt(storedConfig.cwd);
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimePaseoMcpServer({
         config: storedConfig,
@@ -5178,12 +5183,28 @@ export class AgentManager {
             : null,
         mcpAuthToken: this.mcpAuthToken,
       }),
+      projectPrompt,
     );
     return { storedConfig, launchConfig, paseoToolPolicy };
   }
 
-  private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {
-    const daemonAppendSystemPrompt = this.appendSystemPrompt.trim();
+  private async projectContextPrompt(cwd: string): Promise<string | null> {
+    if (!this.resolveProjectContextPrompt) return null;
+    try {
+      return await this.resolveProjectContextPrompt(cwd);
+    } catch (error) {
+      this.logger.warn({ err: error, cwd }, "Failed to resolve project context prompt");
+      return null;
+    }
+  }
+
+  private applyDaemonAppendSystemPrompt(
+    config: AgentSessionConfig,
+    projectPrompt: string | null = null,
+  ): AgentSessionConfig {
+    const daemonAppendSystemPrompt = [this.appendSystemPrompt.trim(), projectPrompt]
+      .filter(Boolean)
+      .join("\n\n");
     const next = { ...config };
     delete next.daemonAppendSystemPrompt;
 

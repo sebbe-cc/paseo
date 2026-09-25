@@ -42,6 +42,10 @@ import {
   ProjectContainerUpdateSchema,
 } from "./project-containers.js";
 import {
+  PROJECT_CONTAINER_FILES_INBOUND,
+  PROJECT_CONTAINER_FILES_OUTBOUND,
+} from "./project-container-files.js";
+import {
   ChatCreateRequestSchema,
   ChatListRequestSchema,
   ChatInspectRequestSchema,
@@ -3222,6 +3226,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProjectContainerDeleteRequestSchema,
   ProjectContainerReorderRequestSchema,
   ProjectContainerAssignRequestSchema,
+  ...PROJECT_CONTAINER_FILES_INBOUND,
   WorkspaceRecoveryInspectRequestSchema,
   WorkspaceRecoveryRestoreRequestSchema,
   SetVoiceModeMessageSchema,
@@ -3585,6 +3590,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspaceLabels: z.boolean().optional(),
         // COMPAT(projectContainers): fork-only (sebbe-cc/paseo), remove gate after 2027-09-25.
         projectContainers: z.boolean().optional(),
+        // COMPAT(projectContainerFiles): fork-only (sebbe-cc/paseo), remove gate after 2027-09-25.
+        projectContainerFiles: z.boolean().optional(),
         // COMPAT(workspaceSetupRun): added in v0.8.0, remove gate after 2027-09-02.
         workspaceSetupRun: z.boolean().optional(),
         // COMPAT(workspaceTerminals): added in v0.8.0, remove gate after 2027-09-05.
@@ -6892,6 +6899,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProjectContainerDeleteResponseSchema,
   ProjectContainerReorderResponseSchema,
   ProjectContainerAssignResponseSchema,
+  ...PROJECT_CONTAINER_FILES_OUTBOUND,
   ProjectUpdateMessageSchema,
   ProjectListResponseMessageSchema,
   ScriptStatusUpdateMessageSchema,
