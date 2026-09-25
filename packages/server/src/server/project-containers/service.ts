@@ -160,19 +160,11 @@ export class ProjectContainerService {
       if (input.containerId !== null) requireContainer(containers, input.containerId);
       const projectIds = await this.requireProjects(input.projectIds);
       const timestamp = this.now();
-      const next = detach(containers, projectIds, timestamp).map((container) => {
-        if (container.id !== input.containerId) return container;
-        const at = Math.min(
-          input.index ?? container.projectIds.length,
-          container.projectIds.length,
-        );
-        const members = [
-          ...container.projectIds.slice(0, at),
-          ...projectIds,
-          ...container.projectIds.slice(at),
-        ];
-        return { ...container, projectIds: members, updatedAt: timestamp };
-      });
+      const next = detach(containers, projectIds, timestamp).map((container) =>
+        container.id === input.containerId
+          ? insertMembers(container, projectIds, input.index, timestamp)
+          : container,
+      );
       if (!sameMembership(containers, next)) await this.commit(next);
       return { projectIds, containerId: input.containerId };
     });
@@ -280,6 +272,21 @@ function detach(
       updatedAt: timestamp,
     };
   });
+}
+
+function insertMembers(
+  container: ProjectContainer,
+  projectIds: readonly string[],
+  index: number | undefined,
+  timestamp: string,
+): ProjectContainer {
+  const at = Math.min(index ?? container.projectIds.length, container.projectIds.length);
+  const members = [
+    ...container.projectIds.slice(0, at),
+    ...projectIds,
+    ...container.projectIds.slice(at),
+  ];
+  return { ...container, projectIds: members, updatedAt: timestamp };
 }
 
 function sameMembership(
