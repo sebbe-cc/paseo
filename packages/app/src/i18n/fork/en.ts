@@ -42,6 +42,7 @@ export const forkEn = {
         save: "Save",
       },
       settings: {
+        section: "Sidebar",
         title: "Project",
         description: "Group this repository with others in the sidebar",
       },
