@@ -46,7 +46,7 @@ export function ProjectContainerSettingsSection({
   if (!enabled) return null;
   return (
     <SettingsSection
-      title={t("projectContainers.settings.title")}
+      title={t("projectContainers.settings.section")}
       testID="project-container-settings-section"
     >
       <View style={settingsStyles.card}>
