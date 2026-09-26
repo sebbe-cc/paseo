@@ -80,6 +80,8 @@ Native builds narrow this gap rather than closing it outright. The WebView refus
 
 If you don't trust a page, read it in `Source`, which executes nothing. Source is available as an editable view on supported web hosts and a read-only view everywhere else.
 
+The `WebView` that plugins import from `@getpaseo/plugin/client/react-native` runs on the same containment: an opaque origin with no storage or cookies, no popups, and a top frame that refuses every document but its own, with the same Android caveat. It differs in two ways. Paseo injects no policy, because the plugin owns the document and declares its own `Content-Security-Policy`, so a plugin page can reach the network if its author allows it. And the frame and the plugin exchange text messages, which is the one channel that crosses the boundary; the page still cannot reach Paseo's DOM, the plugin's runtime, or the daemon. A plugin is trusted code, so this bounds what a page it embeds can do, not what the plugin can do.
+
 ## Agent authentication
 
 Paseo wraps agent CLIs (Claude Code, Codex, OpenCode) but does not manage their authentication. Each agent provider handles its own credentials. Paseo never stores or transmits provider API keys. Agents run in your user context with your existing credentials.
