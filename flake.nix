@@ -43,6 +43,22 @@
             buildVersion = desktopBuildVersion;
           };
         }
+        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") (
+          let
+            rev = self.shortRev or self.dirtyShortRev or "unknown";
+            date = self.lastModifiedDate or "00000000000000";
+          in
+          {
+            # Signed fork release; builds only on tempus, which holds the key (see nix/desktop-release.nix).
+            desktop-release = pkgs.callPackage ./nix/desktop-release.nix {
+              desktop = self.packages.${system}.desktop;
+              # Not revCount: github: refs lack it, and Gradient and publish-mac must derive the same drv.
+              buildVersion = paseo.version;
+              buildMetadata = "desvio.${rev}";
+              releaseVersion = "${paseo.version}-desvio.${date}.${rev}";
+            };
+          }
+        )
       );
 
       nixosModules.default = self.nixosModules.paseo;
