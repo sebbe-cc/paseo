@@ -3,8 +3,9 @@
   fetchurl,
   openssl,
   rcodesign,
-  python3Packages,
+  python3,
   desktop,
+  releaseBuild,
   buildVersion,
   releaseVersion,
   buildMetadata,
@@ -20,7 +21,24 @@ let
     url = "https://github.com/electron/electron/releases/download/v${electronVersion}/electron-v${electronVersion}-darwin-arm64.zip";
     hash = "sha256-+Qbf9dBUsbkuVxF4GxPMIG/XE5zmZGdQO50KPm+8mwI=";
   };
+  # nixpkgs' ds-store and dmgbuild pin setuptools==80.9.0 as their build system, which nixpkgs doesn't ship.
+  unpinSetuptools =
+    drv:
+    drv.overridePythonAttrs (old: {
+      postPatch = (old.postPatch or "") + ''
+        sed -i -E 's/"setuptools==[0-9.]+"/"setuptools"/' pyproject.toml
+      '';
+    });
+  python = python3.override {
+    self = python;
+    packageOverrides = _: prev: {
+      ds-store = unpinSetuptools prev.ds-store;
+      dmgbuild = unpinSetuptools prev.dmgbuild;
+    };
+  };
 in
+# Stamps, packages and signs the Gradient-built releaseBuild. publish-mac builds this on tempus from a
+# github: ref, the only kind that carries the commit the version comes from.
 desktop.overrideAttrs (old: {
   pname = "paseo-desktop-release";
   version = releaseVersion;
@@ -38,7 +56,7 @@ desktop.overrideAttrs (old: {
     PASEO_SIGN_PEM = signingPem;
     PASEO_SIGN_CERT_SHA1 = signingCertSha1;
     CSC_IDENTITY_AUTO_DISCOVERY = "false";
-    CUSTOM_DMGBUILD_PATH = lib.getExe python3Packages.dmgbuild;
+    CUSTOM_DMGBUILD_PATH = lib.getExe python.pkgs.dmgbuild;
   };
 
   buildPhase = ''
@@ -54,6 +72,10 @@ desktop.overrideAttrs (old: {
       exit 1
     fi
 
+    cp -R ${releaseBuild}/packages/. packages/
+    chmod -R u+w packages
+
+    # Stamped after the build, so the web bundle still reports the plain base version.
     # The updater ignores +metadata, so the desktop app gets a prerelease that grows with each commit.
     node scripts/stamp-build-version.mjs ${lib.escapeShellArg buildMetadata}
     node -e '
@@ -65,10 +87,6 @@ desktop.overrideAttrs (old: {
     ' ${lib.escapeShellArg releaseVersion}
 
     npm rebuild node-pty
-    npm run build:server
-    npm run build --workspace=@getpaseo/expo-two-way-audio
-    ( cd packages/app && PASEO_WEB_PLATFORM=electron npx expo export --platform web )
-    npm run build:main --workspace=@getpaseo/desktop
 
     # A directory holding the default zip name makes electron-builder unpack it instead of downloading.
     electron_dist="$NIX_BUILD_TOP/electron-dist"
