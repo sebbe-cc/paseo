@@ -1,5 +1,6 @@
 import { createInstance } from "i18next";
 import { initReactI18next } from "react-i18next";
+import { applyForkResources } from "./fork/apply";
 import { observeI18nInit } from "./init";
 import { ar } from "./resources/ar";
 import { en } from "./resources/en";
@@ -37,5 +38,6 @@ observeI18nInit(
     },
   }),
 );
+applyForkResources(i18n);
 
 export { i18n };

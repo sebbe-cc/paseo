@@ -58,6 +58,8 @@ import { SIDEBAR_ROW_ITEMS, type SidebarRowItem } from "./row-items";
 import { useWorkspaceLabelProjection } from "@/workspace-labels";
 import { WorkspaceLabelDot } from "@/workspace-labels/swatch";
 import { WorkspaceLabelManagerModal } from "@/workspace-labels/manager-modal";
+import { useProjectContainers } from "@/project-containers";
+import { ProjectContainerManagerModal } from "@/project-containers/manager-modal";
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -172,6 +174,12 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
   const [managerOpen, setManagerOpen] = useState(false);
   const openManager = useCallback(() => setManagerOpen(true), []);
   const closeManager = useCallback(() => setManagerOpen(false), []);
+  const [projectManagerOpen, setProjectManagerOpen] = useState(false);
+  const openProjectManager = useCallback(() => setProjectManagerOpen(true), []);
+  const closeProjectManager = useCallback(() => setProjectManagerOpen(false), []);
+  const showProjectManager = useProjectContainers((state) =>
+    Object.values(state.hosts).some((host) => host.status === "online"),
+  );
 
   const triggerStyle = useCallback(
     ({ hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
@@ -359,9 +367,18 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
               </MenuSubTrigger>
             </>
           ) : null}
+          {showProjectManager ? (
+            <>
+              <MenuSeparator />
+              <MenuItem onSelect={openProjectManager} testID="sidebar-project-container-manage">
+                {t("projectContainers.manage.open")}
+              </MenuItem>
+            </>
+          ) : null}
         </MenuSurface>
       </MenuRoot>
       <WorkspaceLabelManagerModal visible={managerOpen} onClose={closeManager} />
+      <ProjectContainerManagerModal visible={projectManagerOpen} onClose={closeProjectManager} />
     </>
   );
 }
