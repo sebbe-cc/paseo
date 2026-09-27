@@ -7018,11 +7018,11 @@ export class CodexAppServerAgentClient implements AgentClient {
     private readonly deps: CodexAppServerAgentDeps = {},
   ) {}
 
-  private sessionDeps(): CodexAppServerAgentDeps {
+  private sessionDeps(launchEnv?: AgentLaunchContext["env"]): CodexAppServerAgentDeps {
     return {
       ...this.deps,
       customCodexConfig: buildCodexCustomProviderConfig(
-        this.runtimeSettings,
+        { ...this.runtimeSettings, env: { ...this.runtimeSettings?.env, ...launchEnv } },
         this.deps.customProvider,
       ),
     };
@@ -7131,7 +7131,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       this.logger,
       () =>
         this.spawnAppServer(launchContext?.env, { goalsEnabled, agentId: launchContext?.agentId }),
-      this.sessionDeps(),
+      this.sessionDeps(launchContext?.env),
       options?.persistSession === false,
       goalsEnabled,
       autoReviewEnabled,
@@ -7162,7 +7162,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       this.logger,
       () =>
         this.spawnAppServer(launchContext?.env, { goalsEnabled, agentId: launchContext?.agentId }),
-      this.sessionDeps(),
+      this.sessionDeps(launchContext?.env),
       false,
       goalsEnabled,
       autoReviewEnabled,
