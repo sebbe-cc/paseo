@@ -162,8 +162,8 @@ export function normalizeVersionForComparison(version: string | null | undefined
     return null;
   }
 
-  // Build metadata (+desvio.3f9a1c2) names a build of the same release, so it never mismatches.
-  return value.replace(/^v/i, "").replace(/\+.*$/, "");
+  // Fork builds (+desvio.3f9a1c2, or -desvio.<n>… on the desktop app) are the same release.
+  return value.replace(/^v/i, "").replace(/(-desvio\..*|\+.*)$/, "");
 }
 
 export function isVersionMismatch(
