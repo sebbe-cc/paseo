@@ -253,7 +253,8 @@ export async function resolveDesktopDaemonStatus(): Promise<DesktopDaemonStatus>
 function normalizeVersion(version: string | null): string | null {
   const trimmed = version?.trim();
   if (!trimmed) return null;
-  return trimmed.replace(/^v/i, "");
+  // Fork builds (+desvio.3f9a1c2, or -desvio.<n>… on the desktop app) are the same release.
+  return trimmed.replace(/^v/i, "").replace(/(-desvio\..*|\+.*)$/, "");
 }
 
 function shouldRestartForVersion(current: DesktopDaemonStatus): boolean {
