@@ -101,7 +101,10 @@ import type { DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
 import { DirectorySyncService } from "./directory-sync/index.js";
 import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.js";
 import type { WorkspaceLabelService } from "./workspace-labels/index.js";
-import type { ProjectContainerService } from "./project-containers/index.js";
+import type {
+  ProjectContainerFilesService,
+  ProjectContainerService,
+} from "./project-containers/index.js";
 import {
   APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS,
   ApplicationSocketLease,
@@ -540,6 +543,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly workspaceLabelService: WorkspaceLabelService | null;
   private readonly projectContainerService: ProjectContainerService | undefined;
+  private readonly projectContainerFilesService: ProjectContainerFilesService | undefined;
   private readonly scheduleService: ScheduleService;
   private readonly checkoutDiffManager: CheckoutDiffManager;
   private readonly github: ForgeService;
@@ -658,6 +662,7 @@ export class VoiceAssistantWebSocketServer {
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
     projectContainerService?: ProjectContainerService,
+    projectContainerFilesService?: ProjectContainerFilesService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -687,6 +692,7 @@ export class VoiceAssistantWebSocketServer {
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
     this.projectContainerService = projectContainerService;
+    this.projectContainerFilesService = projectContainerFilesService;
     const requiredServices = requireWebSocketServices({
       scheduleService,
       checkoutDiffManager,
@@ -1465,6 +1471,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceRegistry: this.workspaceRegistry,
       workspaceLabelService: this.workspaceLabelService ?? undefined,
       projectContainerService: this.projectContainerService,
+      projectContainerFilesService: this.projectContainerFilesService,
       directorySync: this.directorySync,
       scheduleService: this.scheduleService,
       checkoutDiffManager: this.checkoutDiffManager,
@@ -1691,6 +1698,8 @@ export class VoiceAssistantWebSocketServer {
         ...(this.workspaceLabelService ? { workspaceLabels: true } : {}),
         // COMPAT(projectContainers): fork-only (sebbe-cc/paseo), remove gate after 2027-09-25.
         ...(this.projectContainerService ? { projectContainers: true } : {}),
+        // COMPAT(projectContainerFiles): fork-only (sebbe-cc/paseo), remove gate after 2027-09-25.
+        ...(this.projectContainerFilesService ? { projectContainerFiles: true } : {}),
         // COMPAT(workspaceSetupRun): added in v0.7.3, remove gate after 2027-09-02.
         workspaceSetupRun: true,
         // COMPAT(providersSnapshot): keep optional until all clients rely on snapshot flow.
