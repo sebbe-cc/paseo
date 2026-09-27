@@ -98,7 +98,10 @@ interface ChangelogBodyProps {
 
 function ChangelogBody({ state, shownReleases, onShowMore, onRetry }: ChangelogBodyProps) {
   const { t } = useTranslation();
-  const appVersion = useMemo(() => resolveAppVersion()?.replace(/^v/i, "") ?? null, []);
+  const appVersion = useMemo(
+    () => resolveAppVersion()?.replace(/^v/i, "").replace(/\+.*$/, "") ?? null,
+    [],
+  );
 
   if (state.status === "loading") {
     return (

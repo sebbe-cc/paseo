@@ -17,6 +17,8 @@
   # The default is read from a sidecar file so the CI auto-updater can replace
   # the hash with a single file write instead of a sed against this source.
   npmDepsHash ? lib.fileContents ./npm-deps.hash,
+  # Semver build metadata stamped onto every workspace version, e.g. "desvio.3f9a1c2".
+  buildMetadata ? null,
 }:
 
 buildNpmPackage rec {
@@ -86,6 +88,10 @@ buildNpmPackage rec {
 
   # Don't use the default npm build hook — we need a custom build sequence
   dontNpmBuild = true;
+
+  preBuild = lib.optionalString (buildMetadata != null) ''
+    node scripts/stamp-build-version.mjs ${lib.escapeShellArg buildMetadata}
+  '';
 
   buildPhase = ''
     runHook preBuild

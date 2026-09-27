@@ -260,7 +260,8 @@ export async function resolveDesktopDaemonStatus(): Promise<DesktopDaemonStatus>
 function normalizeVersion(version: string | null): string | null {
   const trimmed = version?.trim();
   if (!trimmed) return null;
-  return trimmed.replace(/^v/i, "");
+  // Build metadata (+desvio.3f9a1c2) names a build of the same release; don't restart for it.
+  return trimmed.replace(/^v/i, "").replace(/\+.*$/, "");
 }
 
 function shouldRestartForVersion(current: DesktopDaemonStatus): boolean {

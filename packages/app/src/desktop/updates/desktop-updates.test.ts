@@ -27,6 +27,8 @@ describe("desktop-updates helpers", () => {
     expect(isVersionMismatch("v0.1.15", "0.1.15")).toBe(false);
     expect(isVersionMismatch("0.1.15", "0.1.16")).toBe(true);
     expect(isVersionMismatch("0.1.15", null)).toBe(false);
+    expect(isVersionMismatch("0.1.15+desvio.aaaaaaa", "0.1.15+desvio.bbbbbbb")).toBe(false);
+    expect(isVersionMismatch("0.1.15", "0.1.16+desvio.aaaaaaa")).toBe(true);
   });
 
   it("formats display versions with v prefix and unavailable fallback", async () => {
