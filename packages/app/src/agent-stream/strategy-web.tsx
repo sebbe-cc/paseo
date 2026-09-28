@@ -46,6 +46,7 @@ import {
 import { useChatFindSelectedMessageId } from "@/agent-stream/chat-find";
 import { getStreamItemMessageId } from "./presentation";
 import { useScrollToMessage } from "./use-scroll-to-message.web";
+import { useTimelineCursor, type TimelineCursor } from "./use-timeline-cursor.web";
 
 interface CreateWebStreamStrategyInput {
   isMobileBreakpoint: boolean;
@@ -385,13 +386,17 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   // near it. Without this a hit in a far paragraph is invisible to the count and Next
   // walks off to the following message.
   const chatFindMessageId = useChatFindSelectedMessageId();
-  const chatFindRowIndexes = useMemo(() => {
-    if (!chatFindMessageId) return null;
+  const [timelineCursor, setTimelineCursor] = useState<TimelineCursor | null>(null);
+  const timelineCursorRowId = timelineCursor?.rowId ?? null;
+  const pinnedRowIndexes = useMemo(() => {
+    if (!chatFindMessageId && !timelineCursorRowId) return null;
     const indexes = segments.historyVirtualized.flatMap((item, index) =>
-      getStreamItemMessageId(item) === chatFindMessageId ? [index] : [],
+      getStreamItemMessageId(item) === chatFindMessageId || item.id === timelineCursorRowId
+        ? [index]
+        : [],
     );
     return indexes.length > 0 ? indexes : null;
-  }, [chatFindMessageId, segments.historyVirtualized]);
+  }, [chatFindMessageId, segments.historyVirtualized, timelineCursorRowId]);
   const rowVirtualizerRef = useRef<Virtualizer<HTMLElement, Element> | null>(null);
   const rangeExtractor = useCallback(
     (range: VirtualRange): number[] => {
@@ -425,12 +430,12 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       return [
         ...new Set([
           ...defaultRangeExtractor(visibleRange),
-          ...(chatFindRowIndexes ?? []),
+          ...(pinnedRowIndexes ?? []),
           ...(anchorIndex < 0 ? [] : [anchorIndex]),
         ]),
       ].sort((left, right) => left - right);
     },
-    [chatFindRowIndexes, readingAnchor, segments.historyVirtualized],
+    [pinnedRowIndexes, readingAnchor, segments.historyVirtualized],
   );
   const virtualOffsetListener = useRef<((offset: number, scrolling: boolean) => void) | null>(null);
   const observeVirtualOffset = useCallback<typeof observeElementOffset>((instance, onOffset) => {
@@ -780,6 +785,41 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       setFollowOutput(false);
     }
     rearmHistoryStartFromUserIntent();
+  });
+
+  const pinToBottom = useStableEvent(() => {
+    setFollowOutput(true);
+    cancelPendingStickToBottom();
+    forceStickToBottom();
+  });
+  const stopFollowingOutputFromCursor = useStableEvent(() => {
+    cancelPendingStickToBottom();
+    if (followOutputRef.current) {
+      setFollowOutput(false);
+    }
+  });
+  // k on the first loaded row: the scroll-driven pagination loads and keeps the view in place.
+  const requestOlderHistoryFromCursor = useStableEvent(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (scrollContainer) {
+      scrollContainer.scrollTop = 0;
+    }
+    rearmHistoryStartFromUserIntent();
+    evaluateHistoryStart();
+  });
+  const timelineCursorView = useTimelineCursor({
+    active: isActive,
+    scrollContainerRef,
+    segments,
+    rowVirtualizer,
+    cursor: timelineCursor,
+    setCursor: setTimelineCursor,
+    hasOlderHistory,
+    isLoadingOlderRows:
+      isLoadingOlderHistory || isHistoryStartLoadingOperation(historyStartPaginationState),
+    stopFollowingOutput: stopFollowingOutputFromCursor,
+    pinToBottom,
+    requestOlderHistory: requestOlderHistoryFromCursor,
   });
 
   const handleDomScroll = useCallback(() => {
@@ -1297,10 +1337,13 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
 
   return (
     <div style={viewportStyle} data-window-content>
+      {timelineCursorView.css ? <style>{timelineCursorView.css}</style> : null}
       <div
         ref={handleScrollContainerRef}
         data-testid="agent-chat-scroll"
         data-focus-region="timeline"
+        data-keyboard-list="timeline"
+        data-timeline-cursor={timelineCursorView.scopeId}
         tabIndex={-1}
         data-overlay-scrollbar={scrollEnabled && !isMobileBreakpoint ? "true" : undefined}
         id={`agent-chat-scroll-${shouldUseVirtualizer ? "web-dom-virtualized" : "web-dom-scroll"}`}

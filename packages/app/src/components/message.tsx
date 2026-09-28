@@ -2879,6 +2879,11 @@ export const ExpandableBadge = memo(function ExpandableBadge({
     () => (isInteractive ? { expanded: isExpanded } : undefined),
     [isExpanded, isInteractive],
   );
+  // React Native Web drops accessibilityState.expanded; the timeline cursor toggles through it.
+  const webExpandedState = useMemo(
+    () => (isWeb && isInteractive ? ({ "aria-expanded": isExpanded } as const) : null),
+    [isExpanded, isInteractive],
+  );
 
   const isActive = isHovered || isExpanded;
 
@@ -2955,6 +2960,7 @@ export const ExpandableBadge = memo(function ExpandableBadge({
     >
       <Pressable
         {...pressHandlers}
+        {...webExpandedState}
         disabled={!isInteractive}
         accessibilityState={accessibilityState}
         style={pressableStyle}
