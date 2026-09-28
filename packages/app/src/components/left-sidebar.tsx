@@ -98,6 +98,8 @@ interface MobileSidebarProps extends SidebarSharedProps {
   closeSidebar: () => void;
 }
 
+const SIDEBAR_REGION_DATASET = { focusRegion: "sidebar" };
+
 interface DesktopSidebarProps extends SidebarSharedProps {
   insetsTop: number;
   active: boolean;
@@ -728,6 +730,8 @@ function DesktopSidebar({
       importantForAccessibility={active ? "auto" : "no-hide-descendants"}
       pointerEvents={active ? "auto" : "none"}
       style={desktopSidebarStyle}
+      dataSet={active ? SIDEBAR_REGION_DATASET : undefined}
+      tabIndex={-1}
     >
       <View style={desktopSidebarBorderStyle}>
         <View style={styles.sidebarDragArea}>
@@ -830,6 +834,7 @@ const workspacesSectionHeaderElement = <WorkspacesSectionHeader />;
 const staticStyles = RNStyleSheet.create({
   desktopSidebar: {
     position: "relative" as const,
+    outlineWidth: 0,
   },
   desktopSidebarHidden: {
     display: "none",
