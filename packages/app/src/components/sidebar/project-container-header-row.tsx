@@ -20,6 +20,8 @@ const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedFolder = withUnistyles(Folder);
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const EMPTY_WORKSPACES: SidebarWorkspacePlacement[] = [];
+// A j/k stop for the fork's sidebar row navigation (keyboard/nav-row-markers.ts in feat/vim-navigation).
+const NAV_ROW_DATASET = { navRow: "true" };
 
 export function ProjectContainerHeaderRow({
   container,
@@ -81,6 +83,7 @@ export function ProjectContainerHeaderRow({
             })}
             accessibilityState={accessibilityState}
             aria-expanded={!collapsed}
+            dataSet={NAV_ROW_DATASET}
             style={rowStyle}
             highlightStyle={styles.rowPressed}
             onPress={handlePress}
