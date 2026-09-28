@@ -1204,6 +1204,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       // Detached reading has one owner: reconcileReadingPosition.
       overflowAnchor: followOutput ? "auto" : "none",
       scrollbarWidth: overlayScrollbarEnabled ? "none" : undefined,
+      outline: "none",
     };
   }, [followOutput, isMobileBreakpoint, scrollEnabled]);
   const viewportStyle = useMemo(
@@ -1299,6 +1300,8 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       <div
         ref={handleScrollContainerRef}
         data-testid="agent-chat-scroll"
+        data-focus-region="timeline"
+        tabIndex={-1}
         data-overlay-scrollbar={scrollEnabled && !isMobileBreakpoint ? "true" : undefined}
         id={`agent-chat-scroll-${shouldUseVirtualizer ? "web-dom-virtualized" : "web-dom-scroll"}`}
         style={scrollContainerStyle}
