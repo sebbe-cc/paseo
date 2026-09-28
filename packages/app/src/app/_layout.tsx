@@ -89,6 +89,7 @@ import { useFaviconStatus } from "@/hooks/use-favicon-status";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { resolveExplorerSidebarPresentation } from "@/workspace-tabs/explorer-sidebar";
 import { KeyboardShiftProvider } from "@/keyboard/shift";
+import { useRowNavigation } from "@/keyboard/row-navigation";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
@@ -510,6 +511,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     exitFocusMode,
     cycleTheme,
   });
+  useRowNavigation();
 
   useActiveWorktreeNewAction();
   useGlobalNewWorkspaceAction();
