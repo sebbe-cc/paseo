@@ -62,6 +62,10 @@ import {
 import { normalizeWorkspaceTabTarget } from "@/workspace-tabs/identity";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 import { panelTargetSupportsHostForWorkspaceKey } from "@/plugins/workspace-panels/locations";
+import {
+  applyExplorerShellToLayout,
+  type ExplorerShell,
+} from "@/workspace-tabs/explorer-shell-layout";
 
 export {
   AMBIENT_PLACEMENT,
@@ -125,6 +129,8 @@ interface WorkspaceLayoutStore {
   /** Reveals the Explorer sidebar without selecting a view. Returns its pane id. */
   showExplorerSidebar: (workspaceKey: string) => string | null;
   hideExplorerSidebar: (workspaceKey: string) => void;
+  /** Gives the workspace's Explorer the shared tabs, selection, width and visibility at once. */
+  applyExplorerShell: (workspaceKey: string, shell: ExplorerShell) => void;
   /** Returns the ordinary right-side workspace pane, creating it when absent. */
   ensureSidePane: (workspaceKey: string, options?: { focus: boolean }) => string | null;
   closeTab: (workspaceKey: string, tabId: string) => void;
@@ -827,6 +833,56 @@ export function createWorkspaceLayoutStore(
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
               },
+            };
+          });
+        },
+        applyExplorerShell: (workspaceKey, shell) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          if (!normalizedWorkspaceKey) {
+            return;
+          }
+
+          set((state) => {
+            const layout = getWorkspaceLayout(state.layoutByWorkspace, normalizedWorkspaceKey);
+            const explorerPaneId = resolveExplorerSidebarPaneId(
+              layout,
+              state.explorerSidebarPaneIdByWorkspace[normalizedWorkspaceKey],
+            );
+            const nextLayout = explorerPaneId
+              ? applyExplorerShellToLayout({
+                  layout,
+                  explorerPaneId,
+                  shell,
+                  now: Date.now(),
+                  canHost: (target) =>
+                    panelTargetSupportsHostForWorkspaceKey(
+                      normalizedWorkspaceKey,
+                      target,
+                      "explorer",
+                    ),
+                })
+              : null;
+            const width =
+              shell.width !== null &&
+              shell.width !== state.explorerSidebarWidthByWorkspace[normalizedWorkspaceKey]
+                ? shell.width
+                : null;
+            if (!nextLayout && width === null) {
+              return state;
+            }
+
+            return {
+              layoutByWorkspace: nextLayout
+                ? { ...state.layoutByWorkspace, [normalizedWorkspaceKey]: nextLayout }
+                : state.layoutByWorkspace,
+              explorerSidebarPaneIdByWorkspace: {
+                ...state.explorerSidebarPaneIdByWorkspace,
+                [normalizedWorkspaceKey]: explorerPaneId,
+              },
+              explorerSidebarWidthByWorkspace:
+                width === null
+                  ? state.explorerSidebarWidthByWorkspace
+                  : { ...state.explorerSidebarWidthByWorkspace, [normalizedWorkspaceKey]: width },
             };
           });
         },
