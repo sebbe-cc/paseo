@@ -78,6 +78,7 @@ import {
   openWorkspaceTargetBeside,
 } from "@/workspace-tabs/open-beside";
 import { openWorkspacePullRequest } from "@/workspace-tabs/open-supporting-view";
+import { activateExplorerShell } from "@/workspace-tabs/explorer-shell";
 import { traceInstant } from "@/performance/native-trace";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import {
@@ -1509,6 +1510,13 @@ function WorkspaceScreenContent({
     },
     [openWorkspaceTabFocused, openWorkspaceTabInBackground, persistenceKey],
   );
+
+  useLayoutEffect(() => {
+    if (!isRouteFocused || !persistenceKey || !hasHydratedWorkspaceLayoutStore) {
+      return;
+    }
+    return activateExplorerShell(persistenceKey);
+  }, [hasHydratedWorkspaceLayoutStore, isRouteFocused, persistenceKey]);
 
   useLayoutEffect(() => {
     if (!isRouteFocused) {
