@@ -1,5 +1,6 @@
 import {
   buildExplorerCheckoutKey,
+  coerceExplorerTabForCheckout,
   isExplorerTab,
   resolveExplorerTabForCheckout,
   type ExplorerTab,
@@ -77,18 +78,6 @@ export function setMobilePanelTarget(
   return { target, revision: selection.revision + 1 };
 }
 
-function resolveExplorerTabFromCheckout(
-  state: PanelCoreState,
-  checkout: ExplorerCheckoutContext,
-): ExplorerTab {
-  return resolveExplorerTabForCheckout({
-    serverId: checkout.serverId,
-    cwd: checkout.cwd,
-    isGit: checkout.isGit,
-    explorerTabByCheckout: state.explorerTabByCheckout,
-  });
-}
-
 export interface OpenFileExplorerPatch {
   mobilePanel: MobilePanelSelection;
   explorerTab: ExplorerTab;
@@ -100,7 +89,8 @@ export function buildOpenFileExplorerPatch(
 ): OpenFileExplorerPatch {
   return {
     mobilePanel: setMobilePanelTarget(state.mobilePanel, "file-explorer"),
-    explorerTab: resolveExplorerTabFromCheckout(state, checkout),
+    // One tab for every workspace, like the pane Explorer's shell.
+    explorerTab: coerceExplorerTabForCheckout(state.explorerTab, checkout.isGit),
   };
 }
 
