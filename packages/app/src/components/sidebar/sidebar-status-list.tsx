@@ -80,6 +80,7 @@ import type { ToggleSidebarWorkspacePin } from "@/hooks/use-sidebar-workspace-pi
 import { DraggableList, type DraggableRenderItemInfo } from "@/components/draggable-list";
 import type { DraggableListDragHandleProps } from "@/components/draggable-list.types";
 import { useLongPressDragInteraction } from "@/components/sidebar/use-long-press-drag-interaction";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 // Themed icon wrappers
 const foregroundMutedColorMapping = (theme: Theme) => ({
@@ -433,6 +434,8 @@ function StatusGroupHeader({
         accessibilityRole={platformIsWeb ? undefined : "button"}
         accessibilityLabel={`${group.label} group`}
         accessibilityState={accessibilityState}
+        aria-expanded={!collapsed}
+        dataSet={NAV_ROW_DATASET}
         style={rowStyle}
         onPress={handlePress}
         testID={`sidebar-status-group-${group.key}`}
@@ -880,6 +883,8 @@ function StatusWorkspaceRowInnerContent({
               onTogglePin={onTogglePin}
               openInFileManagerPath={workspace.workspaceDirectory}
               disabled={isArchiving}
+              aria-selected={selected}
+              dataSet={NAV_ROW_DATASET}
               accessibilityRole="button"
               accessibilityState={accessibilityState}
               style={workspaceRowStyle}
