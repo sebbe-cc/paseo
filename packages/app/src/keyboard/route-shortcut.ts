@@ -65,6 +65,16 @@ const PASSTHROUGH_DISPATCH: Record<string, KeyboardActionDefinition> = {
   "workspace.pane.move-tab.down": { id: "workspace.pane.move-tab.down", scope: "workspace" },
   "workspace.pane.close": { id: "workspace.pane.close", scope: "workspace" },
   "view.toggle.focus": { id: "workspace.focus.toggle", scope: "workspace" },
+  "list.next": { id: "list.next", scope: "list" },
+  "list.prev": { id: "list.prev", scope: "list" },
+  "list.first": { id: "list.first", scope: "list" },
+  "list.last": { id: "list.last", scope: "list" },
+  "list.prompt.next": { id: "list.prompt.next", scope: "list" },
+  "list.prompt.prev": { id: "list.prompt.prev", scope: "list" },
+  "list.open": { id: "list.open", scope: "list" },
+  "list.expand": { id: "list.expand", scope: "list" },
+  "list.collapse": { id: "list.collapse", scope: "list" },
+  "list.insert": { id: "list.insert", scope: "list" },
 };
 
 const SIMPLE_CALLBACKS: Record<string, ShortcutCallbackName> = {
