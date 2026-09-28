@@ -849,6 +849,11 @@ function NewWorkspaceGhostRow({
   );
 }
 
+// A project row with a chevron is a j/k expand target; "collapse" means it is open now.
+function chevronExpanded(chevron: ProjectHeaderRowProps["chevron"]): boolean | undefined {
+  return chevron === null ? undefined : chevron === "collapse";
+}
+
 function ProjectHeaderRow({
   project,
   displayName,
@@ -1001,7 +1006,7 @@ function ProjectHeaderRow({
           onPressOut={handleProjectPressOut}
           onPress={handlePress}
           dataSet={NAV_ROW_DATASET}
-          aria-expanded={chevron === null ? undefined : chevron === "collapse"}
+          aria-expanded={chevronExpanded(chevron)}
           testID={`sidebar-project-row-${project.viewKey}`}
         >
           {rowChildren}
@@ -1029,7 +1034,7 @@ function ProjectHeaderRow({
           onPressOut={handleProjectPressOut}
           onPress={handlePress}
           dataSet={NAV_ROW_DATASET}
-          aria-expanded={chevron === null ? undefined : chevron === "collapse"}
+          aria-expanded={chevronExpanded(chevron)}
           testID={`sidebar-project-row-${project.viewKey}`}
         >
           {rowChildren}
