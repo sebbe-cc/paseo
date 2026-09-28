@@ -14,6 +14,7 @@ import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu";
 import { FileActionsContextMenuContent } from "@/components/file-actions-menu";
 import { isWeb } from "@/constants/platform";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 interface DiffFolderRowProps {
   /** full uncompressed directory path — the collapse identity */
@@ -148,6 +149,8 @@ export function DiffFolderRow({
           accessibilityRole="button"
           accessibilityState={accessibilityState}
           aria-selected={isSelected}
+          aria-expanded={!collapsed}
+          dataSet={NAV_ROW_DATASET}
           testID={testID ? `${testID}-toggle` : undefined}
         >
           <View style={leftStyle}>

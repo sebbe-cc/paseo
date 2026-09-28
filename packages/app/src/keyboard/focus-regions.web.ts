@@ -147,10 +147,10 @@ function focusRegion(region: Element): void {
   }
   const kind = regionKind(region);
   if (kind === "sidebar" || kind === "explorer") {
-    const selected = region.querySelector<HTMLElement>(`${ROW_SELECTOR}[aria-selected='true']`);
-    if (focusElement(selected) || focusElement(region.querySelector<HTMLElement>(ROW_SELECTOR))) {
-      return;
-    }
+    // Retained tabs keep hidden rows mounted, so only visible rows count.
+    const rows = Array.from(region.querySelectorAll<HTMLElement>(ROW_SELECTOR)).filter(isVisible);
+    const selected = rows.find((row) => row.getAttribute("aria-selected") === "true");
+    if (focusElement(selected ?? null) || focusElement(rows[0] ?? null)) return;
   }
   if (kind === "composer" && focusElement(region.querySelector("textarea"))) {
     return;

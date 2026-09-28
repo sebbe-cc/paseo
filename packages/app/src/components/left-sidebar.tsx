@@ -62,6 +62,7 @@ import {
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
+import { NAV_ROW_LIST_DATASET } from "@/keyboard/nav-row-markers";
 
 type SidebarTheme = ReturnType<typeof useUnistyles>["theme"];
 
@@ -108,7 +109,7 @@ interface MobileSidebarProps extends SidebarSharedProps {
   closeSidebar: () => void;
 }
 
-const SIDEBAR_REGION_DATASET = { focusRegion: "sidebar" };
+const SIDEBAR_REGION_DATASET = { focusRegion: "sidebar", ...NAV_ROW_LIST_DATASET };
 
 interface DesktopSidebarProps extends SidebarSharedProps {
   insetsTop: number;
