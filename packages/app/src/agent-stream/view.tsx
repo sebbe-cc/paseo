@@ -86,6 +86,8 @@ import {
   type BottomAnchorRouteRequest,
 } from "./bottom-anchor-controller";
 import { createAssistantImageOccurrenceKey } from "@/assistant-image/acquisition-cache";
+import { TimelineSelectionHost } from "@/plugins/timeline-selection/host";
+import { TimelineSelectionSource } from "@/assistant-selection-copy/timeline-selection";
 import { AssistantSelectionCopySurface } from "@/assistant-selection-copy/surface";
 import {
   AssistantFileLinkResolverProvider,
@@ -837,13 +839,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           >
             {expanded
               ? group.run.calls.map((call, index) => (
-                  <React.Fragment key={call.id}>
+                  <TimelineSelectionSource key={call.id} itemId={call.id} surfaceId="tool_call">
                     {renderSingleToolCallItem(
                       call,
                       index === group.run.calls.length - 1,
                       GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT,
                     )}
-                  </React.Fragment>
+                  </TimelineSelectionSource>
                 ))
               : null}
           </OverviewToolCallGroupView>
@@ -911,7 +913,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     const renderStreamItem = useCallback(
       (layoutItem: StreamLayoutItem) => {
-        const content = renderStreamItemContent(layoutItem);
+        const content = (
+          <TimelineSelectionSource itemId={layoutItem.item.id} surfaceId={layoutItem.item.kind}>
+            {renderStreamItemContent(layoutItem)}
+          </TimelineSelectionSource>
+        );
         return renderStreamItemWithTurnFooter({
           content,
           layoutItem,
@@ -1095,6 +1101,21 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       () => [...effectiveStreamItems, ...(effectiveStreamHead ?? [])],
       [effectiveStreamItems, effectiveStreamHead],
     );
+    const scrollToBottomIndicator = (!isNearBottom || isTimelineDetached) && (
+      <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
+        <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
+          <Pressable
+            style={stylesheet.scrollToBottomButton}
+            onPress={scrollToBottom}
+            accessibilityRole="button"
+            accessibilityLabel={t("agentStream.scrollToBottom")}
+            testID="scroll-to-bottom-button"
+          >
+            <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
+          </Pressable>
+        </Animated.View>
+      </View>
+    );
     return (
       <ChatFind
         agentId={agentId}
@@ -1106,52 +1127,45 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         visibleMessageIds={visibleMessageIds}
       >
         <ToolCallSheetProvider>
-          <AssistantSelectionCopySurface style={stylesheet.container}>
-            <MessageOuterSpacingProvider disableOuterSpacing>
-              {streamRenderStrategy.render({
-                agentId,
-                segments: renderModel.segments,
-                historyRowRevision,
-                liveHeadRowRevision: expandedToolCallGroupIds,
-                boundary,
-                renderers,
-                listEmptyComponent,
-                viewportRef,
-                routeBottomAnchorRequest,
-                isAuthoritativeHistoryReady,
-                onNearBottomChange: setIsNearBottom,
-                onReadingPositionChange: handleReadingPositionChange,
-                onNearHistoryStart: loadOlder,
-                isLoadingOlderHistory: isLoadingOlder,
-                hasOlderHistory: hasOlder,
-                olderHistoryProgressKey: progressKey,
-                scrollEnabled: streamScrollEnabled,
-                listStyle: stylesheet.list,
-                baseListContentContainerStyle: stylesheet.listContentContainer,
-                forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
-              })}
-            </MessageOuterSpacingProvider>
-            <ChatOutlineRail
-              prompts={chatOutline.prompts}
-              activePrompt={chatOutline.activePrompt}
-              onJumpToPrompt={chatOutline.jumpToPrompt}
-            />
-            {(!isNearBottom || isTimelineDetached) && (
-              <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
-                <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-                  <Pressable
-                    style={stylesheet.scrollToBottomButton}
-                    onPress={scrollToBottom}
-                    accessibilityRole="button"
-                    accessibilityLabel={t("agentStream.scrollToBottom")}
-                    testID="scroll-to-bottom-button"
-                  >
-                    <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-                  </Pressable>
-                </Animated.View>
-              </View>
-            )}
-          </AssistantSelectionCopySurface>
+          <TimelineSelectionHost
+            key={`${resolvedServerId}/${agentId}`}
+            serverId={resolvedServerId}
+            agentId={agentId}
+            enabled={!readOnly}
+          >
+            <AssistantSelectionCopySurface style={stylesheet.container}>
+              <MessageOuterSpacingProvider disableOuterSpacing>
+                {streamRenderStrategy.render({
+                  agentId,
+                  segments: renderModel.segments,
+                  historyRowRevision,
+                  liveHeadRowRevision: expandedToolCallGroupIds,
+                  boundary,
+                  renderers,
+                  listEmptyComponent,
+                  viewportRef,
+                  routeBottomAnchorRequest,
+                  isAuthoritativeHistoryReady,
+                  onNearBottomChange: setIsNearBottom,
+                  onReadingPositionChange: handleReadingPositionChange,
+                  onNearHistoryStart: loadOlder,
+                  isLoadingOlderHistory: isLoadingOlder,
+                  hasOlderHistory: hasOlder,
+                  olderHistoryProgressKey: progressKey,
+                  scrollEnabled: streamScrollEnabled,
+                  listStyle: stylesheet.list,
+                  baseListContentContainerStyle: stylesheet.listContentContainer,
+                  forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
+                })}
+              </MessageOuterSpacingProvider>
+              <ChatOutlineRail
+                prompts={chatOutline.prompts}
+                activePrompt={chatOutline.activePrompt}
+                onJumpToPrompt={chatOutline.jumpToPrompt}
+              />
+              {scrollToBottomIndicator}
+            </AssistantSelectionCopySurface>
+          </TimelineSelectionHost>
         </ToolCallSheetProvider>
       </ChatFind>
     );
