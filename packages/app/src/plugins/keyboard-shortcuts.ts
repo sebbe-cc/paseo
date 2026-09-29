@@ -22,6 +22,13 @@ function matches(input: KeyboardShortcutInput, combo: KeyCombo, isMac: boolean):
   );
 }
 
+function usesModifier(combo: KeyCombo, key: string, isMac: boolean): boolean {
+  if (key === "Alt") return combo.alt === true;
+  if (key === "Control") return combo.ctrl === true || (!isMac && combo.mod === true);
+  if (key === "Meta") return combo.meta === true || (isMac && combo.mod === true);
+  return false;
+}
+
 export const pluginKeyboardShortcuts = {
   add(serverId: string, contribution: PluginKeyboardShortcutContribution) {
     if (typeof contribution.onPress !== "function")
@@ -60,6 +67,16 @@ export const pluginKeyboardShortcuts = {
       }
     }
     return false;
+  },
+  release(key: string | null, isMac: boolean): void {
+    for (const registration of registrations) {
+      if (key !== null && !usesModifier(registration.parsed, key, isMac)) continue;
+      try {
+        registration.onRelease?.();
+      } catch (error) {
+        console.warn("[Plugins] Keyboard shortcut release failed", error);
+      }
+    }
   },
   browserPrefixes(isMac: boolean): BrowserShortcutPrefix[] {
     return [...registrations].map(({ parsed }) => ({

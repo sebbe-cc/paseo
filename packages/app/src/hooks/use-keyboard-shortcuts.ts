@@ -382,6 +382,7 @@ export function useKeyboardShortcuts({
 
   const handleKeyUp = useStableEvent((event: KeyboardEvent) => {
     const key = event.key ?? "";
+    pluginKeyboardShortcuts.release(key, isMac);
     if (key === badgeModifierKey) {
       setBadgeModifierDown(false);
     }
@@ -390,6 +391,10 @@ export function useKeyboardShortcuts({
   const handleBrowserShortcutInput = useStableEvent((payload: unknown) => {
     const input = parseBrowserShortcutInput(payload);
     if (!input) {
+      return;
+    }
+    if (input.type === "keyUp") {
+      pluginKeyboardShortcuts.release(input.key, isMac);
       return;
     }
     if (pluginKeyboardShortcuts.dispatch(input, isMac)) return;
@@ -406,6 +411,7 @@ export function useKeyboardShortcuts({
     if (!shortcutsAvailable) return;
 
     const handleBlurOrHide = () => {
+      pluginKeyboardShortcuts.release(null, isMac);
       resetModifiers();
     };
 
@@ -441,6 +447,7 @@ export function useKeyboardShortcuts({
     handleBrowserShortcutInput,
     handleKeyDown,
     handleKeyUp,
+    isMac,
     resetModifiers,
     shortcutsAvailable,
   ]);
