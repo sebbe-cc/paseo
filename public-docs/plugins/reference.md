@@ -166,6 +166,21 @@ The scaffold's `tsconfig.json` omits the DOM library. Keep DOM globals out of cr
 components; do not add `/// <reference lib="dom" />` or `"DOM"` to `lib`.
 `layout.platform` carries the same value as React Native's `Platform.OS` for rendering decisions.
 
+### Recent navigation and keyboard shortcuts
+
+Client plugins can observe and activate app navigation through `client.navigation`.
+`getActive()` returns `{ serverId, workspaceId, tabId }` or `null`; `tabId` is `null`
+when the active workspace has no focused tab. `subscribe(listener)` reports changes
+and returns an unsubscribe function. `activateWorkspace({ serverId, workspaceId })`
+and `activateTab({ serverId, workspaceId, tabId })` return `false` when the target no
+longer exists. They preserve the selected tab and never create a new one.
+
+`client.addKeyboardShortcut({ combo, onPress })` registers one modified key such as
+`Alt+Tab` or `Ctrl+Tab`, including inside an Electron browser tab. The callback can
+return `false` to leave the key available to Paseo's built-in shortcuts. It returns
+an idempotent remover and is also removed when the plugin stops. Operating system
+shortcuts take precedence if the OS intercepts a key before it reaches Paseo.
+
 ### External links and workspace browsers
 
 Use `ExternalLink` to open documentation outside Paseo:

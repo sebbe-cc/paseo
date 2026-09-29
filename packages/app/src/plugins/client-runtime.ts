@@ -13,6 +13,8 @@ import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
 import { createPluginSurfaceRuntime } from "./surface-runtime";
 import type { InstalledPlugin } from "./types";
+import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
+import { pluginRecentNavigation } from "./recent-navigation";
 
 export function createPluginClientRuntime(
   installation: InstalledPlugin,
@@ -28,6 +30,9 @@ export function createPluginClientRuntime(
   );
   return {
     ...capabilities,
+    navigation: pluginRecentNavigation,
+    addKeyboardShortcut: (contribution) =>
+      pluginKeyboardShortcuts.add(installation.serverId, contribution),
     hosts: createPluginHosts(getHostRuntimeStore(), installation.lifetime.signal),
     addComposerPill(contribution) {
       return pluginButtonStore.addComposerPill(installation, contribution);
