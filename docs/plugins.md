@@ -188,7 +188,9 @@ Shared files import contract helpers and types from `@getpaseo/plugin`. Server h
 set; an unknown name renders nothing so it cannot break the plugin surface.
 Its controlled modal keeps presentation metadata on `<Modal title="…" icon={…}>` and body UI in
 `<Modal.Content>`. Body layout, sheet-aware scrolling, and clipboard actions follow the
-[host UI contract](../public-docs/plugins/reference.md#host-ui).
+[host UI contract](../public-docs/plugins/reference.md#host-ui). Its `WebView` is the only way a
+plugin renders HTML: plugins cannot import `react-native-webview`, and the host component keeps the
+[HTML file preview](../SECURITY.md#html-file-preview) containment on every platform.
 Plugin UI runs on desktop and mobile across multiple themes: color every `Text` from
 `theme.colors.foreground` or `theme.colors.foregroundMuted`, and size layout from `layout.compact`.
 See `public-docs/plugins/reference.md`.
