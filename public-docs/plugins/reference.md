@@ -201,6 +201,21 @@ Browsers require user interaction before allowing sound; handle rejection and of
 play button. The function plays on the device running the plugin client, not on the daemon,
 and does not promise delivery while the app is suspended or closed.
 
+### Recent navigation and keyboard shortcuts
+
+Client plugins can observe and activate app navigation through `client.navigation`.
+`getActive()` returns `{ serverId, workspaceId, tabId }` or `null`; `tabId` is `null`
+when the active workspace has no focused tab. `subscribe(listener)` reports changes
+and returns an unsubscribe function. `activateWorkspace({ serverId, workspaceId })`
+and `activateTab({ serverId, workspaceId, tabId })` return `false` when the target no
+longer exists. They preserve the selected tab and never create a new one.
+
+`client.addKeyboardShortcut({ combo, onPress })` registers one modified key such as
+`Alt+Tab` or `Ctrl+Tab`, including inside an Electron browser tab. The callback can
+return `false` to leave the key available to Paseo's built-in shortcuts. It returns
+an idempotent remover and is also removed when the plugin stops. Operating system
+shortcuts take precedence if the OS intercepts a key before it reaches Paseo.
+
 ### External links and workspace browsers
 
 Use `ExternalLink` to open documentation outside Paseo:

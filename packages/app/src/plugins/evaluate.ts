@@ -100,6 +100,8 @@ export type PluginClientRuntime = Pick<
   | "openPanel"
   | "addComposerPill"
   | "addHeaderButton"
+  | "addKeyboardShortcut"
+  | "navigation"
 > & { hosts: ReturnType<typeof createPluginHosts> };
 
 export function runPluginClientBundle(
@@ -194,6 +196,19 @@ export function runPluginClientBundle(
   }
   const pluginContext: PluginClientContext = {
     ...runtime,
+    addKeyboardShortcut(contribution) {
+      if (stopped) throw new Error("Plugin has stopped");
+      const release = runtime.addKeyboardShortcut(contribution);
+      let active = true;
+      const remove = () => {
+        if (!active) return;
+        active = false;
+        release();
+        removals.delete(remove);
+      };
+      removals.add(remove);
+      return remove;
+    },
     addSettingsScreen(contribution) {
       const screenId = requireId(contribution.id, "settings screen id");
       if (settingsScreenIds.has(screenId))
