@@ -35,14 +35,22 @@ export function MenuRoot({
   defaultOpen,
   onOpenChange,
   compactMode,
+  dismissKeyboardOnOpen,
   children,
 }: PropsWithChildren<{
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   compactMode?: MenuCompactMode;
+  dismissKeyboardOnOpen?: boolean;
 }>): ReactElement {
-  const value = useMenuState({ open, defaultOpen, onOpenChange, compactMode });
+  const value = useMenuState({
+    open,
+    defaultOpen,
+    onOpenChange,
+    compactMode,
+    dismissKeyboardOnOpen,
+  });
   return <MenuContextProvider value={value}>{children}</MenuContextProvider>;
 }
 

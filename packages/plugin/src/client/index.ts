@@ -1,5 +1,9 @@
 export type {
   PluginHostProps,
+  PluginTimelineSelection,
+  PluginTimelineSelectionSegment,
+  PluginTimelineSelectionActionProps,
+  PluginTimelineSelectionActionContribution,
   PluginSurfaceProps,
   PluginIconProps,
   PluginPanelLocation,

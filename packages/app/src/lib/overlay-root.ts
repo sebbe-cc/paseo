@@ -85,6 +85,7 @@ interface WebOverlayEntry {
   id: symbol;
   order: number;
   getLayer: () => number;
+  getManageFocus: () => boolean;
   getScope: () => HTMLElement | null;
   getKeyHandler: () => WebOverlayKeyHandler;
   restoreFocus: HTMLElement | null;
@@ -129,18 +130,19 @@ function getFocusableElements(scope: HTMLElement): HTMLElement[] {
   );
 }
 
-function focusFirstElement(scope: HTMLElement): void {
+export function focusFirstElement(scope: HTMLElement): void {
   const firstMenuItem = scope.querySelector<HTMLElement>(
     '[data-menu-item="true"]:not([data-menu-disabled="true"])',
   );
-  const first = firstMenuItem ?? getFocusableElements(scope)[0];
+  const surface = scope.querySelector<HTMLElement>('[data-menu-surface="true"]') ?? scope;
+  const first = firstMenuItem ?? getFocusableElements(surface)[0];
   (first ?? scope).focus();
 }
 
 function handleWebOverlayFocus(event: FocusEvent): void {
   const top = getTopWebOverlay();
   const scope = top?.getScope();
-  if (!scope || scope.contains(event.target as Node)) return;
+  if (!top?.getManageFocus() || !scope || scope.contains(event.target as Node)) return;
   if (webOverlayFocusCheckQueued) return;
 
   // React can autofocus a child before its parent scope ref attaches. Defer
@@ -149,7 +151,9 @@ function handleWebOverlayFocus(event: FocusEvent): void {
   webOverlayFocusCheckQueued = true;
   queueMicrotask(() => {
     webOverlayFocusCheckQueued = false;
-    const currentScope = getTopWebOverlay()?.getScope();
+    const current = getTopWebOverlay();
+    if (!current?.getManageFocus()) return;
+    const currentScope = current.getScope();
     if (!currentScope || currentScope.contains(document.activeElement)) return;
     focusFirstElement(currentScope);
   });
@@ -169,7 +173,7 @@ export function dispatchTopWebOverlayKeyDown(event: KeyboardEvent): boolean {
   const scope = top?.getScope();
   if (!top || !scope) return false;
 
-  if (event.key === "Tab") {
+  if (event.key === "Tab" && top.getManageFocus()) {
     const focusable = getFocusableElements(scope);
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -214,7 +218,12 @@ function addWebOverlay(entry: WebOverlayEntry): (options?: RemoveWebOverlayOptio
 
   const focusFrame = window.requestAnimationFrame(() => {
     const scope = entry.getScope();
-    if (getTopWebOverlay() === entry && scope && !scope.contains(document.activeElement)) {
+    if (
+      entry.getManageFocus() &&
+      getTopWebOverlay() === entry &&
+      scope &&
+      !scope.contains(document.activeElement)
+    ) {
       focusFirstElement(scope);
     }
   });
@@ -225,6 +234,7 @@ function addWebOverlay(entry: WebOverlayEntry): (options?: RemoveWebOverlayOptio
     if (index !== -1) webOverlayEntries.splice(index, 1);
     detachWebOverlayListeners();
     if (
+      entry.getManageFocus() &&
       options?.restoreFocus !== false &&
       entry.restoreFocus &&
       document.contains(entry.restoreFocus)
@@ -235,6 +245,7 @@ function addWebOverlay(entry: WebOverlayEntry): (options?: RemoveWebOverlayOptio
 }
 
 interface WebOverlayRegistration {
+  manageFocus?: boolean;
   active: boolean;
   layer: number;
   onKeyDown: WebOverlayKeyHandler;
@@ -247,6 +258,7 @@ interface WebOverlayRegistration {
  * there and restored to the opener when that overlay closes.
  */
 export function useWebOverlayRegistration({
+  manageFocus = true,
   active,
   layer,
   onKeyDown,
@@ -255,6 +267,7 @@ export function useWebOverlayRegistration({
   const idRef = useRef(Symbol("web-overlay"));
   const scopeRef = useRef<HTMLElement | null>(null);
   const layerRef = useRef(layer);
+  const manageFocusRef = useRef(manageFocus);
   const keyHandlerRef = useRef(onKeyDown);
   const capturedRestoreFocusRef = useRef<HTMLElement | null>(null);
   const removeEntryRef = useRef<((options?: RemoveWebOverlayOptions) => void) | null>(null);
@@ -265,6 +278,7 @@ export function useWebOverlayRegistration({
 
   activeRef.current = active;
   layerRef.current = layer;
+  manageFocusRef.current = manageFocus;
   keyHandlerRef.current = onKeyDown;
   if (active && !wasActiveRef.current && typeof document !== "undefined") {
     const requestedRestoreTarget = preferredRestoreFocusRef?.current;
@@ -302,6 +316,7 @@ export function useWebOverlayRegistration({
       id: idRef.current,
       order: ++webOverlayOrder,
       getLayer: () => layerRef.current,
+      getManageFocus: () => manageFocusRef.current,
       getScope: () => scopeRef.current,
       getKeyHandler: () => keyHandlerRef.current,
       restoreFocus: capturedRestoreFocusRef.current,
