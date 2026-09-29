@@ -2159,6 +2159,24 @@ export function reorderPaneTabsInLayout(
   });
 }
 
+/** Sets a pane's tabs and selection in one step; tabs left out are dropped from the layout. */
+export function replacePaneTabsInLayout(input: {
+  layout: WorkspaceLayout;
+  paneId: string;
+  tabs: WorkspaceTab[];
+  focusedTabId: string | null;
+}): WorkspaceLayout {
+  const layout = asInternalLayout(input.layout);
+  return withNormalizedParentTabMap({
+    root: updatePaneInTree(layout.root, {
+      paneId: input.paneId,
+      updater: (pane) => ({ ...pane, tabs: input.tabs, focusedTabId: input.focusedTabId }),
+    }),
+    focusedPaneId: layout.focusedPaneId,
+    parentTabIdByTabId: input.layout.parentTabIdByTabId,
+  });
+}
+
 function normalizeStringSet(values: Iterable<string>): Set<string> {
   const next = new Set<string>();
   for (const value of values) {
