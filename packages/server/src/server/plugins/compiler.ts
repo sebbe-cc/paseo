@@ -413,7 +413,24 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
-  return wrapCommonJsBundle(makeHermesInteropEager(output));
+  const code = target === "client" ? await lowerClassesForHermes(output) : output;
+  return wrapCommonJsBundle(makeHermesInteropEager(code));
+}
+
+async function lowerClassesForHermes(code: string): Promise<string> {
+  // Hermes compiles eval'd sources of 64 KiB or more lazily and skips its class
+  // transform there, leaving class bindings undefined. esbuild cannot lower classes.
+  if (!/\bclass\b/.test(code)) return code;
+  const babel = nodeRequire("@babel/core") as typeof import("@babel/core");
+  const result = await babel.transformAsync(code, {
+    babelrc: false,
+    configFile: false,
+    compact: false,
+    sourceType: "script",
+    plugins: [nodeRequire("@babel/plugin-transform-classes")],
+  });
+  if (!result?.code) throw new Error("Plugin client class lowering produced no output");
+  return result.code;
 }
 
 export async function compilePlugin(entryPaths: {
