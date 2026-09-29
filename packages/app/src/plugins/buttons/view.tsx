@@ -633,7 +633,7 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.borderAccent,
   },
-  button: { flexShrink: 1, minWidth: 0, maxWidth: 160 },
+  button: { flexShrink: 1, minWidth: 0, maxWidth: 200 },
   active: { backgroundColor: theme.colors.surface2 },
   disabled: { opacity: theme.opacity[50] },
   tooltipLabel: { fontSize: theme.fontSize.sm, color: theme.colors.foreground },

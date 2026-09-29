@@ -22,8 +22,9 @@ import { COMPOSER_PILL_CLEARANCE, composerPillStyles } from "./pill-styles";
  *
  * Trackers expose a count and a detail panel; plugin actions expose their own icon and text.
  * Trackers used to be stacked cards, so every one of them pushed the composer further down the
- * pane. Built-in and contributed pills share this one-line rail and its deterministic geometry
- * on every platform.
+ * pane. Built-in and contributed pills share this rail and its deterministic geometry on every
+ * platform. Pills keep their natural width and wrap onto another row when one row cannot fit
+ * them, instead of shrinking into unreadability.
  *
  * The bar floats over the transcript with no background, so content remains visible underneath.
  * Its host gives the scroll viewport a small bottom inset only when the bar exists; that keeps
@@ -318,6 +319,9 @@ const styles = StyleSheet.create((theme) => {
       left: 0,
       right: 0,
       bottom: 0,
+      // Breathing room between the pills and the transcript above. The bar floats with no
+      // background, so without it a (possibly wrapped) row sits flush against the last line.
+      marginTop: theme.spacing[2],
       alignItems: "center",
       paddingHorizontal: theme.spacing[4],
       paddingBottom: {
@@ -329,6 +333,9 @@ const styles = StyleSheet.create((theme) => {
       width: "100%",
       maxWidth: theme.contentMaxWidth,
       flexDirection: "row",
+      // Pills wrap onto another row instead of shrinking: one crowded row squeezes labels
+      // until they are unreadable.
+      flexWrap: "wrap",
       alignItems: "center",
       gap: theme.spacing[1],
     },
