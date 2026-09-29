@@ -139,6 +139,8 @@ import {
   AttachmentPill,
   AttachmentThumbnail,
 } from "@/components/attachment-pill";
+import { PluginResourcePreview } from "@/plugins/attachments/preview";
+import type { PluginResourceComposerAttachment } from "@/plugins/attachments/model";
 import { AttachmentLightbox, type ImageLightboxSource } from "@/components/attachment-lightbox";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { useIsDictationReady } from "@/hooks/use-is-dictation-ready";
@@ -975,6 +977,7 @@ interface ComposerProps {
   autoFocus?: boolean;
   /** Changing this value requests focus again while autoFocus remains true. */
   autoFocusKey?: string;
+  focusRequestId?: number;
   /** Callback to expose a focus function to parent components (desktop only). */
   onFocusInput?: (focus: () => void) => void;
   /** Optional draft context for listing commands before an agent exists. */
@@ -1267,6 +1270,7 @@ function ComposerContentImpl({
   clearDraft,
   autoFocus = false,
   autoFocusKey,
+  focusRequestId = 0,
   onFocusInput,
   commandDraftConfig,
   onMessageSent,
@@ -1385,9 +1389,18 @@ function ComposerContentImpl({
   const [isMessageInputFocused, setIsMessageInputFocused] = useState(false);
   const [isGithubPickerOpen, setIsGithubPickerOpen] = useState(false);
   const [githubSearchQuery, setGithubSearchQuery] = useState("");
+  const [textPreview, setTextPreview] = useState<PluginResourceComposerAttachment | null>(null);
+  const closeTextPreview = useCallback(() => setTextPreview(null), []);
   const [lightboxMetadata, setLightboxMetadata] = useState<AttachmentMetadata | null>(null);
   const attachButtonRef = useRef<View | null>(null);
   const messageInputRef = useRef<MessageInputRef>(null);
+  const previousFocusRequest = useRef(focusRequestId);
+  const { isActiveComposer } = useComposerKeyboardScope();
+  useEffect(() => {
+    const requested = previousFocusRequest.current !== focusRequestId;
+    previousFocusRequest.current = focusRequestId;
+    if (requested && isActiveComposer) messageInputRef.current?.focus();
+  }, [focusRequestId, isActiveComposer]);
   const pluginAttachments = usePluginAttachmentPicker({
     serverId,
     client,
@@ -1880,6 +1893,7 @@ function ComposerContentImpl({
       openComposerAttachment({
         attachment,
         setLightboxMetadata,
+        openTextAttachment: setTextPreview,
         openWorkspaceAttachment: openAttachment,
         openExternalUrl: (url) => {
           void openExternalUrl(url);
@@ -2413,6 +2427,7 @@ function ComposerContentImpl({
       />
       <View style={animatedStaticStyles.container}>
         <AttachmentLightbox source={lightboxSource} onClose={handleLightboxClose} />
+        <PluginResourcePreview attachment={textPreview} onClose={closeTextPreview} />
         {/* Input area */}
         <View style={inputAreaContainerStyle}>
           <View style={styles.inputAreaContent}>

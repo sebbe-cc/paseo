@@ -1634,7 +1634,7 @@ function ActiveAgentComposer({
         cwd={cwd}
         clearDraft={agentInputDraft.clear}
         autoFocus
-        autoFocusKey={String(agentInputDraft.attachmentFocusRequestId)}
+        focusRequestId={agentInputDraft.attachmentFocusRequestId}
         isSubmitLoading={isSubmitLoading}
         onAttentionInputFocus={onAttentionInputFocus}
         onAttentionPromptSend={onAttentionPromptSend}
