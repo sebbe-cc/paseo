@@ -50,3 +50,26 @@ test("forwards modified browser keys to the active host's plugin", () => {
   expect(activeHost).toHaveBeenCalledOnce();
   expect(otherHost).not.toHaveBeenCalled();
 });
+
+test("releases only shortcuts using the released modifier", () => {
+  const controlRelease = vi.fn();
+  const altRelease = vi.fn();
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", {
+      combo: "Ctrl+Tab",
+      onPress: () => true,
+      onRelease: controlRelease,
+    }),
+    pluginKeyboardShortcuts.add("host-a", {
+      combo: "Alt+Tab",
+      onPress: () => true,
+      onRelease: altRelease,
+    }),
+  );
+
+  pluginKeyboardShortcuts.release("Control", true);
+  expect(controlRelease).toHaveBeenCalledOnce();
+  expect(altRelease).not.toHaveBeenCalled();
+  pluginKeyboardShortcuts.release(null, true);
+  expect(altRelease).toHaveBeenCalledOnce();
+});
