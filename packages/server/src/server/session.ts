@@ -9,7 +9,11 @@ import type { CreationSnapshot, AgentCreateRequest } from "@getpaseo/protocol/me
 import type { MessageReceipts } from "./message-receipts/index.js";
 import equal from "fast-deep-equal";
 import { SessionDelivery, type OwnedSubscription } from "./session/owned-subscriptions/index.js";
-import type { ProjectContainerService } from "./project-containers/index.js";
+import type {
+  ProjectContainerFilesService,
+  ProjectContainerService,
+} from "./project-containers/index.js";
+import { dispatchProjectContainerFilesMessage } from "./session-project-container-files.js";
 import { dispatchProjectContainerMessage } from "./session-project-containers.js";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -462,6 +466,7 @@ export interface SessionOptions {
   directorySync?: DirectorySyncService;
   workspaceLabelService?: WorkspaceLabelService;
   projectContainerService?: ProjectContainerService;
+  projectContainerFilesService?: ProjectContainerFilesService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
   checkoutDiffManager: CheckoutDiffManager;
@@ -758,6 +763,7 @@ export class Session {
   >();
   private readonly workspaceLabelService: WorkspaceLabelService | null;
   private readonly projectContainerService: ProjectContainerService | undefined;
+  private readonly projectContainerFilesService: ProjectContainerFilesService | undefined;
   private readonly eventSubscriptions = new Map<
     string,
     { owner: OwnedSubscription; events: Set<SessionEventSubscription>; notifications: boolean }
@@ -817,6 +823,7 @@ export class Session {
       directorySync,
       workspaceLabelService,
       projectContainerService,
+      projectContainerFilesService,
       filesystem,
       scheduleService,
       checkoutDiffManager,
@@ -893,6 +900,7 @@ export class Session {
     this.directorySync = resolveDirectorySync(directorySync);
     this.workspaceLabelService = resolveWorkspaceLabelService(workspaceLabelService);
     this.projectContainerService = projectContainerService;
+    this.projectContainerFilesService = projectContainerFilesService;
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
@@ -2306,6 +2314,14 @@ export class Session {
       dispatchProjectContainerMessage(
         {
           service: this.projectContainerService,
+          delivery: this.delivery,
+          emit: (m) => this.emit(m),
+        },
+        msg,
+      ) ??
+      dispatchProjectContainerFilesMessage(
+        {
+          service: this.projectContainerFilesService,
           delivery: this.delivery,
           emit: (m) => this.emit(m),
         },
