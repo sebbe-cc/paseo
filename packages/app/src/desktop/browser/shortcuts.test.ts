@@ -291,6 +291,21 @@ describe("parseBrowserShortcutInput", () => {
     ).toMatchObject({ browserId: " browser-1 " });
   });
 
+  it("preserves modifier releases from an embedded browser", () => {
+    expect(
+      parseBrowserShortcutInput({
+        browserId: "browser-1",
+        key: "Control",
+        code: "ControlLeft",
+        meta: false,
+        control: false,
+        shift: false,
+        alt: false,
+        type: "keyUp",
+      }),
+    ).toMatchObject({ key: "Control", type: "keyUp" });
+  });
+
   it.each([
     {
       name: "a missing browser identity",
