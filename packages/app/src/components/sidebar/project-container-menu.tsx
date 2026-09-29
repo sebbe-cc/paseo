@@ -1,7 +1,7 @@
 import { useCallback, type ReactElement } from "react";
 import { withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
-import { ArrowDown, ArrowUp, Pencil, Trash2 } from "lucide-react-native";
+import { ArrowDown, ArrowUp, Pencil, Settings, Trash2 } from "lucide-react-native";
 import {
   isValidProjectContainerName,
   normalizeProjectContainerName,
@@ -11,19 +11,35 @@ import { ContextMenuItem } from "@/components/ui/context-menu";
 import { AdaptiveRenameModal } from "@/components/rename-modal";
 import { useToast } from "@/contexts/toast-context";
 import { deleteContainer, moveContainer, renameContainer } from "@/project-containers/actions";
-import { projectContainerErrorMessage, type MergedProjectContainer } from "@/project-containers";
+import {
+  projectContainerErrorMessage,
+  useProjectContainers,
+  type MergedProjectContainer,
+} from "@/project-containers";
+import { openProjectSettings } from "@/navigation/settings-navigation";
 import type { Theme } from "@/styles/theme";
 import { confirmDialog } from "@/utils/confirm-dialog";
 
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const ThemedPencil = withUnistyles(Pencil);
+const ThemedSettings = withUnistyles(Settings);
 const ThemedArrowUp = withUnistyles(ArrowUp);
 const ThemedArrowDown = withUnistyles(ArrowDown);
 const ThemedTrash2 = withUnistyles(Trash2);
 const renameIcon = <ThemedPencil size={14} uniProps={mutedMapping} />;
+const settingsIcon = <ThemedSettings size={14} uniProps={mutedMapping} />;
 const moveUpIcon = <ThemedArrowUp size={14} uniProps={mutedMapping} />;
 const moveDownIcon = <ThemedArrowDown size={14} uniProps={mutedMapping} />;
 const deleteIcon = <ThemedTrash2 size={14} uniProps={mutedMapping} />;
+
+/** Settings open on a host that is online, so the notes load; else the first placement. */
+function openContainerSettings(container: MergedProjectContainer): void {
+  const hosts = useProjectContainers.getState().hosts;
+  const placement =
+    container.placements.find((candidate) => hosts[candidate.serverId]?.status === "online") ??
+    container.placements[0];
+  if (placement) openProjectSettings(placement.serverId, placement.containerId);
+}
 
 export function ProjectContainerMenuItems({
   container,
@@ -60,9 +76,18 @@ export function ProjectContainerMenuItems({
       .catch(reportError);
   }, [container, reportError, t]);
 
+  const handleOpenSettings = useCallback(() => openContainerSettings(container), [container]);
+
   const testID = `sidebar-project-container-menu-${container.key}`;
   return (
     <>
+      <ContextMenuItem
+        leading={settingsIcon}
+        onSelect={handleOpenSettings}
+        testID={`${testID}-settings`}
+      >
+        {t("projectContainers.menu.openSettings")}
+      </ContextMenuItem>
       <ContextMenuItem leading={renameIcon} onSelect={onRename} testID={`${testID}-rename`}>
         {t("projectContainers.menu.rename")}
       </ContextMenuItem>
