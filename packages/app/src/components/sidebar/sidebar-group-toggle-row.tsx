@@ -6,6 +6,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { isWeb } from "@/constants/platform";
 import { sidebarWorkspaceRowStyles } from "@/components/sidebar/sidebar-workspace-row-content";
 import type { Theme } from "@/styles/theme";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
@@ -57,6 +58,8 @@ export function SidebarGroupToggleRow({
       accessibilityLabel={label}
       onPress={onPress}
       style={rowStyle}
+      aria-expanded={expanded}
+      dataSet={NAV_ROW_DATASET}
       testID={testID}
     >
       {({ hovered, pressed }) => (
