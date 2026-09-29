@@ -26,6 +26,7 @@ import {
   type DirectoryTransaction,
 } from "./transaction";
 import { workspaceLabels } from "@/workspace-labels";
+import { projectContainers } from "@/project-containers";
 import type {
   CachedDirectory,
   CachedWorkspace,
@@ -190,11 +191,13 @@ export class DirectorySync {
     this.flushAbortedTransactions();
     this.releaseSubscriptions();
     workspaceLabels.disconnect(this.serverId);
+    projectContainers.disconnect(this.serverId);
     this.connection = connection;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;
     // Reattach labels here because route-only demand can satisfy the epoch before full demand requests them.
     void this.connectWorkspaceLabels().catch(() => undefined);
+    void this.connectProjectContainers().catch(() => undefined);
     if (this.hasDemand()) void this.requestDemandRefresh().catch(() => undefined);
     return true;
   }
@@ -233,6 +236,7 @@ export class DirectorySync {
     this.fullDemandSources.clear();
     this.routeDemandIds.clear();
     workspaceLabels.disconnect(this.serverId);
+    projectContainers.disconnect(this.serverId);
   }
 
   private releaseSubscriptions(): void {
@@ -582,7 +586,12 @@ export class DirectorySync {
       ...this.workspaces.snapshot(),
       checkpoint: this.cursors,
     });
-    if (this.getOnlineConnection()) await this.connectWorkspaceLabels();
+    if (!this.getOnlineConnection()) return;
+    // Project containers are a sidebar overlay; their failure must not fail the directory refresh.
+    await Promise.all([
+      this.connectWorkspaceLabels(),
+      this.connectProjectContainers().catch(() => undefined),
+    ]);
   }
 
   async connectWorkspaceLabels(): Promise<void> {
@@ -592,6 +601,16 @@ export class DirectorySync {
       serverId: this.serverId,
       client,
       supportsWorkspaceLabels: serverInfo?.features?.workspaceLabels === true,
+    });
+  }
+
+  async connectProjectContainers(): Promise<void> {
+    const { client } = this.requireOnline();
+    await projectContainers.connect({
+      serverId: this.serverId,
+      client,
+      supportsProjectContainers:
+        client.getLastServerInfoMessage()?.features?.projectContainers === true,
     });
   }
 
