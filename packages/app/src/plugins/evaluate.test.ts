@@ -746,3 +746,31 @@ it("binds imported getters to each originating installation across delayed callb
   await first.cleanup();
   await second.cleanup();
 });
+
+it("registers selection actions and removes them idempotently across plugin cleanup", async () => {
+  const plugin = evaluatePluginClientBundle(
+    "selection",
+    bundle(`
+    const remove = plugin.addTimelineSelectionAction({ id: "annotate", title: "Annotate", icon: "MessageSquare", Content() { return null; } });
+    remove(); remove();
+    plugin.addTimelineSelectionAction({ id: "annotate", title: "Annotate", icon: "MessageSquare", Content: require("react").memo(function Content() { return null; }) });
+  `),
+  );
+  expect(plugin.timelineSelectionActions).toHaveLength(1);
+  expect(plugin.timelineSelectionActions[0].title).toBe("Annotate");
+  await plugin.cleanup();
+  expect(plugin.timelineSelectionActions).toHaveLength(0);
+});
+
+it("rejects duplicate selection actions", () => {
+  expect(() =>
+    evaluatePluginClientBundle(
+      "selection",
+      bundle(`
+    const contribution = { id: "annotate", title: "Annotate", icon: "MessageSquare", Content() { return null; } };
+    plugin.addTimelineSelectionAction(contribution);
+    plugin.addTimelineSelectionAction(contribution);
+  `),
+    ),
+  ).toThrow("Duplicate timeline selection action");
+});

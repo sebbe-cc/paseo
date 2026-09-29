@@ -12,6 +12,9 @@ export function useMarkdownTextSurface(): MarkdownTextSurface {
   return useContext(MarkdownTextSurfaceContext);
 }
 
-export function iosMarkdownTextIsSelectable(surface: MarkdownTextSurface): boolean {
-  return surface !== "table-cell";
+export function iosMarkdownTextIsSelectable(
+  surface: MarkdownTextSurface,
+  hasSelectionActions = false,
+): boolean {
+  return surface !== "table-cell" || hasSelectionActions;
 }

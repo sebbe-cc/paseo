@@ -16,6 +16,7 @@ import type {
   FlatListProps,
   TextInput as NativeTextInput,
   TextInputProps,
+  TextProps,
 } from "react-native";
 import type { PluginIconProps } from "./contracts.js";
 
@@ -52,6 +53,9 @@ export interface ToastApi {
   show(message: string, options?: ToastOptions): void;
   error(message: string): void;
 }
+
+/** Text with native substring selection and timeline selection actions. */
+export declare const SelectableText: ComponentType<TextProps>;
 
 export declare const Icon: ComponentType<PluginIconProps>;
 export declare const Modal: ModalComponent;
