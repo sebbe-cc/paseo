@@ -1,20 +1,42 @@
 import React, { type RefCallback } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWebOverlayRegistration } from "./overlay-root";
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
-function OverlayHarness({ active, showScope }: { active: boolean; showScope: boolean }) {
-  const setScope = useWebOverlayRegistration({ active, layer: 20, onKeyDown: () => false });
+function OverlayHarness({
+  active,
+  showScope,
+  manageFocus = true,
+  onKeyDown = () => false,
+}: {
+  active: boolean;
+  showScope: boolean;
+  manageFocus?: boolean;
+  onKeyDown?: (event: KeyboardEvent) => boolean;
+}) {
+  const setScope = useWebOverlayRegistration({ active, layer: 20, onKeyDown, manageFocus });
   return showScope ? (
     <div data-testid="scope" ref={setScope as RefCallback<HTMLDivElement>} tabIndex={-1}>
       <input data-testid="overlay-input" />
     </div>
   ) : null;
+}
+
+function MenuFormHarness() {
+  const setScope = useWebOverlayRegistration({ active: true, layer: 20, onKeyDown: () => false });
+  return (
+    <div ref={setScope as RefCallback<HTMLDivElement>}>
+      <button type="button">Menu backdrop</button>
+      <div data-menu-surface="true">
+        <textarea data-testid="form-input" />
+      </div>
+    </div>
+  );
 }
 
 describe("useWebOverlayRegistration in the browser", () => {
@@ -42,6 +64,39 @@ describe("useWebOverlayRegistration in the browser", () => {
     });
     await nextFrame();
   }
+
+  it("focuses form content instead of its backdrop when initial autofocus needs recovery", async () => {
+    flushSync(() => root.render(<MenuFormHarness />));
+    await nextFrame();
+    expect(document.activeElement).toBe(document.querySelector('[data-testid="form-input"]'));
+  });
+
+  it("preserves timeline selection and external focus for a non-focusing menu while handling Escape", async () => {
+    const range = document.createRange();
+    range.selectNodeContents(opener);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    let escaped = false;
+    const onKeyDown = vi.fn((event: KeyboardEvent) => {
+      escaped = event.key === "Escape";
+      return escaped;
+    });
+    flushSync(() =>
+      root.render(<OverlayHarness active showScope manageFocus={false} onKeyDown={onKeyDown} />),
+    );
+    await nextFrame();
+    expect(document.activeElement).toBe(opener);
+    expect(window.getSelection()!.toString()).toBe("Open");
+    const other = document.createElement("button");
+    document.body.append(other);
+    other.focus();
+    await nextFrame();
+    expect(document.activeElement).toBe(other);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(escaped).toBe(true);
+    flushSync(() => root.render(null));
+    expect(document.activeElement).toBe(other);
+  });
 
   it("skips focus restoration for active scope detach but restores focus when closing", async () => {
     await renderHarness(true, true);

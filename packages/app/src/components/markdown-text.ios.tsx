@@ -1,3 +1,4 @@
+import { supportsNativeTimelineSelection } from "@/assistant-selection-copy/native-capability";
 import { useMemo, type ReactNode } from "react";
 import {
   Text,
@@ -13,6 +14,7 @@ import {
   iosMarkdownTextIsSelectable,
   useMarkdownTextSurface,
 } from "@/components/markdown-text-selection";
+import { useTimelineSelection } from "@/assistant-selection-copy/timeline-selection";
 import type { MarkdownCopyInlineTag } from "@/assistant-selection-copy/markup";
 
 interface MarkdownTextSpanProps {
@@ -43,10 +45,12 @@ export function MarkdownTextSpan({
 }: MarkdownTextSpanProps) {
   const plainStyle = useMemo(() => resolvePlainMarkdownTextStyle(style), [style]);
   const surface = useMarkdownTextSurface();
+  const selection = useTimelineSelection();
+  const hasSelectionActions = supportsNativeTimelineSelection && Boolean(selection?.actions.length);
 
   // Each selectable span creates a UIKit UITextView with a window-level tap recognizer.
   // A large table would create one per cell and make every app touch fan out across them.
-  if (!iosMarkdownTextIsSelectable(surface)) {
+  if (!iosMarkdownTextIsSelectable(surface, hasSelectionActions)) {
     return (
       <Text
         selectable={false}
