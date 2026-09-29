@@ -1252,85 +1252,6 @@ Showing another toast replaces the currently visible toast. An empty message is 
 | `size`  | `number` | No       | Icon width and height.                          |
 | `color` | `string` | No       | Icon color. Use a plugin theme token.           |
 
-## Timeline selection actions
-
-Register a client action on selected timeline text with `addTimelineSelectionAction`. Paseo captures
-an immutable quote before opening your form and presents the form in a popover or compact sheet.
-The returned remover is idempotent and runs automatically when the installation stops.
-
-`index.client.tsx`:
-
-```tsx
-import type {
-  PluginClientContext,
-  PluginTimelineSelectionActionProps,
-} from "@getpaseo/plugin/client";
-import { Pressable, Text, View } from "react-native";
-import { useState } from "react";
-
-function SaveQuote({
-  agentId,
-  selection,
-  composer,
-  close,
-  theme,
-}: PluginTimelineSelectionActionProps) {
-  const [id] = useState(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
-  function save() {
-    composer.addAttachment({
-      id,
-      identifier: "Quote",
-      title: "Selected timeline text",
-      resourceType: "quote",
-      text: JSON.stringify({ agentId, ...selection }),
-    });
-    close();
-  }
-  return (
-    <View>
-      <Text style={{ color: theme.colors.foreground }}>{selection.text}</Text>
-      <Pressable onPress={save}>
-        <Text style={{ color: theme.colors.foreground }}>Attach quote</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-export default function contribute(client: PluginClientContext) {
-  return client.addTimelineSelectionAction({
-    id: "save-quote",
-    title: "Save quote",
-    icon: "Quote",
-    Content: SaveQuote,
-  });
-}
-```
-
-`Content` receives `theme`, `host`, `layout`, `agentId`, `selection`, `composer`, and `close()`.
-`selection.text` is the complete selected text; `selection.segments` is an ordered readonly array
-with `itemId`, `surfaceId`, and `text`. Optional `start`, `end`, `prefix`, and `suffix` describe
-the rendered text, not Markdown source offsets. References identify source surfaces; they do not
-promise an API for retrieving an old timeline item. Store the quote with your resource.
-
-`composer.addAttachment(item)` accepts `PluginAttachmentItem` and adds it to the originating
-host and agent's draft. Repeating the same item ID for this action is idempotent. The host stamps
-the plugin ID, action title, and icon. Omit `url` for a local text resource: its pill opens a preview
-and submission sends a text attachment without an external-resource link. URL resources keep
-external-link behavior. Saved attachments remain readable and sendable after plugin removal;
-attachments may be sent with an empty composer.
-
-Close the form after a successful addition. Adding through a closed, unregistered, disconnected,
-or inactive pane's handle throws; catch the error in your form and preserve the user's input.
-Browser selections can span rendered rows. Native selection actions operate within one selectable
-text view; selection across independent native text views is not supported. The native selection
-bridge requires a rebuilt app; iOS selection actions require iOS 16 or later. The app still supports
-its existing iOS minimum, but older iOS versions do not expose these actions.
-
-Plugin timeline renderers should import `SelectableText` from `@getpaseo/plugin/client/react-native`
-for text that supports these actions on iOS. It enables native substring selection within the
-timeline when actions are registered. Plain React Native `Text` on iOS retains its whole-text Copy
-menu and does not expose selection actions; Android `Text selectable` participates automatically.
-
 ## Timeline items
 
 A plugin can replace an agent timeline entry with its own data and React Native renderer. Both
@@ -1425,6 +1346,85 @@ sessions. The row appears live, survives timeline refetches, and keeps only the 
 same plugin and `id`. If its renderer is missing, Paseo shows the existing unavailable row. Daemons
 reject `data` over the limit rather than truncating it. Daemons that support this operation
 advertise `server_info.features.pluginTimelineItems`.
+
+## Timeline selection actions
+
+Register a client action on selected timeline text with `addTimelineSelectionAction`. Paseo captures
+an immutable quote before opening your form and presents the form in a popover or compact sheet.
+The returned remover is idempotent and runs automatically when the installation stops.
+
+`index.client.tsx`:
+
+```tsx
+import type {
+  PluginClientContext,
+  PluginTimelineSelectionActionProps,
+} from "@getpaseo/plugin/client";
+import { Pressable, Text, View } from "react-native";
+import { useState } from "react";
+
+function SaveQuote({
+  agentId,
+  selection,
+  composer,
+  close,
+  theme,
+}: PluginTimelineSelectionActionProps) {
+  const [id] = useState(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
+  function save() {
+    composer.addAttachment({
+      id,
+      identifier: "Quote",
+      title: "Selected timeline text",
+      resourceType: "quote",
+      text: JSON.stringify({ agentId, ...selection }),
+    });
+    close();
+  }
+  return (
+    <View>
+      <Text style={{ color: theme.colors.foreground }}>{selection.text}</Text>
+      <Pressable onPress={save}>
+        <Text style={{ color: theme.colors.foreground }}>Attach quote</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+export default function contribute(client: PluginClientContext) {
+  return client.addTimelineSelectionAction({
+    id: "save-quote",
+    title: "Save quote",
+    icon: "Quote",
+    Content: SaveQuote,
+  });
+}
+```
+
+`Content` receives `theme`, `host`, `layout`, `agentId`, `selection`, `composer`, and `close()`.
+`selection.text` is the complete selected text; `selection.segments` is an ordered readonly array
+with `itemId`, `surfaceId`, and `text`. Optional `start`, `end`, `prefix`, and `suffix` describe
+the rendered text, not Markdown source offsets. References identify source surfaces; they do not
+promise an API for retrieving an old timeline item. Store the quote with your resource.
+
+`composer.addAttachment(item)` accepts `PluginAttachmentItem` and adds it to the originating
+host and agent's draft. Repeating the same item ID for this action is idempotent. The host stamps
+the plugin ID, action title, and icon. Omit `url` for a local text resource: its pill opens a preview
+and submission sends a text attachment without an external-resource link. URL resources keep
+external-link behavior. Saved attachments remain readable and sendable after plugin removal;
+attachments may be sent with an empty composer.
+
+Close the form after a successful addition. Adding through a closed, unregistered, disconnected,
+or inactive pane's handle throws; catch the error in your form and preserve the user's input.
+Browser selections can span rendered rows. Native selection actions operate within one selectable
+text view; selection across independent native text views is not supported. The native selection
+bridge requires a rebuilt app; iOS selection actions require iOS 16 or later. The app still supports
+its existing iOS minimum, but older iOS versions do not expose these actions.
+
+Plugin timeline renderers should import `SelectableText` from `@getpaseo/plugin/client/react-native`
+for text that supports these actions on iOS. It enables native substring selection within the
+timeline when actions are registered. Plain React Native `Text` on iOS retains its whole-text Copy
+menu and does not expose selection actions; Android `Text selectable` participates automatically.
 
 ## Theme and layout
 
