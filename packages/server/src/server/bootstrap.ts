@@ -120,7 +120,11 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
-import { createProjectContainerService } from "./project-containers/index.js";
+import {
+  createProjectContainerFilesService,
+  createProjectContainerService,
+} from "./project-containers/index.js";
+import { createProjectContainerCwdLookup } from "./project-containers/cwd-lookup.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
@@ -926,6 +930,15 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     projectRegistry,
   });
+  const projectContainerFilesService = createProjectContainerFilesService({
+    paseoHome: config.paseoHome,
+    containers: projectContainerService,
+  });
+  const projectContainerLookup = createProjectContainerCwdLookup({
+    workspaceRegistry,
+    containers: projectContainerService,
+    files: projectContainerFilesService,
+  });
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({
     logger,
@@ -983,6 +996,7 @@ export async function createPaseoDaemon(
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
     appendSystemPrompt: config.appendSystemPrompt,
+    resolveProjectContextPrompt: (cwd) => projectContainerLookup.contextPromptForCwd(cwd),
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
@@ -1017,6 +1031,7 @@ export async function createPaseoDaemon(
   });
   await workspaceLabelService.initialize();
   await projectContainerService.initialize();
+  await projectContainerFilesService.initialize();
   logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
     scriptRuntimeStore.removeForWorkspace(workspaceId);
@@ -1476,6 +1491,7 @@ export async function createPaseoDaemon(
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
+    projectContainers: { lookup: projectContainerLookup, files: projectContainerFilesService },
     callerAgentId: runtime.callerAgentId,
     enableVoiceTools: runtime.enableVoiceTools,
     voiceOnly: runtime.voiceOnly,
@@ -1776,6 +1792,7 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
               projectContainerService,
+              projectContainerFilesService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -1846,6 +1863,7 @@ export async function createPaseoDaemon(
     unsubscribePluginProviders();
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
+    projectContainerFilesService.dispose();
     projectContainerService.dispose();
     scriptHealthMonitor.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
