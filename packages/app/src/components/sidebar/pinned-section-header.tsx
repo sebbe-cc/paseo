@@ -6,6 +6,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import type { Theme } from "@/styles/theme";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
@@ -29,6 +30,8 @@ export function PinnedSectionHeader({
     <Pressable
       accessibilityRole="button"
       accessibilityState={accessibilityState}
+      aria-expanded={!collapsed}
+      dataSet={NAV_ROW_DATASET}
       onPress={onToggle}
       style={styles.header}
       testID="sidebar-pinned-section-header"
