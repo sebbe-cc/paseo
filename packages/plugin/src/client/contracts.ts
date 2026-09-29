@@ -172,6 +172,7 @@ export interface PluginKeyboardShortcutContribution {
   /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
   combo: string;
   onPress(): boolean | undefined;
+  onRelease?(): void;
 }
 
 export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;
