@@ -41,6 +41,8 @@ import {
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { dispatchTopWebOverlayKeyDown, keyBelongsToDomPopover } from "@/lib/overlay-root";
+import { pluginKeyboardShortcuts } from "@/plugins/keyboard-shortcuts";
+import { setPluginActiveWorkspace } from "@/plugins/recent-navigation";
 
 export function useKeyboardShortcuts({
   enabled,
@@ -88,6 +90,11 @@ export function useKeyboardShortcuts({
               isDesktop: isDesktopApp,
             })
           : { menuPrefixes: [], prefixes: [] };
+      if (enabled && shortcutsAvailable) {
+        const pluginPrefixes = pluginKeyboardShortcuts.browserPrefixes(isMac);
+        policy.prefixes.push(...pluginPrefixes);
+        policy.menuPrefixes.push(...pluginPrefixes);
+      }
       void getDesktopHost()?.browser?.setShortcutPolicy?.(policy);
     },
     [bindings, enabled, isDesktopApp, isMac, shortcutsAvailable],
@@ -97,6 +104,7 @@ export function useKeyboardShortcuts({
     if (activeWorkspaceSelection) {
       keyboardWorkspaceSelectionRef.current = activeWorkspaceSelection;
     }
+    setPluginActiveWorkspace(activeWorkspaceSelection);
   }, [activeWorkspaceSelection]);
 
   useEffect(() => {
@@ -105,6 +113,7 @@ export function useKeyboardShortcuts({
     }
 
     publishBrowserShortcutPolicy();
+    return pluginKeyboardShortcuts.subscribe(publishBrowserShortcutPolicy);
   }, [isDesktopApp, publishBrowserShortcutPolicy]);
 
   // Only the modifier that actually performs the workspace-index jump on this
@@ -359,6 +368,11 @@ export function useKeyboardShortcuts({
       target: event.target,
       commandCenterOpen: store.commandCenterOpen,
     });
+    if (pluginKeyboardShortcuts.dispatch(event, isMac)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     resolveAndPerformShortcut({
       event,
       focusScope,
@@ -378,6 +392,7 @@ export function useKeyboardShortcuts({
     if (!input) {
       return;
     }
+    if (pluginKeyboardShortcuts.dispatch(input, isMac)) return;
     resolveAndPerformShortcut({
       event: input,
       focusScope: "browser",
