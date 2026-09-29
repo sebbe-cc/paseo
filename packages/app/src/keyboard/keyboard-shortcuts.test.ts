@@ -1262,3 +1262,85 @@ describe("direct new-tab target shortcuts", () => {
     ).toEqual([["ctrl", "shift", "H"]]);
   });
 });
+
+describe("timeline and list keys", () => {
+  const macDesktop = { isMac: true, isDesktop: true };
+
+  it.each(["message-input", "editable", "other", "terminal"] as const)(
+    "leaves bare j to %s",
+    (focusScope) => {
+      expectNoShortcutResolution({
+        event: { key: "j", code: "KeyJ" },
+        context: { ...macDesktop, focusScope },
+      });
+    },
+  );
+
+  it("steps through a focused list with j, k and G", () => {
+    const list = { ...macDesktop, focusScope: "list" as const };
+    expectShortcutResolution({
+      event: { key: "j", code: "KeyJ" },
+      context: list,
+      action: "list.next",
+    });
+    expectShortcutResolution({
+      event: { key: "k", code: "KeyK" },
+      context: list,
+      action: "list.prev",
+    });
+    expectShortcutResolution({
+      event: { key: "G", code: "KeyG", shiftKey: true },
+      context: list,
+      action: "list.last",
+    });
+    expectShortcutResolution({
+      event: { key: "{", code: "BracketLeft", shiftKey: true },
+      context: list,
+      action: "list.prompt.prev",
+    });
+  });
+
+  it("jumps to the first row with g g", () => {
+    const context = { ...macDesktop, focusScope: "list" as const };
+    const first = resolveShortcut({ event: { key: "g", code: "KeyG" }, context });
+    expect(first.match).toBeNull();
+    expect(first.nextChordState.step).toBe(1);
+    const second = resolveShortcut({
+      event: { key: "g", code: "KeyG" },
+      context,
+      chordState: first.nextChordState,
+    });
+    expect(second.match?.action).toBe("list.first");
+    clearTimeout(first.nextChordState.timeoutId ?? undefined);
+  });
+
+  it("opens the row on Enter in a list, ahead of dictation confirm", () => {
+    expectShortcutResolution({
+      event: { key: "Enter", code: "Enter" },
+      context: { ...macDesktop, focusScope: "list" },
+      action: "list.open",
+    });
+    expectShortcutResolution({
+      event: { key: "Enter", code: "Enter" },
+      context: { ...macDesktop, focusScope: "message-input" },
+      action: "message-input.action",
+      payload: { kind: "dictation-confirm" },
+    });
+  });
+
+  it("keeps ? and Escape working in a list", () => {
+    const list = { ...macDesktop, focusScope: "list" as const };
+    expectShortcutResolution({
+      event: { key: "?", code: "Slash", shiftKey: true },
+      context: list,
+      action: "shortcuts.dialog.toggle",
+    });
+    expectShortcutResolution({
+      event: { key: "Escape", code: "Escape" },
+      context: list,
+      action: "agent.interrupt",
+      preventDefault: false,
+      stopPropagation: false,
+    });
+  });
+});

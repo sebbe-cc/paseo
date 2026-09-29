@@ -4,7 +4,11 @@ import {
   type KeyboardShortcutInput,
   type ParsedShortcutBinding,
 } from "../../keyboard/keyboard-shortcuts";
-import type { KeyCombo } from "../../keyboard/shortcut-string";
+import { type KeyCombo, parseShortcutString } from "../../keyboard/shortcut-string";
+
+// Fork: combos a browser page forwards for plugins that listen on the app window (display-switcher).
+export const FORWARDED_PLUGIN_COMBOS: readonly string[] = ["Alt+P"];
+const replayedPluginEvents = new WeakSet<Event>();
 
 export interface BrowserShortcutPrefix {
   alt: boolean;
@@ -181,8 +185,53 @@ function buildBrowserShortcutPrefixes(input: BrowserShortcutPolicyInput): Browse
     }
     prefixes.set(prefixKey(prefix), prefix);
   }
+  if (step === 0) {
+    for (const prefix of forwardedPluginPrefixes(input.isMac)) {
+      prefixes.set(prefixKey(prefix), prefix);
+    }
+  }
 
   return [...prefixes.values()];
+}
+
+function forwardedPluginPrefixes(isMac: boolean): BrowserShortcutPrefix[] {
+  return FORWARDED_PLUGIN_COMBOS.flatMap((combo) => {
+    const prefix = prefixFromCombo(parseShortcutString(combo), isMac, undefined);
+    return prefix ? [prefix] : [];
+  });
+}
+
+// Plugins match the physical key, as display-switcher does, so layouts where ⌥P types "π" still match.
+export function isForwardedPluginInput(input: KeyboardShortcutInput, isMac: boolean): boolean {
+  return forwardedPluginPrefixes(isMac).some(
+    (prefix) =>
+      prefix.code === input.code &&
+      prefix.alt === input.altKey &&
+      prefix.control === input.ctrlKey &&
+      prefix.meta === input.metaKey &&
+      prefix.shift === input.shiftKey,
+  );
+}
+
+/** Re-sends a key a browser page forwarded to the app window, where plugin listeners see it. */
+export function replayForwardedPluginInput(input: KeyboardShortcutInput): void {
+  const event = new KeyboardEvent("keydown", {
+    key: input.key,
+    code: input.code,
+    altKey: input.altKey,
+    ctrlKey: input.ctrlKey,
+    metaKey: input.metaKey,
+    shiftKey: input.shiftKey,
+    repeat: input.repeat,
+    bubbles: true,
+    cancelable: true,
+  });
+  replayedPluginEvents.add(event);
+  window.dispatchEvent(event);
+}
+
+export function isReplayedPluginInput(event: Event): boolean {
+  return replayedPluginEvents.has(event);
 }
 
 export function buildBrowserKeyboardPolicy(

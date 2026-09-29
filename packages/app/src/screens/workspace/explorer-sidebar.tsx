@@ -14,6 +14,8 @@ import type { SplitPane } from "@/stores/workspace-layout-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
 import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
 
+const EXPLORER_DATASET = { focusRegion: "explorer" };
+
 interface ExplorerSidebarDockProps {
   pane: SplitPane;
   uiTabs: WorkspaceTab[];
@@ -83,7 +85,12 @@ export function ExplorerSidebarDock({
   return (
     <RetainedPanel active>
       <WindowChromeRegion corners="top-right">
-        <View style={styles.dock} testID="workspace-explorer-sidebar">
+        <View
+          style={styles.dock}
+          testID="workspace-explorer-sidebar"
+          dataSet={EXPLORER_DATASET}
+          tabIndex={-1}
+        >
           <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
             <TitlebarDragRegion />
             <ExplorerSidebarTabRail
@@ -128,6 +135,7 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     minHeight: 0,
     backgroundColor: theme.colors.surfaceSidebar,
+    outlineWidth: 0,
   },
   tabRail: {
     position: "relative",
