@@ -46,6 +46,26 @@
             buildVersion = desktopBuildVersion;
           };
         }
+        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") (
+          let
+            # Gradient evaluates a path: archive without rev, so only desktop-release reads it.
+            rev = self.shortRev or (throw "desktop-release needs a github:sebbe-cc/paseo/<sha> ref");
+            date = self.lastModifiedDate;
+          in
+          {
+            # Gradient builds and caches this; publish-mac turns it into the signed release on tempus.
+            desktop-release-build = pkgs.callPackage ./nix/desktop-release-build.nix {
+              desktop = self.packages.${system}.desktop;
+            };
+            desktop-release = pkgs.callPackage ./nix/desktop-release.nix {
+              desktop = self.packages.${system}.desktop;
+              releaseBuild = self.packages.${system}.desktop-release-build;
+              buildVersion = paseo.version;
+              buildMetadata = "desvio.${rev}";
+              releaseVersion = "${paseo.version}-desvio.${date}.${rev}";
+            };
+          }
+        )
       );
 
       nixosModules.default = self.nixosModules.paseo;
