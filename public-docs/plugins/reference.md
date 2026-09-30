@@ -175,11 +175,16 @@ and returns an unsubscribe function. `activateWorkspace({ serverId, workspaceId 
 and `activateTab({ serverId, workspaceId, tabId })` return `false` when the target no
 longer exists. They preserve the selected tab and never create a new one.
 
-`client.addKeyboardShortcut({ combo, onPress })` registers one modified key such as
-`Alt+Tab` or `Ctrl+Tab`, including inside an Electron browser tab. The callback can
-return `false` to leave the key available to Paseo's built-in shortcuts. It returns
-an idempotent remover and is also removed when the plugin stops. Operating system
-shortcuts take precedence if the OS intercepts a key before it reaches Paseo.
+`client.addKeyboardShortcut({ combo, id?, label?, onPress, onRelease? })` registers
+one modified key such as `Alt+Tab` or `Ctrl+Tab`, including inside an Electron
+browser tab. Provide a stable kebab-case `id` and a `label` together to list the
+binding under **Settings → Keyboard Shortcuts → Plugins**. Users can rebind,
+clear, and reset it there; the saved key also works inside browser tabs.
+`onRelease` runs when the shortcut's modifier is released or the app loses focus.
+`onPress` can return `false` to leave the key available to Paseo's built-in
+shortcuts. Registration returns an idempotent remover and is also removed when
+the plugin stops. Operating system shortcuts take precedence if the OS intercepts
+a key before it reaches Paseo.
 
 ### External links and workspace browsers
 
