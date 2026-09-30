@@ -2,7 +2,12 @@ import React, { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Pressable, Text } from "react-native";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ComposerTrackPill, ComposerTrackRow, type ComposerTrackPillSegment } from "./tracks";
+import {
+  ComposerTrackBar,
+  ComposerTrackPill,
+  ComposerTrackRow,
+  type ComposerTrackPillSegment,
+} from "./tracks";
 
 const SUBAGENT_SEGMENTS: ComposerTrackPillSegment[] = [{ bucket: null, text: "3 subagents" }];
 
@@ -129,6 +134,24 @@ describe("composer track panel", () => {
     expect(onAction).toHaveBeenCalledTimes(1);
     expect(onPress).not.toHaveBeenCalled();
     expect(isPanelOpen()).toBe(true);
+  });
+});
+
+describe("composer track bar", () => {
+  it("wraps pills onto another row instead of shrinking them into one", () => {
+    const container = mount(
+      <ComposerTrackBar>
+        <Text>one</Text>
+        <Text>two</Text>
+      </ComposerTrackBar>,
+    );
+    const bar = container.firstElementChild;
+    const track = bar?.firstElementChild;
+    if (!(bar instanceof HTMLElement) || !(track instanceof HTMLElement)) {
+      throw new Error("track bar did not render its track row");
+    }
+    expect(getComputedStyle(track).flexWrap).toBe("wrap");
+    expect(getComputedStyle(bar).marginTop).not.toBe("0px");
   });
 });
 
