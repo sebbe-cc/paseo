@@ -126,6 +126,14 @@ paseo workspace rename <workspace-id> --reset   # back to the branch or director
 paseo workspace archive <workspace-id>
 ```
 
+Label workspaces so agents and automations can find them later:
+
+```bash
+paseo workspace labels <workspace-id>
+paseo workspace label-set <workspace-id> "Needs review" --color sky
+paseo workspace label-remove <workspace-id> "Needs review"
+```
+
 Add `--forge <name>` to PR checkout when Paseo cannot infer the forge from the source checkout. See [Git worktrees](/docs/worktrees) for setup hooks and services.
 
 ## Terminals

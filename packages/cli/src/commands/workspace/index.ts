@@ -3,6 +3,7 @@ import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
 import { runArchiveCommand } from "./archive.js";
 import { runCreateCommand } from "./create.js";
+import { runLabelRemoveCommand, runLabelSetCommand, runLabelsCommand } from "./labels.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
 import { runSetupCommand } from "./setup.js";
@@ -59,6 +60,29 @@ export function createWorkspaceCommand(): Command {
       .description("Archive a workspace and everything it owns")
       .argument("<workspace-id>", "Workspace id"),
   ).action(withOutput(runArchiveCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace.command("labels").description("List a workspace's labels").argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runLabelsCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("label-set")
+      .description("Assign a label to a workspace, creating the label when needed")
+      .argument("<workspace-id>", "Workspace id")
+      .argument("<label>", "Label name to assign")
+      .option("--color <color>", "Color for a new label (default: violet)")
+      .allowExcessArguments(false),
+  ).action(withOutput(runLabelSetCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("label-remove")
+      .description("Remove a label assignment from a workspace")
+      .argument("<workspace-id>", "Workspace id")
+      .argument("<label>", "Label name to remove")
+      .allowExcessArguments(false),
+  ).action(withOutput(runLabelRemoveCommand));
 
   return workspace;
 }
