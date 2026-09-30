@@ -62,6 +62,7 @@ import {
 } from "./terminal-resize-debouncer";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
+import { registerFocusTarget } from "@/keyboard/focus-regions";
 import {
   applyTerminalRendererReadyChange,
   resolveTerminalStreamTarget,
@@ -282,6 +283,7 @@ export function TerminalPane({
   const pendingTerminalInputRef = useRef<PendingTerminalInput[]>([]);
   const keyboardRefitTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const lastAutoFocusKeyRef = useRef<string | null>(null);
+  const [outputContainer, setOutputContainer] = useState<View | null>(null);
   const paneFocusResizeClaimRef = useRef(EMPTY_FOCUS_CLAIM_STATE);
   const initialSnapshot = workspaceTerminalSession.snapshots.get({ terminalId });
 
@@ -346,6 +348,12 @@ export function TerminalPane({
       }
     },
     [terminalId, terminalStreamKey, workspaceTerminalSession.snapshots],
+  );
+
+  // Autofocus only runs when the pane focus changes; ⌥L back into this pane needs its own path.
+  useEffect(
+    () => registerFocusTarget(outputContainer, requestTerminalFocus),
+    [outputContainer, requestTerminalFocus],
   );
 
   useEffect(() => {
@@ -1032,7 +1040,7 @@ export function TerminalPane({
 
   return (
     <Animated.View style={containerStyle}>
-      <View style={styles.outputContainer}>
+      <View ref={setOutputContainer} style={styles.outputContainer}>
         <View style={styles.terminalGestureContainer}>
           <TerminalEmulator
             ref={emulatorRef}
