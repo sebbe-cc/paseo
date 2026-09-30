@@ -122,6 +122,9 @@ export interface PluginRecentNavigation {
 export interface PluginKeyboardShortcutContribution {
   /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
   combo: string;
+  /** Stable within this plugin. Together with label, exposes the shortcut in Settings. */
+  id?: string;
+  label?: string;
   onPress(): boolean | undefined;
   onRelease?(): void;
 }
