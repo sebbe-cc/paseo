@@ -4,7 +4,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   buildExplorerCheckoutKey,
   coerceExplorerTabForCheckout,
-  resolveExplorerTabForCheckout,
   type ExplorerTab,
 } from "../explorer-tab-memory";
 import { type ExplorerCheckoutContext } from "../explorer-checkout-context";
@@ -271,12 +270,7 @@ export const usePanelStore = create<PanelState>()(
         })),
       activateExplorerTabForCheckout: (checkout) =>
         set((state) => ({
-          explorerTab: resolveExplorerTabForCheckout({
-            serverId: checkout.serverId,
-            cwd: checkout.cwd,
-            isGit: checkout.isGit,
-            explorerTabByCheckout: state.explorerTabByCheckout,
-          }),
+          explorerTab: coerceExplorerTabForCheckout(state.explorerTab, checkout.isGit),
         })),
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
       setExplorerSortOption: (option) => set({ explorerSortOption: option }),
