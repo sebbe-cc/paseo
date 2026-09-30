@@ -86,6 +86,8 @@ export interface PluginClientOpenPanelOptions extends PluginOpenPanelOptions {
 }
 
 export interface PluginClientContext extends PluginCommandCapabilities {
+  readonly navigation: PluginRecentNavigation;
+  addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
   addSettingsScreen(contribution: PluginSettingsScreenContribution): PluginCleanup;
   addSurface(id: string, Component: ComponentType<PluginSurfaceProps>): PluginCleanup;
   addSidebarItem(contribution: PluginSidebarContribution): PluginCleanup;
@@ -106,6 +108,25 @@ export interface PluginClientContext extends PluginCommandCapabilities {
     contribution: PluginTimelineRendererContribution<Schema>,
   ): PluginCleanup;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
+}
+
+export interface PluginNavigationLocation {
+  readonly serverId: string;
+  readonly workspaceId: string;
+  readonly tabId: string | null;
+}
+
+export interface PluginRecentNavigation {
+  getActive(): PluginNavigationLocation | null;
+  subscribe(listener: (location: PluginNavigationLocation | null) => void): PluginCleanup;
+  activateWorkspace(input: Pick<PluginNavigationLocation, "serverId" | "workspaceId">): boolean;
+  activateTab(input: PluginNavigationLocation & { tabId: string }): boolean;
+}
+
+export interface PluginKeyboardShortcutContribution {
+  /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
+  combo: string;
+  onPress(): boolean | undefined;
 }
 
 export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;
