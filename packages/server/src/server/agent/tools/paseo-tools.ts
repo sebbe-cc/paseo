@@ -99,6 +99,10 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import {
+  registerProjectContainerTools,
+  type ProjectContainerToolDependencies,
+} from "./project-container-tools.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -138,6 +142,8 @@ export interface PaseoToolHostDependencies {
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
+  /** Fork: notes, todos and context of the caller's project. */
+  projectContainers?: Omit<ProjectContainerToolDependencies, "resolveCallerCwd">;
   /**
    * ID of the agent that is using this tool catalog.
    * Used for cwd/mode inheritance when agents spawn child agents.
@@ -3193,6 +3199,13 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       };
     },
   );
+
+  if (options.projectContainers && callerAgentId) {
+    registerProjectContainerTools(registerTool, {
+      ...options.projectContainers,
+      resolveCallerCwd: () => agentManager.getAgent(callerAgentId)?.cwd ?? null,
+    });
+  }
 
   return toCatalog();
 }
