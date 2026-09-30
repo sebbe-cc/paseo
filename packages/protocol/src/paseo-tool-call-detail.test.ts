@@ -146,4 +146,37 @@ describe("Paseo tool-call detail presentation", () => {
   it("leaves non-Paseo tools alone", () => {
     expect(buildPaseoToolDetailSections("mcp__github__create_issue", {}, {})).toBeNull();
   });
+
+  it("orders workspace label fields with the label before the assignment list", () => {
+    expect(
+      buildPaseoToolDetailSections(
+        "mcp__paseo__set_workspace_label",
+        { workspaceId: "wks-1", color: "red", name: "Blocked" },
+        {
+          workspaceId: "wks-1",
+          labels: [{ name: "Blocked", color: "red" }],
+          label: { name: "Blocked", color: "red" },
+        },
+      ),
+    ).toEqual([
+      {
+        kind: "fields",
+        title: "Details",
+        fields: [
+          { label: "Workspace", value: "wks-1" },
+          { label: "Name", value: "Blocked" },
+          { label: "Color", value: "red" },
+        ],
+      },
+      {
+        kind: "fields",
+        title: "Result",
+        fields: [
+          { label: "Workspace", value: "wks-1" },
+          { label: "Label", value: "Name: Blocked\nColor: red" },
+          { label: "Labels", value: "• Name: Blocked\n  Color: red" },
+        ],
+      },
+    ]);
+  });
 });

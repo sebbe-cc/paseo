@@ -75,6 +75,8 @@ import {
   updateAgentCommand,
 } from "../lifecycle-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
+import type { WorkspaceLabelService } from "../../workspace-labels/index.js";
+import { WORKSPACE_LABEL_COLORS } from "@getpaseo/protocol/workspace-labels";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type {
   PersistedWorkspaceRecord,
@@ -118,6 +120,7 @@ export interface PaseoToolHostDependencies {
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
+  workspaceLabels?: Pick<WorkspaceLabelService, "listAssignments" | "setAssignment">;
   projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
     cwd: string,
@@ -712,7 +715,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     return options.ensureWorkspaceForCreate(resolvedCwd);
   }
 
-  function resolveWorkspaceIdForRename(requestedWorkspaceId?: string): string {
+  function resolveWorkspaceIdWithCallerDefault(requestedWorkspaceId?: string): string {
     const explicitWorkspaceId = requestedWorkspaceId?.trim();
     if (explicitWorkspaceId) {
       return explicitWorkspaceId;
@@ -2248,7 +2251,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         throw new Error("Workspace update emitter is required to rename workspaces");
       }
 
-      const workspaceId = resolveWorkspaceIdForRename(requestedWorkspaceId);
+      const workspaceId = resolveWorkspaceIdWithCallerDefault(requestedWorkspaceId);
       const existing = await options.workspaceRegistry.get(workspaceId);
       if (!existing) {
         throw new Error(`Workspace ${workspaceId} not found`);
@@ -2271,6 +2274,139 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           workspaceId,
           title,
         }),
+      };
+    },
+  );
+
+  const WorkspaceLabelAssignmentSchema = z.object({
+    name: z.string(),
+    color: z.enum(WORKSPACE_LABEL_COLORS).nullable(),
+  });
+
+  function requireWorkspaceLabels(): NonNullable<PaseoToolHostDependencies["workspaceLabels"]> {
+    if (!options.workspaceLabels) {
+      throw new Error("Workspace label management is not configured");
+    }
+    return options.workspaceLabels;
+  }
+
+  function requireWorkspaceLabelEmitter(): NonNullable<
+    PaseoToolHostDependencies["emitWorkspaceUpdatesForWorkspaceIds"]
+  > {
+    if (!options.emitWorkspaceUpdatesForWorkspaceIds) {
+      throw new Error("Workspace update emitter is required to manage workspace labels");
+    }
+    return options.emitWorkspaceUpdatesForWorkspaceIds;
+  }
+
+  registerTool(
+    "get_workspace_labels",
+    {
+      title: "Get workspace labels",
+      description:
+        "List the labels assigned to a workspace. Omit workspaceId to list your current workspace's labels.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Workspace id to inspect. Omit to inspect your current workspace."),
+      },
+      outputSchema: {
+        workspaceId: z.string(),
+        labels: z.array(WorkspaceLabelAssignmentSchema),
+      },
+    },
+    async ({ workspaceId: requestedWorkspaceId }) => {
+      const workspaceLabels = requireWorkspaceLabels();
+      const workspaceId = resolveWorkspaceIdWithCallerDefault(requestedWorkspaceId);
+      const assignments = await workspaceLabels.listAssignments(workspaceId);
+      return {
+        content: [],
+        structuredContent: ensureValidJson(assignments),
+      };
+    },
+  );
+
+  registerTool(
+    "set_workspace_label",
+    {
+      title: "Set workspace label",
+      description:
+        "Assign a label to a workspace, creating the label when it does not exist yet. Omit workspaceId to label your current workspace. The color is only used for new labels; existing labels keep their color.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Workspace id to label. Omit to label your current workspace."),
+        name: z.string().trim().min(1).describe("Label name to assign."),
+        color: z
+          .enum(WORKSPACE_LABEL_COLORS)
+          .optional()
+          .describe("Color for a new label. Defaults to violet."),
+      },
+      outputSchema: {
+        workspaceId: z.string(),
+        label: z.object({
+          name: z.string(),
+          color: z.enum(WORKSPACE_LABEL_COLORS),
+        }),
+        labels: z.array(WorkspaceLabelAssignmentSchema),
+      },
+    },
+    async ({ workspaceId: requestedWorkspaceId, name, color }) => {
+      const workspaceLabels = requireWorkspaceLabels();
+      const workspaceId = resolveWorkspaceIdWithCallerDefault(requestedWorkspaceId);
+      const { label } = await workspaceLabels.setAssignment({
+        workspaceId,
+        label: { name, color: color ?? WORKSPACE_LABEL_COLORS[0] },
+        assigned: true,
+      });
+      const assignments = await workspaceLabels.listAssignments(workspaceId);
+      await requireWorkspaceLabelEmitter()([workspaceId]);
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ ...assignments, label }),
+      };
+    },
+  );
+
+  registerTool(
+    "remove_workspace_label",
+    {
+      title: "Remove workspace label",
+      description:
+        "Remove a label assignment from a workspace. The label itself is kept for other workspaces. Omit workspaceId to unlabel your current workspace.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Workspace id to unlabel. Omit to unlabel your current workspace."),
+        name: z.string().trim().min(1).describe("Label name to remove."),
+      },
+      outputSchema: {
+        workspaceId: z.string(),
+        labels: z.array(WorkspaceLabelAssignmentSchema),
+      },
+    },
+    async ({ workspaceId: requestedWorkspaceId, name }) => {
+      const workspaceLabels = requireWorkspaceLabels();
+      const workspaceId = resolveWorkspaceIdWithCallerDefault(requestedWorkspaceId);
+      await workspaceLabels.setAssignment({
+        workspaceId,
+        label: { name, color: WORKSPACE_LABEL_COLORS[0] },
+        assigned: false,
+      });
+      const assignments = await workspaceLabels.listAssignments(workspaceId);
+      await requireWorkspaceLabelEmitter()([workspaceId]);
+      return {
+        content: [],
+        structuredContent: ensureValidJson(assignments),
       };
     },
   );
