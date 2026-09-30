@@ -891,6 +891,52 @@ Showing another toast replaces the currently visible toast. An empty message is 
 | `size`  | `number` | No       | Icon width and height.                          |
 | `color` | `string` | No       | Icon color. Use a plugin theme token.           |
 
+### Web content
+
+`WebView` renders one HTML document in an isolated frame on every client: a sandboxed iframe in
+browsers and Electron, and the app's web view on iOS and Android. Use it for content that is already
+HTML, such as an embedded tool's UI or a chart library's output. Native components are still the
+right choice for ordinary plugin UI.
+
+| Prop            | Type                     | Required | Behavior                                                                         |
+| --------------- | ------------------------ | -------- | -------------------------------------------------------------------------------- |
+| `html`          | `string`                 | Yes      | The complete document. A new value loads a new document.                         |
+| `onMessage`     | `(data: string) => void` | No       | Receives text the page sends with `window.ReactNativeWebView.postMessage(text)`. |
+| `onError`       | `(error: Error) => void` | No       | The document failed to load, or its content process stopped. Native only.        |
+| `style`         | `StyleProp<ViewStyle>`   | No       | Sizes the view. Give it a height, or `flex: 1` inside a bounded parent.          |
+| `scrollEnabled` | `boolean`                | No       | Default `true`. Native only.                                                     |
+
+The ref exposes `postMessage(data: string)`, which the page receives as a `message` event on
+`window` with the text in `event.data`. Messages sent before the document has loaded are delivered
+once it has. Both directions carry strings: serialize with `JSON.stringify` and validate what the
+page sends with a Zod schema, as you would any input.
+
+```tsx
+import { WebView, type WebViewHandle } from "@getpaseo/plugin/client/react-native";
+import { useRef } from "react";
+
+// Inside your component:
+const webView = useRef<WebViewHandle>(null);
+<WebView
+  ref={webView}
+  html={html}
+  style={{ height: 240 }}
+  onMessage={(data) => setClicks(JSON.parse(data).clicks)}
+/>;
+// Later:
+webView.current?.postMessage(JSON.stringify({ type: "theme", background }));
+```
+
+The document loads with an opaque origin: it cannot reach Paseo, storage, or cookies, and it cannot
+open windows or navigate the frame to another document. It is not the sandbox's job to keep the
+page from reaching the network; declare a `Content-Security-Policy` meta tag in the document if the
+content is not yours. The frame follows the [HTML file preview](https://github.com/getpaseo/paseo/blob/main/SECURITY.md#html-file-preview) model, including its
+limits. Nothing in the frame has access to `usePaseo`, `useRpc`, or the plugin's own RPCs; the
+plugin relays what the page needs through messages.
+
+The runnable [web view example](https://github.com/getpaseo/paseo/tree/main/plugin-examples/web-view)
+renders a page that counts clicks and recolors itself with the active theme.
+
 ## Timeline items
 
 A plugin can replace an agent timeline entry with its own data and React Native renderer. Both
