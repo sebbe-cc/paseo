@@ -34,11 +34,13 @@ import {
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
+  FileBackedWorkspaceRegistry,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
   type WorkspaceRegistry,
 } from "../workspace-registry.js";
+import { createWorkspaceLabelService } from "../workspace-labels/index.js";
 import type {
   CreateScheduleInput,
   StoredSchedule,
@@ -4498,6 +4500,124 @@ describe("rename_workspace MCP tool", () => {
     ).rejects.toThrow("Workspace wks_archived is archived");
     expect(upsertedWorkspaces).toEqual([]);
     expect(emittedWorkspaceIds).toEqual([]);
+  });
+});
+
+describe("workspace label MCP tools", () => {
+  const logger = createTestLogger();
+
+  async function createLabelServer(options: { callerAgentId?: string } = {}) {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-label-mcp-"));
+    const workspaceRegistry = new FileBackedWorkspaceRegistry(
+      join(paseoHome, "projects", "workspaces.json"),
+      logger,
+    );
+    await workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_labels",
+        projectId: "proj_labels",
+        cwd: REPO_CWD,
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-07-03T09:00:00.000Z",
+        updatedAt: "2026-07-03T09:00:00.000Z",
+      }),
+    );
+    const workspaceLabels = createWorkspaceLabelService({
+      paseoHome,
+      workspaceRegistry,
+    });
+    await workspaceLabels.initialize();
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    if (options.callerAgentId) {
+      spies.agentManager.getAgent.mockReturnValue(
+        createManagedAgent({
+          id: options.callerAgentId,
+          cwd: REPO_CWD,
+          workspaceId: "wks_labels",
+        }),
+      );
+    }
+    const emittedWorkspaceIds: string[][] = [];
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      workspaceRegistry,
+      workspaceLabels,
+      emitWorkspaceUpdatesForWorkspaceIds: async (workspaceIds) => {
+        emittedWorkspaceIds.push(Array.from(workspaceIds));
+      },
+      ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
+      logger,
+    });
+    return { server, workspaceRegistry, emittedWorkspaceIds, paseoHome };
+  }
+
+  it("assigns, lists, and removes labels on the caller workspace", async () => {
+    const { server, workspaceRegistry, emittedWorkspaceIds, paseoHome } =
+      await createLabelServer({ callerAgentId: "parent-agent" });
+    try {
+      const setTool = registeredTool(server, "set_workspace_label");
+      const getTool = registeredTool(server, "get_workspace_labels");
+      const removeTool = registeredTool(server, "remove_workspace_label");
+
+      const assigned = await invokeToolWithParsedInput(setTool, { name: "  Blocked  " });
+      expect(assigned.structuredContent).toEqual({
+        workspaceId: "wks_labels",
+        label: { name: "Blocked", color: "violet" },
+        labels: [{ name: "Blocked", color: "violet" }],
+      });
+
+      const listed = await invokeToolWithParsedInput(getTool, {});
+      expect(listed.structuredContent).toEqual({
+        workspaceId: "wks_labels",
+        labels: [{ name: "Blocked", color: "violet" }],
+      });
+
+      const reassigned = await invokeToolWithParsedInput(setTool, {
+        workspaceId: "wks_labels",
+        name: "blocked",
+        color: "red",
+      });
+      expect(reassigned.structuredContent).toMatchObject({
+        label: { name: "Blocked", color: "violet" },
+      });
+
+      const removed = await invokeToolWithParsedInput(removeTool, { name: "BLOCKED" });
+      expect(removed.structuredContent).toEqual({ workspaceId: "wks_labels", labels: [] });
+      expect((await workspaceRegistry.get("wks_labels"))?.labels).toBeUndefined();
+      expect(emittedWorkspaceIds).toEqual([["wks_labels"], ["wks_labels"], ["wks_labels"]]);
+    } finally {
+      await removeTempDir(paseoHome);
+    }
+  });
+
+  it("rejects unknown workspaces and colors outside the catalog", async () => {
+    const { server, paseoHome } = await createLabelServer({ callerAgentId: "parent-agent" });
+    try {
+      const setTool = registeredTool(server, "set_workspace_label");
+      await expect(
+        invokeToolWithParsedInput(setTool, { workspaceId: "wks_missing", name: "Blocked" }),
+      ).rejects.toThrow("Workspace not found");
+      expect(
+        await setTool.inputSchema.safeParseAsync({ name: "Blocked", color: "chartreuse" }),
+      ).toMatchObject({ success: false });
+    } finally {
+      await removeTempDir(paseoHome);
+    }
+  });
+
+  it("requires an explicit workspace outside an agent-scoped session", async () => {
+    const { server, paseoHome } = await createLabelServer();
+    try {
+      const getTool = registeredTool(server, "get_workspace_labels");
+      await expect(invokeToolWithParsedInput(getTool, {})).rejects.toThrow(
+        "workspaceId is required outside an agent-scoped session",
+      );
+    } finally {
+      await removeTempDir(paseoHome);
+    }
   });
 });
 
