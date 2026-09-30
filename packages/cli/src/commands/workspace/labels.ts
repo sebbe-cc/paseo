@@ -155,10 +155,17 @@ export async function runLabelSetCommand(
   workspaceId: string,
   nameArg: string | undefined,
   options: WorkspaceLabelCommandOptions,
-  _command: Command,
+  command: Command,
 ): Promise<SingleResult<WorkspaceLabelSetResult>> {
   const name = resolveWorkspaceLabelName(nameArg);
-  const color = resolveWorkspaceLabelColor(options.color);
+  // withGlobalOptions() merges globals over subcommand options, so the global
+  // --no-color default (color: true) would shadow --color <name>; read it locally.
+  const localColor =
+    typeof command?.opts === "function"
+      ? (command.opts().color as string | undefined)
+      : undefined;
+  const mergedColor = typeof options.color === "string" ? options.color : undefined;
+  const color = resolveWorkspaceLabelColor(localColor ?? mergedColor);
   return withDaemonClient(options, async (client) => {
     try {
       const payload = await client.setWorkspaceLabel({
