@@ -8,12 +8,13 @@ import {
   type ProjectContainerCatalog,
   type ProjectContainerErrorCode,
 } from "@getpaseo/protocol/project-containers";
+import type { ProjectContainerFilesErrorCode } from "@getpaseo/protocol/project-container-files";
 import type { ProjectRegistry } from "../workspace-registry.js";
 import type { ProjectContainerStore } from "./store.js";
 
 export class ProjectContainerError extends Error {
   constructor(
-    readonly code: ProjectContainerErrorCode,
+    readonly code: ProjectContainerErrorCode | ProjectContainerFilesErrorCode,
     message: string,
   ) {
     super(message);

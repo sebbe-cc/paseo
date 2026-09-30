@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -2281,6 +2281,31 @@ test("daemon append system prompt is injected into Pi configs", async () => {
   );
 
   expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe("Daemon instructions.");
+});
+
+test("project context follows the daemon prompt only for grouped cwds", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const client = new TestAgentClient();
+  let ids = 0;
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    appendSystemPrompt: "Daemon instructions.",
+    resolveProjectContextPrompt: async (cwd) =>
+      cwd.endsWith("grouped") ? "# Project: heads\nUse pnpm." : null,
+    idFactory: () => `00000000-0000-4000-8000-00000000020${ids++}`,
+  });
+
+  for (const cwd of [join(workdir, "grouped"), join(workdir, "loose")]) {
+    mkdirSync(cwd);
+    await manager.createAgent({ provider: "codex", cwd }, undefined, { workspaceId: undefined });
+  }
+
+  expect(client.createdConfigs.map((config) => config.daemonAppendSystemPrompt)).toEqual([
+    "Daemon instructions.\n\n# Project: heads\nUse pnpm.",
+    "Daemon instructions.",
+  ]);
 });
 
 test("setAgentMode persists the selected mode across session reload", async () => {
