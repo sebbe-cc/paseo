@@ -3306,6 +3306,20 @@ function buildCodexCustomProviderConfig(
     base_url: normalizedBaseUrl,
     wire_api: "responses",
   };
+  const customHeaders = runtimeSettings?.env?.OPENAI_CUSTOM_HEADERS;
+  if (customHeaders?.trim()) {
+    providerConfig.http_headers = Object.fromEntries(customHeaders.split(/\r?\n/)
+      .filter((line) => line.trim())
+      .map((line) => {
+        const colon = line.indexOf(":");
+        const name = line.slice(0, colon).trim().toLowerCase();
+        const value = line.slice(colon + 1).trim();
+        if (colon < 1 || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name) || /[\r\n]/.test(value)) {
+          throw new Error("Invalid header in OPENAI_CUSTOM_HEADERS");
+        }
+        return [name, value];
+      }));
+  }
   if (runtimeSettings?.env?.OPENAI_API_KEY?.trim()) {
     providerConfig.env_key = "OPENAI_API_KEY";
     providerConfig.requires_openai_auth = false;
