@@ -13,6 +13,7 @@ import type { CommandOptions, ListResult, OutputSchema, SingleResult } from "../
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
 import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
+import { runPluginCallCommand, runPluginToolsCommand } from "./tools.js";
 import {
   withPluginLogsClient,
   withPluginUpdateClient,
@@ -263,5 +264,17 @@ export function createPluginCommand(): Command {
   addJsonAndDaemonHostOptions(
     plugin.command("remove").description("Remove plugin configuration").argument("<id>"),
   ).action(withOutput(remove));
+  addJsonAndDaemonHostOptions(
+    plugin.command("tools").description("List the tools plugins expose to agents").argument("[id]"),
+  ).action(withOutput(runPluginToolsCommand));
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("call")
+      .description("Call a tool a plugin exposes to agents")
+      .argument("<id>", "Plugin ID")
+      .argument("<method>", "Tool method from paseo plugin tools")
+      .argument("[input]", "JSON input object, or - to read it from stdin")
+      .option("--input-file <path>", "Read the JSON input from a file"),
+  ).action(withOutput(runPluginCallCommand));
   return plugin;
 }

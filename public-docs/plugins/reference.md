@@ -2141,6 +2141,23 @@ Inputs and outputs are validated on both sides. RPC names start with a lowercase
 
 Backend handlers receive the same `PaseoApi` as `{ paseo }`. Their connection belongs to the subprocess and closes when the plugin stops. It does not subscribe to timelines or catalog events until plugin code subscribes. Follow the [SDK event contract](../../sdk/events.md) for cleanup and timeline replacements. Backend code can use Node APIs and dependencies installed in the plugin directory.
 
+### Expose RPCs to agents
+
+List RPCs under `agentTools` in `paseo-plugin.json` to let agents call them:
+
+```json
+{
+  "id": "greeting",
+  "agentTools": [{ "method": "greeting.create", "description": "Greet someone by name." }]
+}
+```
+
+Agents find them with the `list_plugin_tools` MCP tool, which returns each description with a JSON
+Schema generated from the RPC's Zod input, and call them with `call_plugin_tool`. The CLI offers
+`paseo plugin tools` and `paseo plugin call`. Undeclared RPCs, such as settings handlers, stay
+private to the app. Write descriptions for an agent: say what the tool does, what to pass, and what
+comes back. Calls share the 30-second RPC timeout, so start long work and return a handle to poll.
+
 ## Debug backend output
 
 Backend contributions can write to stdout and stderr with normal Node logging:

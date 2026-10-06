@@ -23,7 +23,7 @@ import { type ManagedPluginCandidate, ManagedPluginSources } from "./managed-sou
 import { readPluginManifest } from "./manifest.js";
 import { expandTilde } from "../../utils/path.js";
 import { runPluginBuild } from "./preparation.js";
-import { PluginRuntime } from "./runtime.js";
+import { PluginRuntime, type PluginAgentTool } from "./runtime.js";
 import { BuiltinPluginLoader, type BuiltinPlugin } from "./builtin/index.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
 import { readPluginProviderIcon } from "./provider-icon.js";
@@ -42,6 +42,8 @@ interface PluginRuntimePort {
   before?: PluginLifecycle["before"];
   catalog: PluginRuntime["catalog"];
   invoke(pluginId: string, method: string, input: unknown): Promise<unknown>;
+  agentTools?(): PluginAgentTool[];
+  invokeAgentTool?(pluginId: string, method: string, input: unknown): Promise<unknown>;
   getLogs(pluginId: string): PluginLogEntry[];
   clearLogs(pluginId: string): void;
   getProviderRegistrations?(pluginId: string): readonly PluginProviderMetadata[];
@@ -234,6 +236,14 @@ export class PluginService {
         }
         const error = this.errors.get(id);
         if (error && item.status === "failed") item.error = error;
+        const agentTools = this.listAgentTools().filter((tool) => tool.pluginId === id);
+        if (agentTools.length > 0) {
+          item.agentTools = agentTools.map(({ method, description, inputSchema }) => ({
+            method,
+            description,
+            inputSchema,
+          }));
+        }
         return item;
       }),
     );
@@ -475,6 +485,15 @@ export class PluginService {
 
   invokePluginRpc(pluginId: string, method: string, input: unknown): Promise<unknown> {
     return this.runtime.invoke(pluginId, method, input);
+  }
+
+  listAgentTools(): PluginAgentTool[] {
+    return this.runtime.agentTools?.() ?? [];
+  }
+
+  invokeAgentTool(pluginId: string, method: string, input: unknown): Promise<unknown> {
+    if (!this.runtime.invokeAgentTool) throw new Error("Plugin agent tools are unavailable");
+    return this.runtime.invokeAgentTool(pluginId, method, input);
   }
 
   async stopAllPlugins(): Promise<void> {

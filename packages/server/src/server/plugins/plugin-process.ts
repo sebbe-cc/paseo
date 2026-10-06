@@ -9,7 +9,7 @@ import type { UsageSourceRegistration } from "@getpaseo/plugin/server/usage";
 import type { SettingsDefinition, PluginRpcContract } from "@getpaseo/plugin";
 import type { PluginHandlerContext, PluginServerContribution } from "@getpaseo/plugin/server";
 import { fileURLToPath } from "node:url";
-import type { ZodType } from "zod";
+import { toJSONSchema, type ZodType } from "zod";
 import {
   ProviderEventSchema,
   type ProviderConnection,
@@ -107,6 +107,17 @@ export function createPluginWorker(options: {
     }
     const method = validateMethod(contract.name);
     handlers.set(method, { contract: { ...contract, name: method }, handler });
+  }
+
+  // Agents need input schemas to call opted-in RPCs; a schema Zod can't express is left out.
+  function rpcInputSchemas(): Record<string, unknown> {
+    const schemas: Record<string, unknown> = {};
+    for (const [method, { contract }] of handlers) {
+      try {
+        schemas[method] = toJSONSchema(contract.input, { io: "input", unrepresentable: "any" });
+      } catch {}
+    }
+    return schemas;
   }
 
   function registerProvider(provider: ProviderRegistration): void {
@@ -306,6 +317,7 @@ export function createPluginWorker(options: {
     send({
       type: "ready",
       methods: [...handlers.keys()].sort(),
+      inputSchemas: rpcInputSchemas(),
       hooks: hooks.catalog(),
       providers: [...providers.values()]
         .sort((left, right) => left.id.localeCompare(right.id))

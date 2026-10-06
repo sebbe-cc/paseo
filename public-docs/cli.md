@@ -190,6 +190,19 @@ plugin's recent daemon-side stdout and stderr. Add `--json` for structured entri
 [Plugin reference](/docs/plugins/reference) for installation, trust, lifecycle, and log-retention
 behavior.
 
+Plugins can expose selected RPCs to agents. List and call them from the CLI:
+
+```bash
+paseo plugin tools [id]
+paseo plugin call changes-walkthrough walkthrough.sources '{"workspaceId":"wks_123"}'
+echo '{"workspaceId":"wks_123"}' | paseo plugin call changes-walkthrough walkthrough.sources -
+paseo plugin call my-plugin my.method --input-file input.json
+```
+
+`paseo plugin call` only reaches methods the plugin lists under `agentTools` and prints the
+output as JSON. Agents use the same tools through the `list_plugin_tools` and `call_plugin_tool`
+MCP tools.
+
 ## Listing agents
 
 ```bash
