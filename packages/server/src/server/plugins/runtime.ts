@@ -366,6 +366,7 @@ export class PluginRuntime {
       pluginId: input.id,
       pluginDirectory: directory,
       requirements: manifest.requirements,
+      agentTools: manifest.agentTools,
       child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
@@ -685,6 +686,7 @@ export class PluginRuntime {
       pluginId,
       pluginDirectory: directory,
       requirements: manifest.requirements,
+      agentTools: manifest.agentTools,
       child: this.spawnChild(),
       bundle: serverBundle,
       clientBundle: bundles.clientBundle ?? "",
@@ -695,11 +697,12 @@ export class PluginRuntime {
     pluginId: string;
     pluginDirectory: string;
     requirements: PluginRequirements | undefined;
+    agentTools: readonly PluginAgentToolDeclaration[] | undefined;
     child: PluginChild;
     bundle: string;
     clientBundle: string;
   }): Promise<LoadedPlugin> {
-    const { pluginId, requirements, child, bundle, clientBundle } = input;
+    const { pluginId, requirements, agentTools, child, bundle, clientBundle } = input;
     const sessionHost = this.sessionHost;
     if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {
@@ -797,7 +800,7 @@ export class PluginRuntime {
       clientBundle,
       requirements,
       methods: new Set(ready.methods),
-      agentTools: resolveAgentTools(pluginId, manifest.agentTools, ready),
+      agentTools: resolveAgentTools(pluginId, agentTools, ready),
       hooks: ready.hooks ?? { events: [], before: [] },
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
