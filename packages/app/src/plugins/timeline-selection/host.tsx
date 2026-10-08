@@ -29,7 +29,7 @@ import type { Theme } from "@/styles/theme";
 import { createTimelineSelectionComposer } from "./composer";
 import { createPluginClientStateSource } from "../client-state/source";
 import { pluginRegistry, useInstalledPlugins } from "../registry";
-import { PluginRuntimeBoundary } from "../runtime-boundary";
+import { PluginInstallationProvider } from "../installation-provider";
 import { SurfaceErrorBoundary } from "../surface-error-boundary";
 import { toPluginTheme } from "../theme";
 import type { InstalledPlugin } from "../types";
@@ -132,13 +132,13 @@ function SelectionForm({
       scrollable
     >
       <SurfaceErrorBoundary installation={installation} Surface={Content}>
-        <PluginRuntimeBoundary plugin={installation} client={client}>
+        <PluginInstallationProvider plugin={installation}>
           <PluginClientStateProvider source={stateSource}>
             <View style={FORM_STYLE}>
               <Content {...props} />
             </View>
           </PluginClientStateProvider>
-        </PluginRuntimeBoundary>
+        </PluginInstallationProvider>
       </SurfaceErrorBoundary>
     </MenuSurface>
   );
