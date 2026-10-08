@@ -219,7 +219,7 @@ describe("archiveByScope", () => {
     expect(existsSync(worktree.worktreePath)).toBe(false);
   });
 
-  test("workspace scope runs teardown while keeping a directory referenced by a sibling", async () => {
+  test("workspace scope skips teardown and removal while a sibling still uses the directory", async () => {
     const { tempDir, repoDir } = createGitRepo();
     writeFileSync(
       path.join(repoDir, "paseo.json"),
@@ -260,6 +260,26 @@ describe("archiveByScope", () => {
       removedDirectory: false,
     });
     expect(existsSync(worktree.worktreePath)).toBe(true);
+    // Teardown stops the checkout's shared environment, so it must wait for the last user.
+    expect(existsSync(path.join(repoDir, "shared-teardown.log"))).toBe(false);
+
+    const last = await archiveByScope(
+      createArchiveDeps({
+        paseoHome,
+        activeWorkspaces: [
+          { workspaceId: workspaceB, cwd: worktree.worktreePath, kind: "worktree" },
+        ],
+      }),
+      {
+        scope: { kind: "workspace", workspaceId: workspaceB },
+        requestId: "req-sibling-workspace-last",
+      },
+    );
+
+    assertArchiveResult(last, {
+      archivedWorkspaceIds: [workspaceB],
+      removedDirectory: true,
+    });
     expect(readFileSync(path.join(repoDir, "shared-teardown.log"), "utf8")).toBe("ok");
   });
 
