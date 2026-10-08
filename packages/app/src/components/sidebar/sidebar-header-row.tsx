@@ -13,6 +13,7 @@ import { ICON_SIZE } from "@/styles/theme";
 import type { Theme } from "@/styles/theme";
 import { Shortcut } from "@/components/ui/shortcut";
 import type { ShortcutKey } from "@/utils/format-shortcut";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -89,6 +90,7 @@ export function SidebarHeaderRow({
           accessibilityLabel={accessibilityLabel ?? label}
           accessibilityState={isActive ? SELECTED_STATE : undefined}
           aria-selected={isActive}
+          dataSet={NAV_ROW_DATASET}
           style={styles.button}
         >
           {ThemedIcon ? (
