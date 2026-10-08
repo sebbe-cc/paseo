@@ -1021,6 +1021,46 @@ describe("workspace labels", () => {
     });
   });
 
+  test("lists one workspace's labels with their catalog colors", async () => {
+    expect(await labels.listAssignments("wks_one")).toEqual({ workspaceId: "wks_one", labels: [] });
+    await labels.setAssignment({
+      workspaceId: "wks_one",
+      label: { name: "Blocked", color: "red" },
+      assigned: true,
+    });
+    await labels.setAssignment({
+      workspaceId: "wks_one",
+      label: { name: "Waiting", color: "amber" },
+      assigned: true,
+    });
+    expect(await labels.listAssignments("wks_one")).toEqual({
+      workspaceId: "wks_one",
+      labels: [
+        { name: "Blocked", color: "red" },
+        { name: "Waiting", color: "amber" },
+      ],
+    });
+    await labels.setAssignment({
+      workspaceId: "wks_one",
+      label: { name: "blocked", color: "sky" },
+      assigned: false,
+    });
+    expect(await labels.listAssignments("wks_one")).toEqual({
+      workspaceId: "wks_one",
+      labels: [{ name: "Waiting", color: "amber" }],
+    });
+  });
+
+  test("refuses assignments listing for missing and archived workspaces", async () => {
+    await expect(labels.listAssignments("wks_missing")).rejects.toMatchObject({
+      code: "workspace_not_found",
+    });
+    await registry.archive("wks_one", "2026-08-14T01:00:00.000Z");
+    await expect(labels.listAssignments("wks_one")).rejects.toMatchObject({
+      code: "workspace_not_found",
+    });
+  });
+
   test("expires a bounded journal to a coherent snapshot", async () => {
     const bounded = createWorkspaceLabelService({
       paseoHome: join(paseoHome, "bounded"),

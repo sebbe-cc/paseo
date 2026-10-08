@@ -1,6 +1,7 @@
 import {
   normalizeWorkspaceLabelName,
   workspaceLabelKey,
+  type WorkspaceLabelColor,
   type WorkspaceLabelDefinition,
 } from "@getpaseo/protocol/workspace-labels";
 import { WorkspaceLabelCatalogStore } from "./catalog-store.js";
@@ -230,6 +231,26 @@ export class WorkspaceLabelService {
     });
   }
 
+  async listAssignments(workspaceId: string): Promise<{
+    workspaceId: string;
+    labels: Array<{ name: string; color: WorkspaceLabelColor | null }>;
+  }> {
+    return this.exclusive(() => {
+      return this.catalog.commit((catalog, workspaces) => {
+        const workspace = workspaces.get(workspaceId);
+        if (!workspace || workspace.archivedAt) {
+          throw new WorkspaceLabelError("workspace_not_found", "Workspace not found");
+        }
+        const labels = toAssignmentView(catalog, workspace.labels ?? []);
+        return {
+          labels: [...catalog],
+          workspaceUpdates: [],
+          result: { workspaceId, labels },
+        };
+      });
+    });
+  }
+
   async countAffectedWorkspaces(nameInput: string): Promise<number> {
     return this.exclusive(() => {
       const key = workspaceLabelKey(requireName(nameInput));
@@ -255,6 +276,18 @@ export class WorkspaceLabelService {
       release();
     }
   }
+}
+
+function toAssignmentView(
+  catalog: readonly WorkspaceLabelDefinition[],
+  names: readonly string[],
+): Array<{ name: string; color: WorkspaceLabelColor | null }> {
+  return names.map((name) => {
+    const definition = catalog.find(
+      (label) => workspaceLabelKey(label.name) === workspaceLabelKey(name),
+    );
+    return { name, color: definition?.color ?? null };
+  });
 }
 
 function updateAssignmentLabels(
