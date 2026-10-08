@@ -821,6 +821,30 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type ProjectContainerListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.list.response" }
+>["payload"];
+export type ProjectContainerCreatePayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.create.response" }
+>["payload"];
+export type ProjectContainerRenamePayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.rename.response" }
+>["payload"];
+export type ProjectContainerDeletePayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.delete.response" }
+>["payload"];
+export type ProjectContainerReorderPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.reorder.response" }
+>["payload"];
+export type ProjectContainerAssignPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.assign.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -2578,6 +2602,93 @@ export class DaemonClient {
       message: {
         type: "workspace.label.delete.inspect.request",
         name: options.name,
+      },
+    });
+  }
+
+  listProjectContainers(
+    options: { requestId?: string } = {},
+  ): Promise<ProjectContainerListPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "project.container.list.request" },
+    });
+  }
+
+  observeProjectContainers(options?: {
+    signal?: AbortSignal;
+  }): OwnedSubscription<ProjectContainerListPayload> {
+    return this.observe(
+      "project.container.list.response",
+      { type: "project.container.list.request", subscribe: {} },
+      options,
+    );
+  }
+
+  createProjectContainer(options: {
+    name: string;
+    projectIds?: string[];
+    requestId?: string;
+  }): Promise<ProjectContainerCreatePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "project.container.create.request",
+        name: options.name,
+        ...(options.projectIds ? { projectIds: options.projectIds } : {}),
+      },
+    });
+  }
+
+  renameProjectContainer(options: {
+    containerId: string;
+    name: string;
+    requestId?: string;
+  }): Promise<ProjectContainerRenamePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "project.container.rename.request",
+        containerId: options.containerId,
+        name: options.name,
+      },
+    });
+  }
+
+  deleteProjectContainer(options: {
+    containerId: string;
+    requestId?: string;
+  }): Promise<ProjectContainerDeletePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "project.container.delete.request", containerId: options.containerId },
+    });
+  }
+
+  reorderProjectContainers(options: {
+    containerIds: string[];
+    requestId?: string;
+  }): Promise<ProjectContainerReorderPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "project.container.reorder.request", containerIds: options.containerIds },
+    });
+  }
+
+  /** Moves repositories into a project (or out of every project when `containerId` is null). */
+  assignProjectContainer(options: {
+    projectIds: string[];
+    containerId: string | null;
+    index?: number;
+    requestId?: string;
+  }): Promise<ProjectContainerAssignPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "project.container.assign.request",
+        projectIds: options.projectIds,
+        containerId: options.containerId,
+        ...(options.index === undefined ? {} : { index: options.index }),
       },
     });
   }
