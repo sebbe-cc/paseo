@@ -1467,6 +1467,7 @@ export async function createPaseoDaemon(
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
     workspaceRegistry,
     workspaceLabels: workspaceLabelService,
+    pluginAgentTools: pluginRuntime,
     projectRegistry,
     createDirectoryWorkspace: async (cwd, title, projectId) => {
       const workspace = await workspaceProvisioning.createWorkspaceForDirectory(

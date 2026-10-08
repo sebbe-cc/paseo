@@ -1619,6 +1619,53 @@ export default function contribute(server: any) {
     await runtime.stopAll();
   });
 
+  it("exposes only manifest-declared RPCs as agent tools, with input schemas", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-"));
+    temporaryDirectories.push(directory);
+    await writeFile(
+      path.join(directory, "paseo-plugin.json"),
+      JSON.stringify({
+        id: "tools",
+        agentTools: [{ method: "tools.greet", description: "Greets someone." }],
+      }),
+    );
+    await writeFile(
+      path.join(directory, "index.server.ts"),
+      `import { z } from "zod";
+import { defineRpc } from "@getpaseo/plugin";
+const greet = defineRpc({ name: "tools.greet", input: z.object({ name: z.string(), loud: z.boolean().optional() }), output: z.string() });
+const secret = defineRpc({ name: "tools.secret", input: z.object({}), output: z.string() });
+export default function contribute(server: any) {
+  server.handle(greet, (input: { name: string }) => "Hello, " + input.name);
+  server.handle(secret, () => "hidden");
+  return () => undefined;
+}`,
+    );
+    const runtime = createTestRuntime();
+    await runtime.startPlugin("tools", directory);
+
+    expect(runtime.agentTools()).toEqual([
+      {
+        pluginId: "tools",
+        method: "tools.greet",
+        description: "Greets someone.",
+        inputSchema: expect.objectContaining({
+          type: "object",
+          properties: { name: { type: "string" }, loud: { type: "boolean" } },
+          required: ["name"],
+        }),
+      },
+    ]);
+    await expect(runtime.invokeAgentTool("tools", "tools.greet", { name: "Ada" })).resolves.toBe(
+      "Hello, Ada",
+    );
+    await expect(runtime.invokeAgentTool("tools", "tools.secret", {})).rejects.toThrow(
+      "does not expose tools.secret",
+    );
+
+    await runtime.stopAll();
+  });
+
   it("keeps client and server modules in their target runtime", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-"));
     temporaryDirectories.push(directory);

@@ -6676,6 +6676,9 @@ export const PluginListItemSchema = z.object({
   ref: z.string().optional(),
   commit: z.string().optional(),
   error: z.string().optional(),
+  agentTools: z
+    .array(z.object({ method: z.string(), description: z.string(), inputSchema: z.unknown() }))
+    .optional(),
 });
 export type PluginListItem = z.infer<typeof PluginListItemSchema>;
 

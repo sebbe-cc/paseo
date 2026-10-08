@@ -105,6 +105,11 @@ const TOOL_SPECS: Readonly<Record<string, ToolDetailSpec>> = {
     inputOrder: ["workspaceId", "name"],
     outputFields: ["workspaceId", "labels"],
   },
+  list_plugin_tools: { inputOrder: ["pluginId"], outputFields: ["tools"] },
+  call_plugin_tool: {
+    inputOrder: ["pluginId", "method", "input"],
+    outputFields: ["pluginId", "method", "output"],
+  },
   create_agent: {
     promptField: "initialPrompt",
     inputOrder: AGENT_FIELDS,

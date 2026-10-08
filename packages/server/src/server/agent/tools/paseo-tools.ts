@@ -105,6 +105,7 @@ import {
   registerProjectContainerTools,
   type ProjectContainerToolDependencies,
 } from "./project-container-tools.js";
+import type { PluginService } from "../../plugins/index.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -125,6 +126,7 @@ export interface PaseoToolHostDependencies {
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
   workspaceLabels?: Pick<WorkspaceLabelService, "listAssignments" | "setAssignment">;
+  pluginAgentTools?: Pick<PluginService, "listAgentTools" | "invokeAgentTool">;
   projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
     cwd: string,
@@ -2413,6 +2415,73 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson(assignments),
+      };
+    },
+  );
+
+  function requirePluginAgentTools(): NonNullable<PaseoToolHostDependencies["pluginAgentTools"]> {
+    if (!options.pluginAgentTools) {
+      throw new Error("Plugin agent tools are not configured");
+    }
+    return options.pluginAgentTools;
+  }
+
+  registerTool(
+    "list_plugin_tools",
+    {
+      title: "List plugin tools",
+      description:
+        "List the tools that installed Paseo plugins expose to agents, with each tool's description and JSON input schema. Call one with call_plugin_tool.",
+      inputSchema: {
+        pluginId: z.string().trim().min(1).optional().describe("Only list tools of this plugin."),
+      },
+      outputSchema: {
+        tools: z.array(
+          z.object({
+            pluginId: z.string(),
+            method: z.string(),
+            description: z.string(),
+            inputSchema: z.unknown(),
+          }),
+        ),
+      },
+    },
+    async ({ pluginId }) => {
+      const pluginTools = requirePluginAgentTools()
+        .listAgentTools()
+        .filter((tool) => !pluginId || tool.pluginId === pluginId);
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ tools: pluginTools }),
+      };
+    },
+  );
+
+  registerTool(
+    "call_plugin_tool",
+    {
+      title: "Call plugin tool",
+      description:
+        "Call a tool that an installed Paseo plugin exposes to agents. Use list_plugin_tools to find pluginId, method and the input schema.",
+      inputSchema: {
+        pluginId: z.string().trim().min(1).describe("Plugin id from list_plugin_tools."),
+        method: z.string().trim().min(1).describe("Tool method from list_plugin_tools."),
+        input: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Input object matching the tool's input schema."),
+      },
+      outputSchema: {
+        pluginId: z.string(),
+        method: z.string(),
+        output: z.unknown(),
+      },
+    },
+    async ({ pluginId, method, input }) => {
+      const output = await requirePluginAgentTools().invokeAgentTool(pluginId, method, input ?? {});
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ pluginId, method, output }),
       };
     },
   );
