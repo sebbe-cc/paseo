@@ -532,10 +532,17 @@ function emitCodexUserMessage(
 
 type CapturedFakeCodexRecord = Record<string, unknown>;
 
-async function runCustomCodexProviderTurn(
-  providerId: string,
-  baseUrl: string,
-): Promise<CapturedFakeCodexRecord[]> {
+interface CustomCodexProviderTurnOptions {
+  providerId: string;
+  baseUrl: string;
+  launchEnv?: Record<string, string>;
+}
+
+async function runCustomCodexProviderTurn({
+  providerId,
+  baseUrl,
+  launchEnv,
+}: CustomCodexProviderTurnOptions): Promise<CapturedFakeCodexRecord[]> {
   const tempDir = await mkdtemp(path.join(tmpdir(), "codex-custom-provider-"));
   const fakeAppServerPath = path.join(tempDir, "fake-codex-app-server.cjs");
   const capturedRequestsPath = path.join(tempDir, "requests.jsonl");
@@ -599,12 +606,15 @@ process.stdin.on("data", (chunk) => {
       },
     },
   });
-  const session = await registry[providerId].createClient(createTestLogger()).createSession({
-    provider: providerId,
-    cwd: "/workspace/project",
-    modeId: "auto",
-    model: "custom-model",
-  });
+  const session = await registry[providerId].createClient(createTestLogger()).createSession(
+    {
+      provider: providerId,
+      cwd: "/workspace/project",
+      modeId: "auto",
+      model: "custom-model",
+    },
+    { env: launchEnv },
+  );
 
   try {
     await session.startTurn("use the custom endpoint");
@@ -2308,10 +2318,10 @@ describe("Codex app-server provider", () => {
   });
 
   test("configures Codex app-server to use a custom provider base URL", async () => {
-    const capturedRequests = await runCustomCodexProviderTurn(
-      "codex-iisb",
-      "https://custom-relay.example.com",
-    );
+    const capturedRequests = await runCustomCodexProviderTurn({
+      providerId: "codex-iisb",
+      baseUrl: "https://custom-relay.example.com",
+    });
 
     expect(capturedRequests[0]).toEqual({
       kind: "env",
@@ -2332,11 +2342,32 @@ describe("Codex app-server provider", () => {
     });
   });
 
+  test("session launch URL overrides the custom Codex provider endpoint", async () => {
+    const capturedRequests = await runCustomCodexProviderTurn({
+      providerId: "codex-custom",
+      baseUrl: "https://default-relay.example.com",
+      launchEnv: { OPENAI_BASE_URL: "https://session-relay.example.com" },
+    });
+    expect(capturedRequests[0]).toEqual({
+      kind: "env",
+      OPENAI_API_KEY: "sk-custom",
+      OPENAI_BASE_URL: "https://session-relay.example.com",
+    });
+    expect(capturedThreadStartConfig(capturedRequests)).toEqual({
+      model_provider: "codex-custom",
+      model_providers: {
+        "codex-custom": expect.objectContaining({
+          base_url: "https://session-relay.example.com/v1",
+        }),
+      },
+    });
+  });
+
   test("does not append v1 twice for custom Codex provider base URLs", async () => {
-    const capturedRequests = await runCustomCodexProviderTurn(
-      "codex-custom",
-      "https://custom-relay.example.com/v1/",
-    );
+    const capturedRequests = await runCustomCodexProviderTurn({
+      providerId: "codex-custom",
+      baseUrl: "https://custom-relay.example.com/v1/",
+    });
 
     expect(capturedThreadStartConfig(capturedRequests)).toEqual({
       model_provider: "codex-custom",

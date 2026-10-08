@@ -7163,7 +7163,10 @@ export class CodexAppServerAgentClient implements AgentClient {
     return {
       ...this.deps,
       codexHome: resolveCodexHomeDir(buildCodexAppServerEnv(this.runtimeSettings, launchEnv)),
-      customCodexConfig: this.customProviderConfig(),
+      customCodexConfig: buildCodexCustomProviderConfig(
+        { ...this.runtimeSettings, env: { ...this.runtimeSettings?.env, ...launchEnv } },
+        this.deps.customProvider,
+      ),
     };
   }
 
