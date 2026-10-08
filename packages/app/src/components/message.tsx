@@ -13,6 +13,7 @@ import {
   type TextStyle,
 } from "react-native";
 import { useTranslation } from "react-i18next";
+import { SelectableText } from "@/components/selectable-text";
 import { MarkdownParagraphView, MarkdownTextSpan } from "@/components/markdown-text";
 import { MarkdownTableCellText } from "@/components/markdown-text-selection";
 import * as React from "react";
@@ -545,9 +546,9 @@ export const UserMessage = memo(function UserMessage({
             </View>
           ) : null}
           {hasText ? (
-            <Text selectable style={userMessageStylesheet.text} dataSet={MESSAGE_TEXT_DATASET}>
+            <SelectableText style={userMessageStylesheet.text} dataSet={MESSAGE_TEXT_DATASET}>
               {message}
-            </Text>
+            </SelectableText>
           ) : null}
         </View>
         {hasText ? (
