@@ -845,6 +845,14 @@ export type ProjectContainerAssignPayload = Extract<
   SessionOutboundMessage,
   { type: "project.container.assign.response" }
 >["payload"];
+export type ProjectContainerFilesPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.container.files.get.response" }
+>["payload"];
+type ProjectContainerFilesRequest<T extends SessionInboundMessage["type"]> = Omit<
+  Extract<SessionInboundMessage, { type: T }>,
+  "type" | "requestId"
+> & { requestId?: string };
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -2690,6 +2698,122 @@ export class DaemonClient {
         containerId: options.containerId,
         ...(options.index === undefined ? {} : { index: options.index }),
       },
+    });
+  }
+
+  getProjectContainerFiles(options: {
+    containerId: string;
+    requestId?: string;
+  }): Promise<ProjectContainerFilesPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "project.container.files.get.request", containerId: options.containerId },
+    });
+  }
+
+  /** Snapshot plus `project.container.files.update` pushes for one project. */
+  observeProjectContainerFiles(options: {
+    containerId: string;
+    signal?: AbortSignal;
+  }): OwnedSubscription<ProjectContainerFilesPayload> {
+    return this.observe(
+      "project.container.files.get.response",
+      {
+        type: "project.container.files.get.request",
+        containerId: options.containerId,
+        subscribe: {},
+      },
+      { signal: options.signal },
+    );
+  }
+
+  createProjectNote(
+    options: ProjectContainerFilesRequest<"project.container.note.create.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.note.create.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.note.create.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.note.create.request" },
+    });
+  }
+
+  updateProjectNote(
+    options: ProjectContainerFilesRequest<"project.container.note.update.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.note.update.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.note.update.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.note.update.request" },
+    });
+  }
+
+  appendProjectNote(
+    options: ProjectContainerFilesRequest<"project.container.note.append.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.note.append.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.note.append.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.note.append.request" },
+    });
+  }
+
+  deleteProjectNote(
+    options: ProjectContainerFilesRequest<"project.container.note.delete.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.note.delete.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.note.delete.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.note.delete.request" },
+    });
+  }
+
+  reorderProjectNotes(
+    options: ProjectContainerFilesRequest<"project.container.note.reorder.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.note.reorder.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.note.reorder.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.note.reorder.request" },
+    });
+  }
+
+  createProjectTodo(
+    options: ProjectContainerFilesRequest<"project.container.todo.create.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.todo.create.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.todo.create.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.todo.create.request" },
+    });
+  }
+
+  updateProjectTodo(
+    options: ProjectContainerFilesRequest<"project.container.todo.update.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.todo.update.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.todo.update.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.todo.update.request" },
+    });
+  }
+
+  deleteProjectTodo(
+    options: ProjectContainerFilesRequest<"project.container.todo.delete.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.todo.delete.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.todo.delete.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.todo.delete.request" },
+    });
+  }
+
+  reorderProjectTodos(
+    options: ProjectContainerFilesRequest<"project.container.todo.reorder.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.todo.reorder.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.todo.reorder.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.todo.reorder.request" },
+    });
+  }
+
+  writeProjectContext(
+    options: ProjectContainerFilesRequest<"project.container.context.write.request">,
+  ): Promise<CorrelatedResponsePayload<"project.container.context.write.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.container.context.write.response">({
+      requestId: options.requestId,
+      message: { ...options, type: "project.container.context.write.request" },
     });
   }
 
