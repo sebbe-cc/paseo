@@ -178,6 +178,14 @@ function isVerticalScrollbarGutterPress(
     : event.clientX >= bounds.right - scrollbarWidth;
 }
 
+function TimelineCursorStyle({ css }: { css: string }) {
+  return css ? <style>{css}</style> : null;
+}
+
+function getTimelineCursorRowId(cursor: TimelineCursor | null): string | null {
+  return cursor?.rowId ?? null;
+}
+
 function scrollElementToBottom(
   scrollContainer: HTMLElement,
   behavior: ScrollBehaviorLike = "auto",
@@ -387,7 +395,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   // walks off to the following message.
   const chatFindMessageId = useChatFindSelectedMessageId();
   const [timelineCursor, setTimelineCursor] = useState<TimelineCursor | null>(null);
-  const timelineCursorRowId = timelineCursor?.rowId ?? null;
+  const timelineCursorRowId = getTimelineCursorRowId(timelineCursor);
   const pinnedRowIndexes = useMemo(() => {
     if (!chatFindMessageId && !timelineCursorRowId) return null;
     const indexes = segments.historyVirtualized.flatMap((item, index) =>
@@ -1337,7 +1345,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
 
   return (
     <div style={viewportStyle} data-window-content>
-      {timelineCursorView.css ? <style>{timelineCursorView.css}</style> : null}
+      <TimelineCursorStyle css={timelineCursorView.css} />
       <div
         ref={handleScrollContainerRef}
         data-testid="agent-chat-scroll"
