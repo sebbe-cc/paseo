@@ -13,9 +13,12 @@ export async function runLsCommand(
 
   try {
     const payload = await client.listProjects();
+    const containers = client.getLastServerInfoMessage()?.features?.projectContainers
+      ? (await client.listProjectContainers()).containers
+      : [];
     return {
       type: "list",
-      data: payload.projects.map(toProjectRow),
+      data: payload.projects.map((project) => toProjectRow(project, containers)),
       schema: projectSchema,
     };
   } finally {
