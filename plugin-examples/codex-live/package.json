@@ -1,0 +1,13 @@
+{
+  "name": "paseo-plugin-codex-live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@roamhq/wrtc": "0.10.0",
+    "ws": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

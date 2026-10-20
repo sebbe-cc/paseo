@@ -1,3 +1,4 @@
+import { loadPersistedConfig } from "./persisted-config.js";
 import { stat } from "node:fs/promises";
 import type { CreationSnapshot } from "@getpaseo/protocol/messages";
 import { CreationService } from "./creation/index.js";
@@ -378,6 +379,17 @@ function resolveCapabilityReason(params: {
   return state.message;
 }
 
+function readPluginVoiceSelection(
+  paseoHome: string,
+): import("@getpaseo/plugin/server").VoiceProviderSelection | null {
+  const voice = loadPersistedConfig(paseoHome).features?.voiceMode;
+  const disabled =
+    voice?.enabled === false ||
+    process.env.PASEO_VOICE_MODE_ENABLED === "false" ||
+    process.env.PASEO_VOICE_MODE_ENABLED === "0";
+  return disabled ? null : (voice?.provider ?? null);
+}
+
 function buildServerCapabilities(params: {
   readiness: SpeechReadinessSnapshot | null;
 }): ServerCapabilities | undefined {
@@ -550,6 +562,10 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceAutoName: WorkspaceAutoName;
   private readonly downloadTokenStore: DownloadTokenStore;
   private readonly paseoHome: string;
+  private readonly pluginVoiceSelection:
+    | import("@getpaseo/plugin/server").VoiceProviderSelection
+    | null;
+  private unsubscribePluginVoice: (() => void) | null = null;
   private readonly passwordHash: string | undefined;
   private readonly credentialSource: DaemonAuthConfig | undefined;
   private readonly worktreesRoot: string | undefined;
@@ -701,6 +717,7 @@ export class VoiceAssistantWebSocketServer {
     this.workspaceAutoName = workspaceAutoName;
     this.downloadTokenStore = downloadTokenStore;
     this.paseoHome = paseoHome;
+    this.pluginVoiceSelection = readPluginVoiceSelection(paseoHome);
     this.passwordHash = auth?.password;
     this.worktreesRoot = daemonRuntimeConfig?.worktreesRoot;
     this.daemonConfigStore = daemonConfigStore;
@@ -722,9 +739,8 @@ export class VoiceAssistantWebSocketServer {
       throw new Error("providerSnapshotManager is required");
     }
     this.providerSnapshotManager = providerSnapshotManager;
-    this.serverCapabilities = buildServerCapabilities({
-      readiness: this.speech?.getReadiness() ?? null,
-    });
+    this.serverCapabilities = this.resolveVoiceCapabilities(this.speech?.getReadiness() ?? null);
+    this.subscribePluginVoice();
     this.unsubscribeSpeechReadiness =
       this.speech?.onReadinessChange((snapshot) => {
         this.publishSpeechReadiness(snapshot);
@@ -988,8 +1004,54 @@ export class VoiceAssistantWebSocketServer {
     }
   }
 
+  private subscribePluginVoice(): void {
+    this.unsubscribePluginVoice =
+      this.pluginRuntime?.subscribe(() =>
+        this.publishSpeechReadiness(this.speech?.getReadiness() ?? null),
+      ) ?? null;
+  }
+
+  private createPluginVoiceOptions(): NonNullable<
+    import("./session/voice/voice-session.js").VoiceSessionOptions["voice"]
+  >["plugin"] {
+    return {
+      getSelection: () => this.pluginVoiceSelection,
+      host: {
+        hasVoiceProvider: (selection) => this.pluginRuntime?.hasVoiceProvider?.(selection) === true,
+        startVoiceProvider: (selection, context) => {
+          if (!this.pluginRuntime?.startVoiceProvider)
+            throw new Error("Plugin voice providers are unavailable");
+          return this.pluginRuntime.startVoiceProvider(selection, context);
+        },
+      },
+    };
+  }
+
+  private resolveVoiceCapabilities(
+    readiness: SpeechReadinessSnapshot | null,
+  ): ServerCapabilities | undefined {
+    const capabilities = buildServerCapabilities({ readiness });
+    const provider = this.pluginVoiceSelection;
+    if (!provider) return capabilities;
+    const available = this.pluginRuntime?.hasVoiceProvider?.(provider) === true;
+    return {
+      ...capabilities,
+      voice: {
+        dictation: capabilities?.voice?.dictation ?? {
+          enabled: false,
+          reason: "Dictation is unavailable",
+        },
+        voice: {
+          enabled: available,
+          reason: available ? "" : "Selected voice plugin is unavailable",
+        },
+        provider,
+      },
+    };
+  }
+
   public publishSpeechReadiness(readiness: SpeechReadinessSnapshot | null): void {
-    this.updateServerCapabilities(buildServerCapabilities({ readiness }));
+    this.updateServerCapabilities(this.resolveVoiceCapabilities(readiness));
   }
 
   public updateServerCapabilities(capabilities: ServerCapabilities | null | undefined): void {
@@ -1064,6 +1126,8 @@ export class VoiceAssistantWebSocketServer {
 
   public async close(): Promise<void> {
     this.prepareForShutdown();
+    this.unsubscribePluginVoice?.();
+    this.unsubscribePluginVoice = null;
     this.unsubscribeSpeechReadiness?.();
     this.unsubscribeSpeechReadiness = null;
     this.unsubscribeDaemonConfigChange?.();
@@ -1514,6 +1578,7 @@ export class VoiceAssistantWebSocketServer {
       serviceProxyPublicBaseUrl: this.serviceProxyPublicBaseUrl,
       resolveScriptHealth: this.resolveScriptHealth ?? undefined,
       voice: {
+        plugin: this.createPluginVoiceOptions(),
         turnDetection: () => this.speech?.resolveTurnDetection() ?? null,
       },
       voiceBridge: {
@@ -1803,6 +1868,7 @@ export class VoiceAssistantWebSocketServer {
         ...(this.workspaceLabelService ? { workspaceLabels: true } : {}),
         // COMPAT(workspaceSetupRun): added in v0.7.3, remove gate after 2027-09-02.
         workspaceSetupRun: true,
+        pluginVoiceProviders: true,
         // COMPAT(providersSnapshot): keep optional until all clients rely on snapshot flow.
         providersSnapshot: true,
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.

@@ -536,3 +536,68 @@ describe("voice runtime", () => {
     unsubscribe();
   });
 });
+
+describe("plugin voice lifetime", () => {
+  it("ignores a failed old reconnect after a new agent starts voice", async () => {
+    const adapter = createSessionAdapter();
+    const { runtime, engine } = createRuntime();
+    runtime.registerSession(adapter);
+    await runtime.startVoice("server-1", "agent-1");
+    let rejectReconnect: ((error: Error) => void) | undefined;
+    vi.mocked(adapter.setVoiceMode).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectReconnect = reject;
+        }),
+    );
+    runtime.updateSessionConnection("server-1", false);
+    runtime.updateSessionConnection("server-1", true);
+    await runtime.startVoice("server-1", "agent-2");
+    vi.mocked(engine.stopCapture).mockClear();
+    rejectReconnect!(new Error("old call failed"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.getSnapshot().activeAgentId).toBe("agent-2");
+    expect(runtime.getSnapshot().phase).toBe("listening");
+    expect(engine.stopCapture).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+
+  it("stops capture when the provider ends during a pending microphone start", async () => {
+    const engine = createAudioEngineMock();
+    let finish: (() => void) | undefined;
+    vi.mocked(engine.startCapture).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const adapter = createSessionAdapter();
+    const { runtime } = createRuntime({ engine });
+    runtime.registerSession(adapter);
+    const starting = runtime.startVoice("server-1", "agent-1");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    const ending = runtime.onSessionEnded("server-1");
+    runtime.handleCapturePcm(new Uint8Array(3200));
+    expect(adapter.sendVoiceAudioChunk).not.toHaveBeenCalled();
+    finish!();
+    await starting;
+    await ending;
+    expect(engine.stopCapture).toHaveBeenCalled();
+    expect(runtime.getSnapshot().phase).toBe("disabled");
+  });
+
+  it("gates plugin voice once before microphone capture", async () => {
+    const info = createServerInfo();
+    info.capabilities!.voice!.provider = { pluginId: "live", providerId: "live" };
+    const { runtime, engine } = createRuntime({ getServerInfo: () => info });
+    runtime.registerSession(createSessionAdapter());
+    await expect(runtime.startVoice("server-1", "agent-1")).rejects.toThrow("Update the host");
+    expect(engine.startCapture).not.toHaveBeenCalled();
+    info.features = { pluginVoiceProviders: true };
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.onTurnEvent("server-1", "agent-1", "turn_started");
+    expect(runtime.getSnapshot().phase).toBe("listening");
+    await runtime.destroy();
+  });
+});
