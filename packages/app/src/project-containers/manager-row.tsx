@@ -1,16 +1,15 @@
 import { useCallback, useState, type ReactElement } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Text, View } from "react-native";
 import { Pencil } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import type { ProjectContainer } from "@getpaseo/protocol/project-containers";
+import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import type { Theme } from "@/styles/theme";
 
 const EDIT_ICON_SIZE = 14;
-/** Grows the pencil to a 44pt target without moving it off the trailing rail. */
-const EDIT_HIT_SLOP = (44 - EDIT_ICON_SIZE) / 2;
 const ThemedPencil = withUnistyles(Pencil);
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -30,14 +29,6 @@ export function ProjectContainerManagerRow({
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
   const edit = useCallback(() => onEdit(container), [container, onEdit]);
   const revealed = isHovered || isNative || isCompact;
-  const editStyle = useCallback(
-    ({ pressed }: PressableStateCallbackType) => [
-      styles.edit,
-      !revealed && styles.editHidden,
-      pressed && styles.editPressed,
-    ],
-    [revealed],
-  );
   return (
     <View
       style={styles.row}
@@ -51,17 +42,15 @@ export function ProjectContainerManagerRow({
       <Text style={styles.count}>
         {t("projectContainers.manage.count", { count: container.projectIds.length })}
       </Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={t("projectContainers.manage.editLabel", { name: container.name })}
+      <ToolbarButton
+        label={t("projectContainers.manage.editLabel", { name: container.name })}
         disabled={disabled}
-        hitSlop={EDIT_HIT_SLOP}
         onPress={edit}
-        style={editStyle}
+        style={revealed ? undefined : styles.editHidden}
         testID={`project-container-manager-edit-${container.id}`}
       >
         <ThemedPencil size={EDIT_ICON_SIZE} uniProps={mutedMapping} />
-      </Pressable>
+      </ToolbarButton>
     </View>
   );
 }
@@ -80,7 +69,5 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
   },
   count: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
-  edit: { alignItems: "center", justifyContent: "center" },
   editHidden: { opacity: 0 },
-  editPressed: { opacity: 0.6 },
 }));
