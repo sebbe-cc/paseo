@@ -333,6 +333,21 @@ export const PASEO_TOOL_CATALOG = {
     detail: { inputOrder: ["provider", "cwd", "settings"] },
   },
 
+  // Plugins
+  list_plugin_tools: {
+    label: "List plugin tools",
+    context: field("pluginId"),
+    detail: { inputOrder: ["pluginId"], outputFields: ["tools"] },
+  },
+  call_plugin_tool: {
+    label: "Call plugin tool",
+    context: field("method"),
+    detail: {
+      inputOrder: ["pluginId", "method", "input"],
+      outputFields: ["pluginId", "method", "output"],
+    },
+  },
+
   // Browser
   browser_list_tabs: browser("List browser tabs"),
   browser_new_tab: browser("Open browser tab", field("url")),
