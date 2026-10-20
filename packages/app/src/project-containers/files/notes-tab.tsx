@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type ReactElement } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Text, View, type PressableStateCallbackType } from "react-native";
 import { Plus } from "lucide-react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
@@ -7,6 +7,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProjectNote } from "@getpaseo/protocol/project-container-files";
 import { Button } from "@/components/ui/button";
 import { SettingsSection } from "@/components/settings/headings/settings-section";
+import { PressHighlight } from "@/components/ui/press-highlight";
 import { settingsStyles } from "@/styles/settings";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { formatTimeAgo } from "@/utils/time";
@@ -161,7 +162,7 @@ function NoteRow({
       onPointerLeave={hover.onPointerLeave}
       testID={`project-note-row-${note.id}`}
     >
-      <Pressable
+      <PressHighlight
         accessibilityRole="button"
         accessibilityState={selectState}
         onPress={handleSelect}
@@ -171,7 +172,7 @@ function NoteRow({
           {note.title}
         </Text>
         <Text style={styles.updated}>{updated}</Text>
-      </Pressable>
+      </PressHighlight>
       <RowActions
         revealed={hover.revealed || selected}
         canMoveUp={index > 0}

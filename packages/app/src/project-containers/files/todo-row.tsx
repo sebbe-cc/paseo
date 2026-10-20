@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, type ReactElement } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { Square, SquareCheck } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
@@ -7,6 +7,7 @@ import {
   PROJECT_TODO_TEXT_MAX_LENGTH,
   type ProjectTodo,
 } from "@getpaseo/protocol/project-container-files";
+import { PressHighlight } from "@/components/ui/press-highlight";
 import { EditingTextInput } from "@/components/ui/text-input";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
@@ -68,7 +69,7 @@ export function TodoRow({
       onPointerLeave={hover.onPointerLeave}
       testID={`project-todo-row-${todo.id}`}
     >
-      <Pressable
+      <PressHighlight
         accessibilityRole="checkbox"
         accessibilityState={checkState}
         accessibilityLabel={t("projectContainers.files.todos.toggle", { text: todo.text })}
@@ -77,7 +78,7 @@ export function TodoRow({
         testID={`project-todo-toggle-${todo.id}`}
       >
         {todo.done ? doneIcon : openIcon}
-      </Pressable>
+      </PressHighlight>
       {editing ? (
         <EditingTextInput
           autoFocus
@@ -92,7 +93,7 @@ export function TodoRow({
           testID={`project-todo-input-${todo.id}`}
         />
       ) : (
-        <Pressable
+        <PressHighlight
           accessibilityRole="button"
           accessibilityLabel={t("projectContainers.files.todos.edit", { text: todo.text })}
           onPress={handleEdit}
@@ -100,7 +101,7 @@ export function TodoRow({
           testID={`project-todo-text-${todo.id}`}
         >
           <Text style={todo.done ? [styles.text, styles.doneText] : styles.text}>{todo.text}</Text>
-        </Pressable>
+        </PressHighlight>
       )}
       <RowActions
         revealed={hover.revealed}

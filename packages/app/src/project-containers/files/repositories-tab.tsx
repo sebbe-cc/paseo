@@ -1,9 +1,10 @@
 import { useCallback, useMemo, type ReactElement } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Text, View, type PressableStateCallbackType } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { SettingsSection } from "@/components/settings/headings/settings-section";
+import { PressHighlight } from "@/components/ui/press-highlight";
 import { useProjects } from "@/hooks/use-projects";
 import { openProjectSettings } from "@/navigation/settings-navigation";
 import { settingsStyles } from "@/styles/settings";
@@ -75,7 +76,7 @@ function RepositoryRow({
   );
   return (
     <View style={first ? null : settingsStyles.rowBorder}>
-      <Pressable
+      <PressHighlight
         accessibilityRole="button"
         accessibilityLabel={t("projectContainers.files.repositories.open", { name: row.name })}
         onPress={handleOpen}
@@ -93,7 +94,7 @@ function RepositoryRow({
           ) : null}
         </View>
         <ThemedChevronRight size={16} uniProps={mutedMapping} />
-      </Pressable>
+      </PressHighlight>
     </View>
   );
 }

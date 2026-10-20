@@ -1,8 +1,9 @@
 import { useCallback, useState, type ReactElement, type ReactNode } from "react";
-import { Pressable, View, type PressableStateCallbackType } from "react-native";
+import { View } from "react-native";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
@@ -20,10 +21,6 @@ export function useReportFilesError(): (cause: unknown) => void {
   return useCallback((cause: unknown) => toast.error(projectContainerErrorMessage(cause)), [toast]);
 }
 
-function actionStyle({ pressed }: PressableStateCallbackType) {
-  return pressed ? [styles.action, styles.actionPressed] : styles.action;
-}
-
 function ActionButton({
   label,
   icon,
@@ -38,17 +35,9 @@ function ActionButton({
   testID: string;
 }): ReactElement {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      disabled={disabled}
-      hitSlop={6}
-      onPress={onPress}
-      style={actionStyle}
-      testID={testID}
-    >
-      <View style={disabled ? styles.disabled : null}>{icon}</View>
-    </Pressable>
+    <ToolbarButton label={label} disabled={disabled} onPress={onPress} testID={testID}>
+      {icon}
+    </ToolbarButton>
   );
 }
 
@@ -115,7 +104,4 @@ export function useRowHover() {
 const styles = StyleSheet.create((theme) => ({
   actions: { flexDirection: "row", alignItems: "center", gap: theme.spacing[2] },
   hidden: { opacity: 0 },
-  action: { padding: theme.spacing[1], borderRadius: theme.borderRadius.md },
-  actionPressed: { opacity: 0.6 },
-  disabled: { opacity: 0.35 },
 }));
