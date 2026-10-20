@@ -43,6 +43,32 @@ probe asks the agent to locate the text file instead of spelling a filename.
 This verifies delegation and returned audio; it does not establish transcript
 or answer accuracy in arbitrary conversations.
 
+## Mac Electron microphone and playback
+
+A separate Electron 44.2.0 dev client on the Mac connected over SSH forwards to
+the Linux daemon on 6798 and its Electron renderer on 8118. The installed app
+and both production daemons were left running. The user confirmed that physical
+microphone input, Live delegation to a real Codex agent, and speaker playback
+worked. The agent received the user's weather question and ran its tool.
+CDP observed 83 returned audio packets in a 12-second window. Mac microphone
+launch requirements are documented in [development](../development.md).
+
+The user reported clicks between packets. Before the playback correction, 901
+Web Audio buffer starts showed a median 1.33 ms gap, p95 6.67 ms and maximum
+60 ms among 893 boundaries shorter than 150 ms. Live PCM now shares one audio
+clock rather than waiting for JavaScript completion callbacks between packets.
+A synthetic speech probe through the updated Electron client and real Live
+service produced 131 buffer starts; all 118 boundaries shorter than 150 ms were
+contiguous within floating-point precision. Longer pauses between speech groups
+were excluded in both measurements. These are scheduling measurements, not a
+recording or a controlled comparison of identical speech. Perceived quality
+after the change still needs user confirmation.
+
+Focused playback and voice-runtime tests cover scheduling ahead, acknowledgement
+after consumption, an empty terminal packet, cancellation while waiting for new
+packets, and leaving agent work running. Native playback uses its existing
+communication engine's PCM queue; physical mobile devices remain untested.
+
 ## Fixture and regression tests
 
 The default integration test uses a fixture provider and fake agent. It verifies
@@ -141,7 +167,8 @@ on remote session termination.
 | -------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Linux daemon, CPA media and real Codex             | Passing integrated synthetic-speech test above                                 |
 | App voice state and client/server plugin loaders   | Focused automated tests                                                        |
-| Browser app and Electron UI                        | Not manually exercised                                                         |
+| Mac Electron UI, microphone and speaker            | User-confirmed voice round trip; packet scheduling measured above              |
+| Plain browser app                                  | Not manually exercised                                                         |
 | iOS and Android devices                            | Not exercised; existing PCM engines reused                                     |
 | Other daemon OS/architectures                      | Native WebRTC dependency not verified                                          |
 | Reconnect                                          | Generation and teardown unit coverage; real network reconnection not exercised |

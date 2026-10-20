@@ -600,4 +600,45 @@ describe("plugin voice lifetime", () => {
     expect(runtime.getSnapshot().phase).toBe("listening");
     await runtime.destroy();
   });
+
+  it("feeds Live packets ahead of playback completion and wakes a waiting stream on interruption", async () => {
+    const info = createServerInfo();
+    info.capabilities!.voice!.provider = { pluginId: "live", providerId: "live" };
+    info.features = { pluginVoiceProviders: true };
+    const engine = createAudioEngineMock();
+    const chunks: import("@/audio/audio-engine-types").AudioPlaybackStreamChunk[] = [];
+    let finished = false;
+    const controller = new AbortController();
+    vi.mocked(engine.play).mockImplementation(async (source) => {
+      if (!source.stream) throw new Error("Expected continuous PCM playback");
+      for await (const chunk of source.stream(controller.signal)) chunks.push(chunk);
+      finished = true;
+      return 0.2;
+    });
+    vi.mocked(engine.stop).mockImplementation(() => controller.abort());
+    const adapter = createSessionAdapter();
+    const { runtime } = createRuntime({ engine, getServerInfo: () => info });
+    runtime.registerSession(adapter);
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.handleAudioOutput(
+      "server-1",
+      createAudioPayload({ id: "first", groupId: "live", chunkIndex: 0, isLastChunk: false }),
+    );
+    await vi.waitFor(() => expect(chunks).toHaveLength(1));
+    runtime.handleAudioOutput(
+      "server-1",
+      createAudioPayload({ id: "second", groupId: "live", chunkIndex: 1, isLastChunk: false }),
+    );
+    await vi.waitFor(() => expect(chunks).toHaveLength(2));
+    expect(engine.play).toHaveBeenCalledTimes(1);
+    expect(adapter.audioPlayed).not.toHaveBeenCalled();
+    chunks[0].onPlayed();
+    expect(adapter.audioPlayed).toHaveBeenCalledWith("first");
+    runtime.onServerSpeechStateChanged("server-1", true);
+    await vi.waitFor(() => expect(finished).toBe(true));
+    chunks[1].onPlayed();
+    expect(adapter.audioPlayed).not.toHaveBeenCalledWith("second");
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
 });

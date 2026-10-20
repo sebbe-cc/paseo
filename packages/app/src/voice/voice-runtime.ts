@@ -3,6 +3,7 @@ import type { AgentStreamEventPayload, SessionOutboundMessage } from "@getpaseo/
 import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
 import type { DaemonServerInfo } from "@/stores/session-store";
 import type { AudioEngine } from "@/audio";
+import type { AudioPlaybackStreamChunk } from "@/audio/audio-engine-types";
 import {
   THINKING_TONE_NATIVE_PCM_BASE64,
   THINKING_TONE_NATIVE_PCM_DURATION_MS,
@@ -107,6 +108,7 @@ interface StreamingPlaybackGroup {
   finalChunkIndex: number | null;
   started: boolean;
   ackedChunkIds: Set<string>;
+  wake: (() => void) | null;
 }
 
 interface RuntimePlaybackState {
@@ -291,6 +293,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
   function resetPlaybackState(): void {
     playback.generation += 1;
+    for (const group of playback.groups.values()) group.wake?.();
     playback.groups.clear();
     playback.orderedGroupIds = [];
     playback.activeGroupId = null;
@@ -334,6 +337,62 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     await activeSession.adapter.audioPlayed(chunkId);
   }
 
+  async function* streamPlaybackGroup(
+    group: StreamingPlaybackGroup,
+    generation: number,
+    signal: AbortSignal,
+  ): AsyncGenerator<AudioPlaybackStreamChunk> {
+    while (generation === playback.generation && !signal.aborted) {
+      const chunk = group.chunks.get(group.nextChunkToPlay);
+      if (chunk) {
+        group.chunks.delete(group.nextChunkToPlay++);
+        yield {
+          audio: chunk.source,
+          onPlayed() {
+            if (generation !== playback.generation || group.ackedChunkIds.has(chunk.id)) return;
+            group.ackedChunkIds.add(chunk.id);
+            void acknowledgeChunk(chunk.id).catch((error) => {
+              console.warn("[VoiceRuntime] Failed to confirm audio playback:", error);
+            });
+          },
+        };
+      } else if (group.finalChunkIndex !== null && group.nextChunkToPlay > group.finalChunkIndex) {
+        return;
+      } else {
+        await new Promise<void>((resolve) => {
+          const wake = () => {
+            signal.removeEventListener("abort", wake);
+            group.wake = null;
+            resolve();
+          };
+          group.wake = wake;
+          signal.addEventListener("abort", wake, { once: true });
+          if (signal.aborted) wake();
+        });
+      }
+    }
+  }
+
+  function canStreamGroup(group: StreamingPlaybackGroup, chunk: StreamingPlaybackChunk): boolean {
+    return group.shouldPlay && isPluginVoice() && chunk.source.type.startsWith("audio/pcm");
+  }
+
+  async function playStreamingGroup(
+    group: StreamingPlaybackGroup,
+    chunk: StreamingPlaybackChunk,
+    generation: number,
+  ): Promise<void> {
+    try {
+      await deps.engine.play({
+        ...chunk.source,
+        stream: (signal) => streamPlaybackGroup(group, generation, signal),
+      });
+    } catch (error) {
+      if (generation !== playback.generation) return;
+      console.error("[VoiceRuntime] Streaming playback failed:", error);
+    }
+  }
+
   async function processPlaybackQueue(serverId: string): Promise<void> {
     if (playback.processing) {
       return;
@@ -365,12 +424,20 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           continue;
         }
 
-        group.chunks.delete(group.nextChunkToPlay);
-
         if (group.shouldPlay && !group.started && group.isVoiceMode) {
           group.started = true;
           api.onAssistantAudioStarted(serverId);
         }
+
+        if (canStreamGroup(group, nextChunk)) {
+          await playStreamingGroup(group, nextChunk, generation);
+          if (generation !== playback.generation) return;
+          retireFinishedGroup(group, serverId);
+          activateNextPlaybackGroup();
+          continue;
+        }
+
+        group.chunks.delete(group.nextChunkToPlay);
 
         try {
           if (group.shouldPlay) {
@@ -714,6 +781,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           finalChunkIndex: null,
           started: false,
           ackedChunkIds: new Set(),
+          wake: null,
         };
         playback.groups.set(groupId, group);
         playback.orderedGroupIds.push(groupId);
@@ -730,6 +798,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       if (payload.isLastChunk) {
         group.finalChunkIndex = chunkIndex;
       }
+      group.wake?.();
 
       void processPlaybackQueue(serverId);
     },

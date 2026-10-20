@@ -123,16 +123,18 @@ services and incurs inference usage; the ordinary suite skips it.
 - WebRTC media runs between the daemon and OpenAI. CPA handles bootstrap and
   control; its current media relay is disabled. The daemon needs working ICE and
   outbound media connectivity. An HTTPS tunnel does not carry this WebRTC leg.
-- Capture and playback reuse Paseo's web/native engines. That does not verify
-  physical iOS/Android devices, Electron, Bluetooth, acoustic echo cancellation,
-  backgrounding, or remote network behavior.
+- Capture and playback reuse Paseo's web/native engines. Mac Electron has a
+  user-confirmed voice round trip; see the verification evidence above. Physical
+  iOS/Android devices, Bluetooth, acoustic echo cancellation, backgrounding and
+  remote network behavior still need verification.
 - Input speech detection uses a fixed energy threshold with a 60 ms onset and
   400 ms release. Noisy rooms may need a different detector. Live owns remote
   speech interruption; client playback is cleared independently of agent work.
 - Output downmixes and resamples the WebRTC sink to mono at 24 kHz, including
   the initial 16 kHz silence before Opus audio arrives. Each
   audio backlog is bounded. This initial bridge adds 100 ms output batching and
-  300 ms silence grouping; audio quality and long-session latency need device QA.
+  300 ms silence grouping. Client playback adds a 150 ms startup buffer for
+  packet jitter; audio quality and long-session latency need device QA.
 - Agent outputs without an accepted message/turn ID are not attributed to a
   delegation. There is no inferred match to arbitrary last messages.
 - Live-to-agent transcript and delegation text leave the daemon for the configured
