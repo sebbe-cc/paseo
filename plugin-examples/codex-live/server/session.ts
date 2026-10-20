@@ -6,6 +6,7 @@ import type { VoiceProviderSession, VoiceProviderStartContext } from "@getpaseo/
 import type { nonstandard } from "@roamhq/wrtc";
 import { createDelegations } from "./delegation";
 import { createInputAudio, createOutputAudio } from "./audio";
+import type { VoiceSchema } from "../shared/preferences";
 
 const SinkDataSchema = z.object({
   samples: z.instanceof(Int16Array),
@@ -19,6 +20,7 @@ const TurnSchema = z.object({
 
 export async function startCodexLive(
   context: VoiceProviderStartContext,
+  voice: z.infer<typeof VoiceSchema>,
 ): Promise<VoiceProviderSession> {
   const require = createRequire(path.join(context.directory, "package.json"));
   const wrtc: typeof import("@roamhq/wrtc") = require("@roamhq/wrtc");
@@ -169,7 +171,7 @@ export async function startCodexLive(
         model: "gpt-live-1-codex",
         instructions:
           "You are the voice frontend for the selected Paseo coding agent. For coding, workspace actions, status and changes of plan, delegate to the client. You cannot inspect files yourself. Wait for the delegated agent's result before reporting any file contents, status or verification phrase. Never invent an example result while waiting. Speak concise answers in the user's language. Read the agent's updates accurately. Talking interrupts speech, not the coding agent's job. Never claim a job was cancelled unless the agent reports it.",
-        audio: { output: { voice: "cove" } },
+        audio: { output: { voice } },
         delegation: { type: "client" },
       }),
     );

@@ -567,6 +567,64 @@ export default function contribute(server) {
   }
 }, 60_000);
 
+test("Codex Live saves a validated voice across reload and finds the current Gas City King", async () => {
+  const { settingsRpc } = await import("@getpaseo/plugin");
+  const { createPaseoApi } = await import("@getpaseo/client");
+  const { findKing } = await import("../../../../../plugin-examples/codex-live/shared/king.js");
+  const directory = fileURLToPath(
+    new URL("../../../../../plugin-examples/codex-live/", import.meta.url),
+  );
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.12.0",
+    mcpEnabled: false,
+    agentClients: createTestAgentClients(),
+    pluginsEnabled: true,
+    plugins: { "codex-live": { source: "directory", path: directory, enabled: true } },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  const api = createPaseoApi(client);
+  const rpc = settingsRpc("voice");
+  try {
+    await client.connect();
+    const read = () => client.invokePluginRpc("codex-live", rpc.read.name, {});
+    await expect(read()).resolves.toMatchObject({ status: "ready", values: { voice: "cove" } });
+    const invalid = await client.invokePluginRpc("codex-live", rpc.write.name, {
+      revision: "missing",
+      values: { voice: "not-a-voice" },
+    });
+    expect(invalid).toMatchObject({ status: "invalid" });
+    const saved = await client.invokePluginRpc("codex-live", rpc.write.name, {
+      revision: "missing",
+      values: { voice: "maple" },
+    });
+    expect(saved).toMatchObject({ status: "saved", values: { voice: "maple" } });
+    await client.reloadPlugin("codex-live");
+    await expect(read()).resolves.toMatchObject({ status: "ready", values: { voice: "maple" } });
+    await expect(findKing(api)).rejects.toThrow("Expected one active");
+    const king = await client.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      labels: { "gc-session": "king" },
+    });
+    await expect(findKing(api)).resolves.toBe(king.id);
+    const replacement = await client.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      labels: { "gc-session": "king" },
+    });
+    await expect(findKing(api)).rejects.toThrow("Expected one active");
+    await api.agents.ref(king.id).archive();
+    await expect(findKing(api)).resolves.toBe(replacement.id);
+  } finally {
+    await api.dispose();
+    await client.close();
+    await daemon.close();
+  }
+}, 60_000);
+
 test.runIf(process.env.PASEO_TEST_CODEX_LIVE === "1")(
   "Codex Live carries PCM and delegated file inspection through a real Paseo agent",
   async () => {
@@ -661,6 +719,13 @@ test.runIf(process.env.PASEO_TEST_CODEX_LIVE === "1")(
     });
     try {
       await client.connect();
+      const { settingsRpc } = await import("@getpaseo/plugin");
+      const voiceSettings = settingsRpc("voice");
+      const selected = await client.invokePluginRpc("codex-live", voiceSettings.write.name, {
+        revision: "missing",
+        values: { voice: "maple" },
+      });
+      expect(selected).toMatchObject({ status: "saved", values: { voice: "maple" } });
       const agent = await client.createAgent({
         provider: "codex",
         cwd: root,
@@ -697,6 +762,7 @@ test.runIf(process.env.PASEO_TEST_CODEX_LIVE === "1")(
       process.stdout.write(
         JSON.stringify({
           liveVoiceEvidence: {
+            voice: "maple",
             inputPcmBytes: pcm.length,
             outputEnergy: energy,
             phrase,

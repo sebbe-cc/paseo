@@ -4,10 +4,25 @@ This example needs Paseo's `feat/plugin-voice-provider` topic based on v0.12.0.
 Upstream v0.12.0 does not implement `registerVoiceProvider`.
 
 The normal Paseo voice button records PCM16 at 16 kHz and plays PCM16 at 24 kHz.
-This server-only plugin bridges that transport to Codex FramelessBidi with
+This plugin bridges that transport to Codex FramelessBidi with
 `@roamhq/wrtc`. Clients do not receive the CPA key or need a WebRTC library.
 There is no separate voice UI. Omit the provider selection to keep the existing
 STT/agent/TTS implementation.
+
+## Voice and recipient
+
+Open **Settings → Plugins → codex-live → Codex Live**, or search **Codex Live: voice and King** in the
+Command Center. The voice picker saves to this host's plugin settings. Restart
+voice mode to apply a change; ongoing calls keep their voice. The list comes from
+Codex rust-v0.163.0's FramelessBidi voice catalog. Cove has been tested end to end;
+the other catalog entries still need listening tests with the deployed service.
+
+The Command Center screen's **Open King** finds the unique active Paseo agent labelled `gc-session=king`,
+including background workspaces. Use its normal voice button to talk to Gas City's
+Mayor. Opening the actual recipient keeps voice, agent status and explicit
+cancellation pointed at the same agent. The plugin does not redirect another
+agent's conversation in the background or retain a stale King ID across sessions.
+If King is missing or ambiguous, fix the session in Gas City and retry.
 
 ## Run in an isolated daemon
 
@@ -141,5 +156,5 @@ services and incurs inference usage; the ordinary suite skips it.
   remote service. Credentials remain in the server process.
 - Bifrost currently loses the Alpha header and call Location and lacks the Codex
   sideband route. Point this example directly at CPA.
-- No production packaging, desvio manifest entry, or deployment is included.
-  There are no dependencies on other fork topics.
+- Production packaging and configuration live in fleet/paseo. This topic has no
+  dependencies on other fork topics.

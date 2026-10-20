@@ -1,7 +1,8 @@
 # Plugin voice provider verification
 
 2026-10-20, Linux daemon, topic `feat/plugin-voice-provider`, based on upstream
-v0.12.0. No production configuration, integration branch or manifest changed.
+v0.12.0. Initial implementation and isolated tests precede production integration
+in fleet/paseo.
 
 ## Real service and real agent
 
@@ -70,6 +71,17 @@ packets, and leaving agent work running. Native playback uses its existing
 communication engine's PCM queue; physical mobile devices remain untested.
 
 ## Fixture and regression tests
+
+The Codex Live settings/King integration test loads the real plugin in an isolated
+daemon with fake agents. It rejects unknown voices, persists Maple through reload,
+finds King by `gc-session=king`, refuses missing/ambiguous recipients, and resolves
+the replacement after the previous King is archived. This test sends no prompt to
+the production King and does not create a remote Live call.
+
+Mac Electron manual UI checks selected Maple in the plugin picker and observed it
+saved. The King action displayed its missing-recipient error in the isolated
+daemon. Temporarily labelling that daemon's test agent `gc-session=king` made the
+same action navigate to its existing workspace. No production agent was prompted.
 
 The default integration test uses a fixture provider and fake agent. It verifies
 registration and selection, a rejected old-client capability, source-scoped audio
