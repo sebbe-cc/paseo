@@ -340,6 +340,9 @@ export interface OpenComposerAttachmentInput {
   setLightboxMetadata: (metadata: AttachmentMetadata) => void;
   openWorkspaceAttachment: (input: { attachment: ComposerAttachment }) => boolean;
   openExternalUrl: (url: string) => void;
+  openTextAttachment: (
+    attachment: Extract<ComposerAttachment, { kind: "plugin_resource" }>,
+  ) => void;
 }
 
 export function openComposerAttachment(input: OpenComposerAttachmentInput): void {
@@ -354,7 +357,12 @@ export function openComposerAttachment(input: OpenComposerAttachmentInput): void
     input.openWorkspaceAttachment({ attachment: input.attachment });
     return;
   }
-  input.openExternalUrl(input.attachment.item.url);
+  if (input.attachment.kind === "plugin_resource" && !input.attachment.item.url) {
+    input.openTextAttachment(input.attachment);
+    return;
+  }
+  const url = input.attachment.item.url;
+  if (url) input.openExternalUrl(url);
 }
 
 export function buildForgeAttachment(item: ForgeSearchItem): UserComposerAttachment {

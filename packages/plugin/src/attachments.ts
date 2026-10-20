@@ -12,7 +12,7 @@ export const PluginAttachmentItemSchema = z.object({
   identifier: z.string(),
   title: z.string(),
   subtitle: z.string().optional(),
-  url: z.url(),
+  url: z.url().optional(),
   text: z.string(),
   resourceType: z.string(),
 });
