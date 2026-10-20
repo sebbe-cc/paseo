@@ -180,7 +180,6 @@ export function ProjectContainerManagerModal({
       onClose={onClose}
       header={header}
       footer={footer}
-      sizeContentToCurrentSnapPoint
       testID="project-container-manager"
     >
       {draft ? (

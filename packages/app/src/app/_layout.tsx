@@ -1,3 +1,4 @@
+import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -36,7 +37,7 @@ import { ChangelogHost } from "@/changelog";
 import { AppDiagnosticHost } from "@/components/app-diagnostic-host";
 import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import { LeftSidebar } from "@/components/left-sidebar";
-import { WindowSidebarMenuToggle } from "@/components/headers/menu-header";
+import { WindowSidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 import { DesktopWindowControls } from "@/components/desktop/window-controls";
 import { SidebarModelProvider } from "@/components/sidebar/sidebar-model";
 import { WorkspacePinShortcutHandler } from "@/components/workspace-pin-shortcut-handler";
@@ -103,7 +104,6 @@ import {
   useKeyboardActionDispatcher,
 } from "@/keyboard/keyboard-action-dispatcher-context";
 import { polyfillCrypto } from "@/polyfills/crypto";
-import { polyfillNavigator } from "@/polyfills/navigator";
 import {
   getHostRuntimeStore,
   hasConfiguredLocalDaemonOverride,
@@ -117,6 +117,7 @@ import { usePanelStore } from "@/stores/panel-store";
 import { flushDraftPersistStorage } from "@/stores/draft-store";
 import { getNextThemePreference, ICON_STROKE_WIDTH } from "@/styles/theme";
 import { useSessionStore } from "@/stores/session-store";
+import { WorkspaceLayoutModePublisher } from "@/workspace-tabs/layout-mode-publisher";
 import { installWebScrollbarStyles } from "@/styles/install-web-scrollbar-styles";
 import type { HostProfile } from "@/types/host-connection";
 import {
@@ -139,7 +140,6 @@ import {
   type WebNotificationClickDetail,
 } from "@/utils/os-notifications";
 
-polyfillNavigator();
 polyfillCrypto();
 
 export interface HostRuntimeBootstrapState {
@@ -551,6 +551,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   }
   const workspaceChrome = (
     <View style={rowStyle}>
+      <WorkspaceLayoutModePublisher />
       {!isCompactLayout ? (
         <WindowChromeRegion corners={appChromeLayout.sidebarCorners}>
           {themedSidebarChrome}
@@ -627,7 +628,11 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     surface
   );
 
-  return <CommandCenterProvider>{content}</CommandCenterProvider>;
+  return (
+    <ComposerEditingSessionsProvider>
+      <CommandCenterProvider>{content}</CommandCenterProvider>
+    </ComposerEditingSessionsProvider>
+  );
 }
 
 function SidebarChrome({
@@ -662,7 +667,7 @@ function MobileGestureWrapper({
 
   return (
     <GestureDetector gesture={openGesture} touchAction={MOBILE_WEB_GESTURE_TOUCH_ACTION}>
-      <View collapsable={false} style={layoutStyles.surfaceFill}>
+      <View collapsable={false} style={layoutStyles.surfaceFill} testID="compact-shell">
         {children}
       </View>
     </GestureDetector>
