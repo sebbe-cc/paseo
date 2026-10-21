@@ -1,4 +1,10 @@
-import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import React, {
+  createContext,
+  useContext,
+  useMemo,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import type { PluginInlineDecoration } from "@getpaseo/plugin/client";
 import { createPluginAgentActionContext } from "../actions";
 import { createPluginClientStateSource } from "../client-state/source";
