@@ -193,3 +193,30 @@ OpenAI, so app HTTPS connectivity alone does not verify that leg.
 
 [Review setup and transport limits](../../plugin-examples/codex-live/README.md).
 No dependency on another fork topic; production packaging belongs in fleet/paseo.
+
+## Global voice target (2026-10-21, local app change)
+
+Right-click an agent tab and choose **Make voice-target**, or send
+`/voice-target` in that agent's chat. Both actions run locally, including while
+the agent is working. With voice off, selecting a target leaves the microphone
+off. During a call, selecting another target switches the voice session without
+cancelling either agent's work. Starting voice from a chat also selects it as
+the global target.
+
+The sidebar shows the recipient and voice state. Click it to start or stop voice.
+Assign **Toggle global voice** in Settings → Keyboard shortcuts → General; no
+default shortcut is assigned. Only the recipient is persisted. Reopening the
+app does not enable the microphone. A disconnected or unavailable recipient
+reports an error instead of choosing another agent.
+
+Focused runtime, composer, command, tab menu, keyboard, and rendered sidebar
+tests passed, together with typecheck and lint. Chromium exercised the actual
+sidebar row, global provider, target persistence, voice runtime and keyboard
+dispatch, with host, microphone and surrounding tab UI fixtures. It verified
+selection while agents work, switching, slash selection, hotkey on/off and reload
+with the microphone off; zero abort requests, agent messages or page errors.
+Wide dark and compact light screenshots were inspected. This is not physical
+Mac, iOS/Android or real audio verification.
+
+This change requires an updated app. It is not deployed by reloading the voice
+plugin. No production deployment or daemon restart was performed.

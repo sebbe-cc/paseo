@@ -1390,3 +1390,24 @@ describe("number-group shortcut capture", () => {
     expect(normalizeCapturedShortcutCombo(tabBindingId, "Ctrl+9")).toBe("Ctrl+Digit");
   });
 });
+
+describe("global voice shortcut", () => {
+  it("is assignable globally without stealing the chat voice shortcut", () => {
+    const platform = { isMac: true, isDesktop: true };
+    expect(resolveShortcutKeysForAction("global-voice-toggle", {}, platform)).toBeNull();
+    expect(
+      resolveShortcutKeysForAction(
+        "global-voice-toggle",
+        { "global-voice-toggle": "Cmd+Shift+V" },
+        platform,
+      ),
+    ).not.toBeNull();
+    const bindings = buildEffectiveBindings({ "global-voice-toggle": "Cmd+Shift+V" });
+    expect(bindings.find((binding) => binding.id === "global-voice-toggle")).toMatchObject({
+      action: "voice.global.toggle",
+      combo: "Cmd+Shift+V",
+      repeat: false,
+    });
+    expect(resolveShortcutKeysForAction("voice-toggle", {}, platform)).not.toBeNull();
+  });
+});

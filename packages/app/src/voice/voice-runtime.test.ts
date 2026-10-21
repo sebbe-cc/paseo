@@ -1,3 +1,4 @@
+import { selectVoiceTarget, toggleGlobalVoice } from "./global-voice-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonServerInfo } from "@/stores/session-store";
 import type { AudioEngine } from "@/audio";
@@ -639,6 +640,54 @@ describe("plugin voice lifetime", () => {
     chunks[1].onPlayed();
     expect(adapter.audioPlayed).not.toHaveBeenCalledWith("second");
     expect(adapter.abortRequest).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+});
+
+describe("selected global voice target", () => {
+  it("keeps selection separate from activation and never cancels a running agent during a switch", async () => {
+    const { runtime, engine } = createRuntime();
+    const adapter = createSessionAdapter();
+    runtime.registerSession(adapter);
+    const save = vi.fn();
+    const king = { serverId: "server-1", agentId: "king", title: "King" };
+    const chat = { serverId: "server-1", agentId: "chat", title: "Working chat" };
+    await selectVoiceTarget(runtime, king, save);
+    expect(save).toHaveBeenCalledWith(king);
+    expect(engine.startCapture).not.toHaveBeenCalled();
+    await toggleGlobalVoice(runtime, king);
+    await selectVoiceTarget(runtime, chat, save);
+    expect(runtime.isVoiceModeForAgent("server-1", "chat")).toBe(true);
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    expect(adapter.setVoiceMode).toHaveBeenCalledWith(false);
+    expect(engine.clearQueue).toHaveBeenCalled();
+    await toggleGlobalVoice(runtime, chat);
+    expect(runtime.getSnapshot().isVoiceMode).toBe(false);
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+  it("publishes the recipient after a direct chat start", async () => {
+    const engine = createAudioEngineMock();
+    const changed = vi.fn();
+    const runtime = createVoiceRuntime({
+      engine,
+      onTargetChanged: changed,
+      getServerInfo: () => createServerInfo(),
+      activateKeepAwake: async () => {},
+      deactivateKeepAwake: async () => {},
+    });
+    runtime.registerSession(createSessionAdapter());
+    await runtime.startVoice("server-1", "chat");
+    expect(changed).toHaveBeenCalledWith("server-1", "chat");
+    await runtime.destroy();
+  });
+  it("does not start a different host when the selected host is disconnected", async () => {
+    const { runtime, engine } = createRuntime();
+    runtime.registerSession(createSessionAdapter());
+    await expect(
+      toggleGlobalVoice(runtime, { serverId: "offline", agentId: "king", title: "King" }),
+    ).rejects.toThrow("not ready");
+    expect(engine.startCapture).not.toHaveBeenCalled();
     await runtime.destroy();
   });
 });

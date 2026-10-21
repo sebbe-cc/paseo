@@ -63,6 +63,7 @@ export interface VoiceSessionAdapter {
 }
 
 export interface VoiceRuntimeDeps {
+  onTargetChanged?(serverId: string, agentId: string): void;
   engine: AudioEngine;
   getServerInfo(serverId: string): DaemonServerInfo | null;
   activateKeepAwake(tag: string): Promise<void>;
@@ -841,6 +842,10 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           previousServerId &&
           (previousServerId !== serverId || previousAgentId !== agentId)
         ) {
+          stopCue();
+          resetPlaybackState();
+          deps.engine.stop();
+          deps.engine.clearQueue();
           const previousSession = sessions.get(previousServerId);
           if (previousSession) {
             previousSession.adapter.setAssistantAudioPlaying(false);
@@ -871,6 +876,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           phase: "listening",
           isMuted: deps.engine.isMuted(),
         }));
+        deps.onTargetChanged?.(serverId, agentId);
       } catch (error) {
         if (state.generation !== generation) return;
         if (enabledCurrentVoiceMode) {
