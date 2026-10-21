@@ -1148,6 +1148,7 @@ export const ar: TranslationResources = {
       description: "تحقق من اتصالك وحاول مرة أخرى.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "مجموعة {{label}}",
     statusBucket: {
@@ -2387,6 +2388,7 @@ export const ar: TranslationResources = {
         cycleTheme: "موضوع الدورة",
         focusMessageInput: "التركيز على إدخال الرسالة",
         cycleAgentMode: "تبديل وضع الوكيل",
+        toggleGlobalVoice: "تبديل الصوت العام",
         toggleVoiceMode: "تبديل الوضع الصوتي",
         startStopDictation: "بدء إملاء /stop",
         interruptAgent: "عامل المقاطعة",

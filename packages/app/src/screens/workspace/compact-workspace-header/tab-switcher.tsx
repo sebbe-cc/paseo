@@ -1,3 +1,4 @@
+import { useMakeVoiceTarget } from "@/contexts/global-voice-context";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { Keyboard, Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -182,8 +183,10 @@ function MobileWorkspaceTabOption({
   onCloseOtherTabs: (tabId: string) => Promise<void> | void;
 }) {
   const { t } = useTranslation();
+  const makeVoiceTarget = useMakeVoiceTarget(normalizedServerId);
   const tabMenuLabels = useMemo<WorkspaceTabMenuLabels>(
     () => ({
+      makeVoiceTarget: t("globalVoice.makeTarget"),
       copyResumeCommand: t("workspace.tabs.menu.copyResumeCommand"),
       copyAgentId: t("workspace.tabs.menu.copyAgentId"),
       copyTerminalId: t("workspace.tabs.menu.copyTerminalId"),
@@ -207,6 +210,7 @@ function MobileWorkspaceTabOption({
     index: tabIndex,
     tabCount,
     menuTestIDBase,
+    onMakeVoiceTarget: makeVoiceTarget ?? undefined,
     onCopyResumeCommand,
     onCopyAgentId,
     onCopyTerminalId,
