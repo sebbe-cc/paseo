@@ -20,6 +20,7 @@ import type {
   PluginPanelLocation,
   PluginWorkspacePanelContribution,
 } from "@getpaseo/plugin/client";
+import type { InlineDecorator } from "./inline-decorators/model";
 
 export type PluginSidebarSection = "header" | "footer";
 
@@ -44,6 +45,7 @@ export interface EvaluatedPlugin {
   timelineTransformers: PluginTimelineTransformerContribution[];
   timelineRenderers: PluginTimelineRendererContribution[];
   timelineSelectionActions: PluginTimelineSelectionActionContribution[];
+  inlineDecorators: InlineDecorator[];
 }
 
 export interface InstalledPlugin extends EvaluatedPlugin {

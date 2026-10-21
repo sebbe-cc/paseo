@@ -154,6 +154,10 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addTimelineRenderer<Schema extends ZodType>(
     contribution: PluginTimelineRendererContribution<Schema>,
   ): PluginCleanup;
+  /** Undefined on older hosts; check for it before calling. */
+  addInlineDecorator?(
+    contribution: PluginInlineDecoratorContribution,
+  ): PluginInlineDecoratorRegistration;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
 }
 
@@ -229,6 +233,43 @@ export interface PluginTimelineRendererContribution<Schema extends ZodType = Zod
   version: number;
   schema: Schema;
   Component: ComponentType<PluginTimelineItemProps<ZodOutput<Schema>>>;
+}
+
+export type PluginInlineDecorationTone = "neutral" | "success" | "warning" | "danger" | "muted";
+
+/** How the host draws one match. Colors come from the theme through `tone`. */
+export interface PluginInlineDecoration {
+  /** Replaces the matched text in the chip. Defaults to the matched text. */
+  label?: string;
+  /** Lucide icon name, drawn before the label. */
+  icon?: string;
+  tone?: PluginInlineDecorationTone;
+  tooltip?: string;
+}
+
+export interface PluginInlineDecoratorMatch {
+  text: string;
+  serverId: string;
+}
+
+export interface PluginInlineDecoratorContribution {
+  id: string;
+  /** Matched in assistant message text. Flags other than `g` are rejected; no lookbehind. */
+  pattern: RegExp;
+  /** Also match whole inline code spans such as `pa-123`. Defaults to true. */
+  inlineCode?: boolean;
+  /**
+   * Synchronous, from the plugin's own cache. `null` leaves the match as plain text;
+   * `undefined` draws a plain link that still calls `onPress`.
+   */
+  resolve?(match: PluginInlineDecoratorMatch): PluginInlineDecoration | null | undefined;
+  onPress(context: PluginAgentCommandContext & { text: string }): void | Promise<void>;
+}
+
+export interface PluginInlineDecoratorRegistration {
+  /** Re-runs `resolve` for these matched texts, or for every match when omitted. */
+  invalidate(texts?: readonly string[]): void;
+  remove(): void;
 }
 
 export interface PluginCommandCapabilities {

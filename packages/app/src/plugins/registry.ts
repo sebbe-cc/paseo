@@ -101,6 +101,7 @@ export class PluginRegistry {
           timelineTransformers: [],
           timelineRenderers: [],
           timelineSelectionActions: [],
+          inlineDecorators: [],
         };
         const runtime = this.dependencies.createRuntime(installation, options.audio);
         const evaluated = runPluginClientBundle(entry.id, entry.clientBundle, runtime, () =>

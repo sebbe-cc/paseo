@@ -36,6 +36,7 @@ import type { ComponentType } from "react";
 import { resolvePluginIcon } from "./icons";
 import { pluginReactNativeRuntime } from "./react-native/runtime";
 import { parsePluginThemeContribution } from "./themes";
+import { createInlineDecorator } from "./inline-decorators/model";
 
 const CONTRIBUTION_ID = /^[a-z][a-z0-9-]*$/;
 const PANEL_LOCATIONS = ["workspace", "explorer"] as const;
@@ -121,6 +122,7 @@ export function runPluginClientBundle(
     timelineTransformers: [],
     timelineRenderers: [],
     timelineSelectionActions: [],
+    inlineDecorators: [],
   };
   const surfaceIds = new Set<string>();
   const settingsScreenIds = new Set<string>();
@@ -136,6 +138,7 @@ export function runPluginClientBundle(
   const timelineTransformerIds = new Set<string>();
   const timelineRendererIds = new Set<string>();
   const timelineSelectionActionIds = new Set<string>();
+  const inlineDecoratorIds = new Set<string>();
   const removals = new Set<PluginCleanup>();
   let setupComplete = false;
   let stopped = false;
@@ -457,6 +460,26 @@ export function runPluginClientBundle(
         timelineRendererIds.delete(rendererId),
       );
     },
+    addInlineDecorator(contribution) {
+      if (typeof contribution !== "object" || contribution === null) {
+        throw new Error("addInlineDecorator takes { id, pattern, onPress }");
+      }
+      const normalizedId = requireId(contribution.id, "inline decorator id");
+      if (inlineDecoratorIds.has(normalizedId)) {
+        throw new Error(`Duplicate inline decorator: ${normalizedId}`);
+      }
+      const decorator = createInlineDecorator(contribution, normalizedId);
+      inlineDecoratorIds.add(normalizedId);
+      const remove = register(collector.inlineDecorators, decorator, () =>
+        inlineDecoratorIds.delete(normalizedId),
+      );
+      return {
+        invalidate: (texts) => {
+          if (!stopped) decorator.invalidate(texts);
+        },
+        remove,
+      };
+    },
     addComposerPill(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
       return trackButton(runtime.addComposerPill(contribution));
@@ -553,5 +576,6 @@ export function runPluginClientBundle(
     timelineTransformers: collector.timelineTransformers,
     timelineRenderers: collector.timelineRenderers,
     timelineSelectionActions: collector.timelineSelectionActions,
+    inlineDecorators: collector.inlineDecorators,
   };
 }
