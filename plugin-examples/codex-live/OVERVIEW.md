@@ -4,6 +4,11 @@ Use Paseo's normal voice button to talk to the selected coding agent through
 Codex Live. You can interrupt speech and give further guidance while the agent
 continues working. Explicit cancellation remains available in Paseo.
 
+In Codex Live settings, choose a voice and use **Provlyssna** to hear the same
+Swedish sample in that voice. Previewing uses packaged recordings and does not
+activate your microphone or coding agent. Voice changes apply to the next call.
+Porto and Selva currently have no preview because the voice service rejects them.
+
 This experimental server plugin needs the `feat/plugin-voice-provider` fork of
 Paseo 0.12 and an updated app. It sends microphone audio and delegated agent
 responses to the configured Codex Live service through CLIProxyAPI. The CPA key

@@ -1,7 +1,13 @@
 import { Text } from "react-native";
-import { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { usePaseo, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import {
+  usePaseo,
+  useSettings,
+  useRpc,
+  type PluginSurfaceProps,
+  type PluginClientContext,
+} from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
@@ -11,10 +17,23 @@ import {
 import { preferences, voices, type VoiceSchema } from "../shared/preferences";
 import type { z } from "zod";
 import { findKing } from "../shared/king";
+import { previewVoice, previewText, previewUnavailableMessage } from "../shared/preview";
 
-export function LiveSettings({ theme, navigation }: PluginSurfaceProps) {
+interface LiveSettingsProps extends PluginSurfaceProps {
+  playAudio: PluginClientContext["playAudio"];
+}
+
+export function LiveSettings({ theme, navigation, playAudio }: LiveSettingsProps) {
   const settings = useSettings(preferences);
   const paseo = usePaseo();
+  const preview = useRpc(previewVoice);
+  const listen = useMutation({
+    mutationFn: async (voice: z.infer<typeof VoiceSchema>) => {
+      const audio = await preview({ voice });
+      if ("unavailable" in audio) throw new Error(previewUnavailableMessage);
+      await playAudio(audio);
+    },
+  });
   const king = useMutation({
     mutationFn: async () => {
       if (!navigation) throw new Error("Update Paseo to open King from this screen.");
@@ -29,6 +48,9 @@ export function LiveSettings({ theme, navigation }: PluginSurfaceProps) {
     },
     [settings],
   );
+  const previewSelected = useCallback(() => {
+    if (settings.status === "ready") listen.mutate(settings.values.voice);
+  }, [settings, listen]);
   const openKing = useCallback(() => king.mutate(), [king]);
   if (settings.status === "loading") return <Text style={style}>Loading settings…</Text>;
   if (settings.status !== "ready")
@@ -59,8 +81,15 @@ export function LiveSettings({ theme, navigation }: PluginSurfaceProps) {
           label="Voice"
           value={settings.values.voice}
           options={voices}
-          disabled={settings.saving}
+          disabled={settings.saving || listen.isPending}
           onValueChange={changeVoice}
+        />
+        <SettingsAction
+          label="Provlyssna på vald röst"
+          hint={previewText}
+          actionLabel={listen.isPending ? "Provlyssnar…" : "Provlyssna"}
+          disabled={settings.saving || listen.isPending}
+          onPress={previewSelected}
         />
         {navigation ? (
           <SettingsAction
@@ -71,6 +100,14 @@ export function LiveSettings({ theme, navigation }: PluginSurfaceProps) {
           />
         ) : null}
       </SettingsCard>
+      {listen.error ? (
+        <Text accessibilityRole="alert" style={style}>
+          {listen.error.message === previewUnavailableMessage
+            ? previewUnavailableMessage
+            : "Kunde inte spela röstprovet. Försök igen."}
+        </Text>
+      ) : null}
+      {listen.isSuccess ? <Text style={style}>Röstprovet spelades upp.</Text> : null}
       <Text style={style}>Voice changes apply the next time you start voice mode.</Text>
       {navigation ? (
         <Text style={style}>

@@ -625,6 +625,71 @@ test("Codex Live saves a validated voice across reload and finds the current Gas
   }
 }, 60_000);
 
+test("Codex Live previews every voice with a stable clip without changing saved settings", async () => {
+  const { settingsRpc } = await import("@getpaseo/plugin");
+  const { VoiceSchema } =
+    await import("../../../../../plugin-examples/codex-live/shared/preferences.js");
+  const { previewVoice, previewText } =
+    await import("../../../../../plugin-examples/codex-live/shared/preview.js");
+  const directory = fileURLToPath(
+    new URL("../../../../../plugin-examples/codex-live/", import.meta.url),
+  );
+  const catalog = z
+    .object({
+      text: z.string(),
+      model: z.literal("gpt-live-1-codex"),
+      clips: z.record(VoiceSchema, z.string().min(1).nullable()),
+    })
+    .parse(JSON.parse(await readFile(path.join(directory, "server/previews.json"), "utf8")));
+  expect(catalog.text).toBe(previewText);
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.12.0",
+    mcpEnabled: false,
+    agentClients: createTestAgentClients(),
+    pluginsEnabled: true,
+    plugins: {
+      "codex-live": { source: "directory", path: directory, enabled: true },
+    },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  try {
+    await client.connect();
+    const read = () => client.invokePluginRpc("codex-live", settingsRpc("voice").read.name, {});
+    const settings = await read();
+    const clips = new Set<string>();
+    for (const voice of VoiceSchema.options) {
+      const clip = previewVoice.output.parse(
+        await client.invokePluginRpc("codex-live", previewVoice.name, { voice }),
+      );
+      if ("unavailable" in clip) {
+        expect(["porto", "selva"]).toContain(voice);
+        expect(catalog.clips[voice]).toBeNull();
+        continue;
+      }
+      expect(clip.base64).toBe(catalog.clips[voice]);
+      expect(clip.mimeType).toBe("audio/mpeg");
+      expect(Buffer.from(clip.base64, "base64").length).toBeGreaterThan(5_000);
+      expect(await client.invokePluginRpc("codex-live", previewVoice.name, { voice })).toEqual(
+        clip,
+      );
+      clips.add(clip.base64);
+    }
+    expect(clips.size).toBe(VoiceSchema.options.length - 2);
+    await expect(
+      client.invokePluginRpc("codex-live", previewVoice.name, {
+        voice: "not-a-voice",
+      }),
+    ).rejects.toThrow();
+    expect(await read()).toEqual(settings);
+  } finally {
+    await client.close();
+    await daemon.close();
+  }
+}, 60_000);
+
 test.runIf(process.env.PASEO_TEST_CODEX_LIVE === "1")(
   "Codex Live carries PCM and delegated file inspection through a real Paseo agent",
   async () => {

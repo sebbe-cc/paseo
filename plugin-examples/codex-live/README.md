@@ -14,8 +14,15 @@ STT/agent/TTS implementation.
 Open **Settings → Plugins → codex-live → Codex Live**, or search **Codex Live: voice and King** in the
 Command Center. The voice picker saves to this host's plugin settings. Restart
 voice mode to apply a change; ongoing calls keep their voice. The list comes from
-Codex rust-v0.163.0's FramelessBidi voice catalog. Cove has been tested end to end;
-the other catalog entries still need listening tests with the deployed service.
+Codex rust-v0.163.0's FramelessBidi voice catalog.
+
+**Provlyssna** plays a recorded sample of the selected voice, using the same Swedish
+text for every voice. Samples are packaged with the plugin; previewing needs
+no microphone or Live call and does not send a message to an agent. Each recording
+was generated with that voice on `gpt-live-1-codex` and its completed transcript
+checked against the fixed text. This does not verify physical playback on every
+client or a full agent round trip with every voice.
+Porto and Selva currently have no preview because the voice service rejects them.
 
 The Command Center screen's **Open King** finds the unique active Paseo agent labelled `gc-session=king`,
 including background workspaces. Use its normal voice button to talk to Gas City's
