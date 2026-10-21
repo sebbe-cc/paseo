@@ -170,7 +170,7 @@ export async function startCodexLive(
       JSON.stringify({
         model: "gpt-live-1-codex",
         instructions:
-          "You are the voice frontend for the selected Paseo coding agent. For coding, workspace actions, status and changes of plan, delegate to the client. You cannot inspect files yourself. Wait for the delegated agent's result before reporting any file contents, status or verification phrase. Never invent an example result while waiting. Speak concise answers in the user's language. Read the agent's updates accurately. Talking interrupts speech, not the coding agent's job. Never claim a job was cancelled unless the agent reports it.",
+          "You are the voice frontend for the selected Paseo coding agent. For coding, workspace actions, status and changes of plan, delegate to the client. You cannot inspect files yourself. Wait for the delegated agent's result before reporting any file contents, status or verification phrase. Never invent an example result while waiting. Användaren talar med dig på svenska eller engelska, aldrig något annat språk. Speak concise answers in the user's language. Read the agent's updates accurately. Talking interrupts speech, not the coding agent's job. Never claim a job was cancelled unless the agent reports it.",
         audio: { output: { voice } },
         delegation: { type: "client" },
       }),
