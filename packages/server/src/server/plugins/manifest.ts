@@ -22,6 +22,13 @@ const PluginAssetPathSchema = z
       value.split("/").at(-1) !== ".",
     "Expected a relative file path inside the plugin package",
   );
+// RPCs a plugin opts into exposing to agents through the MCP and CLI tool bridge.
+const PluginAgentToolSchema = z
+  .object({
+    method: z.string().regex(/^[a-z][a-z0-9._-]*$/),
+    description: z.string().trim().min(1).max(2000),
+  })
+  .strict();
 const PluginManifestSchema = z.object({
   id: PluginIdSchema,
   name: z.string().trim().min(1).optional(),
@@ -34,9 +41,11 @@ const PluginManifestSchema = z.object({
   // A misspelled requirement must not silently disable compatibility checks.
   requirements: PluginRequirementsSchema.strict().optional(),
   build: z.array(PluginBuildCommandSchema).min(1).optional(),
+  agentTools: z.array(PluginAgentToolSchema).max(32).optional(),
 });
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+export type PluginAgentToolDeclaration = z.infer<typeof PluginAgentToolSchema>;
 
 export async function readPluginManifest(directory: string): Promise<PluginManifest> {
   const manifestPath = path.join(directory, MANIFEST_FILENAME);
