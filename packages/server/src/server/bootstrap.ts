@@ -872,12 +872,6 @@ export async function createPaseoDaemon(
 
   const httpServer = createHTTPServer(app);
 
-  // Script proxy WebSocket upgrade handler — must be registered before the
-  // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
-  // script-bound upgrades are forwarded first. The handler is a no-op for
-  // requests that don't match a registered script route.
-  httpServer.on("upgrade", serviceProxy.upgradeHandler({ passthroughUnknown: true }));
-
   if (config.serviceProxy?.standaloneListen) {
     serviceProxyListenTarget = parseListenString(config.serviceProxy.standaloneListen);
   }
