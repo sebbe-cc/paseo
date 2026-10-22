@@ -1,0 +1,5 @@
+{
+  "id": "codex-live",
+  "requirements": { "paseo": ">=0.12.0 <0.13.0" },
+  "build": [["npm", "ci", "--omit=dev"]]
+}
