@@ -25,7 +25,10 @@
         system:
         let
           pkgs = pkgsFor system;
-          paseo = pkgs.callPackage ./nix/package.nix { };
+          # The fork reports 0.9.2+desvio.<commit> so the running build is identifiable.
+          paseo = pkgs.callPackage ./nix/package.nix {
+            buildMetadata = "desvio.${self.shortRev or self.dirtyShortRev or "unknown"}";
+          };
           versionParts = pkgs.lib.splitString "." paseo.version;
           sourceRevision = if self ? revCount && self.revCount != null then self.revCount else 0;
           buildRevision = sourceRevision - (sourceRevision / 10000) * 10000;
