@@ -2,6 +2,7 @@ import { Command } from "commander";
 import type { CommandOptions, ListResult, SingleResult } from "../../../output/index.js";
 import { withOutput } from "../../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../../utils/command-options.js";
+import { createProjectContextCommand, createProjectNoteCommand } from "./notes.js";
 import {
   containerSchema,
   loadCatalog,
@@ -11,6 +12,7 @@ import {
   withContainerClient,
   type ContainerRow,
 } from "./shared.js";
+import { createProjectTodoCommand } from "./todos.js";
 
 type Single = Promise<SingleResult<ContainerRow>>;
 type List = Promise<ListResult<ContainerRow>>;
@@ -171,5 +173,8 @@ export function createProjectContainerCommand(): Command {
       .description("Put projects first, in this order")
       .argument("<project...>", "Project ids or names"),
   ).action(withOutput(runContainerOrder));
+  container.addCommand(createProjectNoteCommand());
+  container.addCommand(createProjectTodoCommand());
+  container.addCommand(createProjectContextCommand());
   return container;
 }
