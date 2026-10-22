@@ -27,11 +27,25 @@ export function createPluginResourceAttachment(
   source: PluginResourceSourceIdentity,
   item: PluginAttachmentItem,
 ): PluginResourceComposerAttachment {
-  return {
+  return PluginResourceComposerAttachmentSchema.parse({
     kind: "plugin_resource",
     ...source,
     item,
-  };
+  });
+}
+
+export function appendPluginResourceAttachment(
+  current: UserComposerAttachment[],
+  attachment: PluginResourceComposerAttachment,
+): UserComposerAttachment[] {
+  const exists = current.some(
+    (candidate) =>
+      candidate.kind === "plugin_resource" &&
+      candidate.pluginId === attachment.pluginId &&
+      candidate.sourceId === attachment.sourceId &&
+      candidate.item.id === attachment.item.id,
+  );
+  return exists ? current : [...current, attachment];
 }
 
 export function togglePluginResourceAttachment(
@@ -52,11 +66,15 @@ export function togglePluginResourceAttachment(
 export function pluginResourceAttachmentToAgentAttachment(
   attachment: PluginResourceComposerAttachment,
 ): AgentAttachment {
-  return {
+  const textAttachment: AgentAttachment = {
     type: "text",
     mimeType: "text/plain",
-    title: `${attachment.item.identifier} ${attachment.item.title}`,
+    title: `${attachment.item.identifier} ${attachment.item.title}`.trim(),
     text: attachment.item.text,
+  };
+  if (!attachment.item.url) return textAttachment;
+  return {
+    ...textAttachment,
     externalResource: {
       provider: attachment.pluginId,
       providerLabel: attachment.sourceTitle,
