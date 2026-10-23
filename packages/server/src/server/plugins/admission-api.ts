@@ -12,6 +12,7 @@ export const AdmissionApiRequestSchema = z.discriminatedUnion("method", [
     })
     .strict(),
   z.object({ method: z.literal("inventory.watermark") }).strict(),
+  z.object({ method: z.literal("inventory.fence") }).strict(),
   z.object({ method: z.literal("bindings.get"), agentId: z.string() }).strict(),
   z.object({ method: z.literal("bindings.list"), since: z.string().optional() }).strict(),
   z
@@ -42,12 +43,14 @@ export async function admissionApiRequest(
   inventory?: HostInventory,
 ): Promise<unknown> {
   switch (request.method) {
+    case "inventory.fence":
     case "inventory.read":
     case "inventory.watermark":
       if (!inventory)
         throw Object.assign(new Error("Host inventory is unavailable"), {
           code: "HOST_INVENTORY_UNAVAILABLE",
         });
+      if (request.method === "inventory.fence") return inventory.fence();
       return request.method === "inventory.read"
         ? inventory.read(pluginId, request.request)
         : inventory.watermark();

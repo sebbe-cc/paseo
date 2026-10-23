@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, renameSync, lstatSync, unlinkSync } from "node:fs";
 import path from "node:path";
+import { HostInventoryFence, HostFenceError } from "./host-inventory-fence.js";
 import type { HostInventoryDomain, HostWatermark } from "@getpaseo/plugin/server";
 
 export const HOST_INVENTORY_COVERED: HostInventoryDomain[] = [
@@ -31,7 +32,21 @@ export class HostInventoryClock {
   private changes: HostWatermark["changes"] = [];
   private expiresAt = 0;
   private failed = false;
-  constructor(private readonly directory?: string) {}
+  private readonly fenceLock: HostInventoryFence | null;
+  constructor(private readonly directory?: string) {
+    const supported = process.platform === "linux" || process.platform === "darwin";
+    this.fenceLock = directory && supported ? new HostInventoryFence(directory) : null;
+  }
+
+  private acquireFence(): () => void {
+    try {
+      return this.fenceLock?.acquire() ?? (() => {});
+    } catch (error) {
+      if (!(error instanceof HostFenceError && error.code === "HOST_FENCE_BUSY"))
+        this.failed = true;
+      throw error;
+    }
+  }
 
   snapshot(): HostWatermark {
     if (this.failed)
@@ -53,11 +68,13 @@ export class HostInventoryClock {
   }
 
   begin(domain: HostInventoryDomain): () => void {
+    const release = this.acquireFence();
     this.active++;
     try {
       this.advance(domain);
     } catch (error) {
       this.active--;
+      release();
       throw error;
     }
     let done = false;
@@ -65,7 +82,11 @@ export class HostInventoryClock {
       if (done) return;
       done = true;
       this.active--;
-      this.advance(domain);
+      try {
+        this.advance(domain);
+      } finally {
+        release();
+      }
     };
   }
 
@@ -87,7 +108,36 @@ export class HostInventoryClock {
     }
   }
 
+  fence() {
+    if (!this.fenceLock)
+      throw new HostFenceError("HOST_FENCE_UNAVAILABLE", "Native host fencing is unavailable");
+    const release = this.acquireFence();
+    try {
+      const observation = this.export();
+      if (!observation.local || observation.watermark.activeWriters !== 0)
+        throw new HostFenceError("HOST_FENCE_BUSY", "Host writes are still in flight");
+      return {
+        version: 1 as const,
+        scope: "paseo-host" as const,
+        watermark: observation.watermark,
+        local: observation.local,
+        lock: this.fenceLock.token(),
+      };
+    } finally {
+      release();
+    }
+  }
+
   export() {
+    const release = this.acquireFence();
+    try {
+      return this.exportLocked();
+    } finally {
+      release();
+    }
+  }
+
+  private exportLocked() {
     if (!this.directory) return { watermark: this.snapshot(), local: null };
     // No timer or steady-state file writes. Local observers have a ten-second
     // lease; expired files must be rejected even if their bytes match.

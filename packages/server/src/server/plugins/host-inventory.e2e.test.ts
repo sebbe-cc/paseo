@@ -2,7 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { expect, test, vi } from "vitest";
-import { HostInventoryPageSchema, HostWatermarkResultSchema } from "@getpaseo/plugin/server";
+import {
+  HostFenceTokenSchema,
+  HostInventoryPageSchema,
+  HostWatermarkResultSchema,
+} from "@getpaseo/plugin/server";
 import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
@@ -11,12 +15,16 @@ const entry = `
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 export default function contribute(server) {
-  for (const name of ["read", "watermark"]) server.handle(defineRpc({ name, input: z.unknown(), output: z.unknown() }),
-    input => name === "read" ? server.inventory.read(input) : server.inventory.watermark());
+  for (const name of ["read", "watermark", "fence"]) server.handle(defineRpc({ name, input: z.unknown(), output: z.unknown() }),
+    input => name === "read" ? server.inventory.read(input) : server.inventory[name]());
   server.handle(defineRpc({ name: "bind", input: z.object({ agentId: z.string() }), output: z.unknown() }),
     input => server.agents.bindings.set(input.agentId, { managed: true }, { expectRevision: null }));
   server.handle(defineRpc({ name: "read-error", input: z.unknown(), output: z.unknown() }), async () => {
     try { await server.inventory.read(); return null; } catch (error) { return { code: error.code }; }
+  });
+  server.handle(defineRpc({ name: "bind-error", input: z.object({ agentId: z.string() }), output: z.unknown() }), async input => {
+    try { await server.agents.bindings.set(input.agentId, { managed: true }, { expectRevision: 1 }); return null; }
+    catch (error) { return { code: error.code }; }
   });
   server.before("agent.session_open", () => {});
   return () => {};
@@ -71,6 +79,21 @@ test("native plugin inventory RPC observes durable bindings, provider opens and 
     expect(bound.agents.find((row) => row.agentId === agent.id)?.binding).toMatchObject({
       revision: 1,
     });
+    const fence = HostFenceTokenSchema.parse(
+      await client.invokePluginRpc("inventory", "fence", {}),
+    );
+    const { openSync, closeSync } = await import("node:fs");
+    const { flockSync } = await import("fs-ext");
+    const publication = openSync(fence.lock.path, "r+");
+    flockSync(publication, "exnb");
+    try {
+      expect(
+        await client.invokePluginRpc("inventory", "bind-error", { agentId: agent.id }),
+      ).toEqual({ code: "HOST_FENCE_BUSY" });
+    } finally {
+      closeSync(publication);
+    }
+    expect((await read()).watermark).toEqual(fence.watermark);
     pauseCreate = true;
     const creating = client.createAgent({ provider: "claude", cwd: root });
     await createEntered;
@@ -79,6 +102,12 @@ test("native plugin inventory RPC observes durable bindings, provider opens and 
         code: "HOST_INVENTORY_BUSY",
       });
       expect((await watermark()).watermark.activeWriters).toBeGreaterThan(0);
+      const pendingPublication = openSync(fence.lock.path, "r+");
+      try {
+        expect(() => flockSync(pendingPublication, "exnb")).toThrow();
+      } finally {
+        closeSync(pendingPublication);
+      }
     } finally {
       releaseCreate();
       pauseCreate = false;
@@ -102,6 +131,15 @@ test("native plugin inventory RPC observes durable bindings, provider opens and 
     expect(afterRefresh.watermark.sequence).toBeGreaterThan(beforeRefresh.watermark.sequence);
     expect(afterRefresh.watermark.productionFence).toBe(false);
     expect(afterRefresh.watermark.excluded).toContain("external-capability-revocation");
+    const token = HostFenceTokenSchema.parse(
+      await client.invokePluginRpc("inventory", "fence", {}),
+    );
+    expect(token.watermark).toEqual(afterRefresh.watermark);
+    const { stat } = await import("node:fs/promises");
+    const lockStat = await stat(token.lock.path, { bigint: true });
+    expect(token.lock.inode).toBe(String(lockStat.ino));
+    expect(token.lock.device).toBe(String(lockStat.dev));
+    expect(token.watermark.productionFence).toBe(false);
     const beforeReload = afterRefresh.watermark;
     await client.reloadPlugin("inventory");
     const afterReload = await watermark();

@@ -1,4 +1,8 @@
-import { HostInventoryPageSchema, HostWatermarkResultSchema } from "@getpaseo/plugin/server";
+import {
+  HostFenceTokenSchema,
+  HostInventoryPageSchema,
+  HostWatermarkResultSchema,
+} from "@getpaseo/plugin/server";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
 import {
@@ -319,6 +323,8 @@ export function createPluginWorker(options: {
     hooks.setPluginId(message.pluginId);
     const contributedCleanup = contribute({
       inventory: {
+        fence: async () =>
+          HostFenceTokenSchema.parse(await admissionRequest({ method: "inventory.fence" })),
         read: async (request = {}) =>
           HostInventoryPageSchema.parse(
             await admissionRequest({ method: "inventory.read", request }),

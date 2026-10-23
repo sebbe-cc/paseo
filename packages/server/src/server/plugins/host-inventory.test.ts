@@ -1,4 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test, onTestFinished, vi } from "vitest";
@@ -50,7 +52,7 @@ test("a binding change between native reads cannot be reported as a coherent old
 
 test("pages enumerate closed/marker-free agents and all retained admissions beyond the old cap", async () => {
   const { directory, storage, clock } = await fixture();
-  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { mkdir } = await import("node:fs/promises");
   const journalDirectory = path.join(directory, "large-admissions");
   await mkdir(journalDirectory);
   const now = new Date().toISOString();
@@ -211,7 +213,7 @@ test("an in-flight durable binding mutation marks the local watermark busy befor
 
 test("unreadable/corrupt stored records never produce a complete inventory", async () => {
   const { directory, clock, journal } = await fixture();
-  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { mkdir } = await import("node:fs/promises");
   const root = path.join(directory, "corrupt");
   await mkdir(root);
   await writeFile(path.join(root, "bad.json"), "{broken");
@@ -307,4 +309,213 @@ test("admission begin, finish and acknowledgement advance the same generation wi
       effect: { persistence: { sessionId: "native" } },
     },
   ]);
+});
+
+test("a publisher holds the checked host generation until publication finishes", async () => {
+  const { directory, storage, inventory, clock } = await fixture();
+  await inventory.read("gc");
+  const before = inventory.watermark();
+  const lockPath = path.join(directory, "watermark", "host-fence.lock");
+  await writeFile(lockPath, "", { flag: "a", mode: 0o600 });
+  const publisher = spawn(process.execPath, [
+    "-e",
+    `
+const { openSync, closeSync } = require("node:fs");
+const { flockSync } = require("fs-ext");
+const fds = process.argv.slice(1).map(name => {
+  const fd = openSync(name, "a+", 0o600);
+  flockSync(fd, "exnb");
+  return fd;
+});
+process.stdout.write("locked\\n");
+process.stdin.resume();
+process.stdin.on("end", () => fds.forEach(closeSync));
+`,
+    path.join(directory, "admission.lock"),
+    path.join(directory, "registry.json.lock"),
+    lockPath,
+  ]);
+  const exited = once(publisher, "exit");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      publisher.stdout.once("data", () => resolve());
+      publisher.once("error", reject);
+      publisher.once("exit", () => reject(new Error("Publisher exited before acquiring locks")));
+    });
+    // This is the publication window after the last local generation check.
+    await expect(
+      storage.setBinding("agent", "gc", { identity: "racing" }, 1),
+    ).rejects.toMatchObject({ code: "HOST_FENCE_BUSY" });
+    expect(clock.snapshot()).toEqual(before.watermark);
+    expect((await storage.getBinding("agent", "gc"))?.revision).toBe(1);
+  } finally {
+    publisher.stdin.end();
+    await exited;
+  }
+  await storage.setBinding("agent", "gc", { identity: "after-publication" }, 1);
+  expect((await storage.getBinding("agent", "gc"))?.revision).toBe(2);
+});
+
+async function nativeWriter(directory: string, action: string) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `
+import { HostInventoryClock } from "./packages/server/src/server/plugins/host-inventory-clock.ts";
+import { createRequire } from "node:module";
+import { openSync, closeSync } from "node:fs";
+const { flockSync } = createRequire(import.meta.url)("fs-ext");
+const clock = new HostInventoryClock(process.argv[1]);
+${action}
+`,
+      directory,
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  const exited = once(child, "exit");
+  onTestFinished(async () => {
+    child.kill("SIGKILL");
+    await exited;
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.stdout.once("data", () => resolve());
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`Native writer exited: ${code}`)));
+  });
+  return { child, exited };
+}
+
+test("continuous SH writer forces bounded publisher BUSY and process death releases SH", async () => {
+  const { directory, clock } = await fixture();
+  const token = clock.fence();
+  const { child, exited } = await nativeWriter(
+    path.join(directory, "watermark"),
+    `
+const finish = clock.begin("admissions");
+process.stdout.write("holding");
+process.stdin.resume();
+process.stdin.on("end", finish);
+`,
+  );
+  const { openSync, closeSync } = await import("node:fs");
+  const { flockSync } = await import("fs-ext");
+  const started = performance.now();
+  let attempts = 0;
+  async function boundedPublisher() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fds: number[] = [];
+      attempts++;
+      try {
+        for (const name of [
+          path.join(directory, "admission.lock"),
+          path.join(directory, "registry.json.lock"),
+          token.lock.path,
+        ]) {
+          const fd = openSync(name, "a+", 0o600);
+          fds.push(fd);
+          flockSync(fd, "exnb");
+        }
+        return "published";
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EAGAIN")) throw error;
+      } finally {
+        fds.toReversed().forEach(closeSync);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1) + Math.random() * 5));
+    }
+    return "HOST_FENCE_BUSY";
+  }
+  expect(await boundedPublisher()).toBe("HOST_FENCE_BUSY");
+  expect(attempts).toBe(3);
+  expect(performance.now() - started).toBeLessThan(1000);
+  child.kill("SIGKILL");
+  await exited;
+  const fd = openSync(token.lock.path, "r+");
+  try {
+    expect(() => flockSync(fd, "exnb")).not.toThrow();
+  } finally {
+    closeSync(fd);
+  }
+});
+
+test("provider hook acquires admission after publisher drops all locks on host BUSY", async () => {
+  const { directory, clock } = await fixture();
+  const token = clock.fence();
+  const { openSync, closeSync } = await import("node:fs");
+  const { flockSync } = await import("fs-ext");
+  const admissionPath = path.join(directory, "admission.lock");
+  const admission = openSync(admissionPath, "a+", 0o600);
+  const registry = openSync(path.join(directory, "registry.json.lock"), "a+", 0o600);
+  const host = openSync(token.lock.path, "r+");
+  flockSync(admission, "exnb");
+  flockSync(registry, "exnb");
+  const { child, exited } = await nativeWriter(
+    path.join(directory, "watermark"),
+    `
+await clock.track("admissions", async () => {
+  process.stdout.write("entered-provider-hook");
+  const admission = openSync(${JSON.stringify(admissionPath)}, "r+");
+  flockSync(admission, "ex");
+  closeSync(admission);
+});
+`,
+  );
+  try {
+    expect(() => flockSync(host, "exnb")).toThrow();
+  } finally {
+    closeSync(host);
+    closeSync(registry);
+    closeSync(admission);
+  }
+  expect(await exited).toEqual([0, null]);
+  expect(child.exitCode).toBe(0);
+});
+
+test("fence token pins a permanent inode; replacement rejects writers and stale tokens", async () => {
+  const { clock, storage } = await fixture();
+  const token = clock.fence();
+  const { rename, stat } = await import("node:fs/promises");
+  await rename(token.lock.path, `${token.lock.path}.replaced`);
+  await writeFile(token.lock.path, "", { mode: 0o600 });
+  expect(String((await stat(token.lock.path, { bigint: true })).ino)).not.toBe(token.lock.inode);
+  await expect(storage.setBinding("agent", "gc", { bad: true }, 1)).rejects.toMatchObject({
+    code: "HOST_FENCE_UNAVAILABLE",
+  });
+  expect((await storage.getBinding("agent", "gc"))?.revision).toBe(1);
+  expect(() => clock.fence()).toThrow();
+});
+
+test("all clock domains, nested writers and restarted hosts respect the publication lock", async () => {
+  const { directory, clock } = await fixture();
+  const token = clock.fence();
+  const { openSync, closeSync } = await import("node:fs");
+  const { flockSync } = await import("fs-ext");
+  const fd = openSync(token.lock.path, "r+");
+  const first = clock.begin("admissions");
+  const second = clock.begin("live-history");
+  first();
+  first();
+  expect(() => flockSync(fd, "exnb")).toThrow();
+  expect(() => clock.fence()).toThrow();
+  second();
+  flockSync(fd, "exnb");
+  try {
+    for (const domain of token.watermark.covered) {
+      expect(() =>
+        clock.run(domain, () => {
+          throw new Error("Unfenced mutation executed");
+        }),
+      ).toThrow("Host publication in progress");
+    }
+    const restarted = new HostInventoryClock(path.join(directory, "watermark"));
+    expect(() => restarted.begin("agent-records")).toThrow("Host publication in progress");
+    expect(() => restarted.export()).toThrow("Host publication in progress");
+  } finally {
+    closeSync(fd);
+  }
+  expect(clock.fence().watermark.sequence).toBeGreaterThan(token.watermark.sequence);
 });
