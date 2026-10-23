@@ -24,6 +24,14 @@ const PluginAssetPathSchema = z
   );
 const PluginManifestSchema = z.object({
   id: PluginIdSchema,
+  admission: z
+    .object({
+      fence: z.literal("bound-agents").optional(),
+      fenceWaitMs: z.number().int().min(0).max(30000).default(20000),
+      durableEvents: z.boolean().default(false),
+    })
+    .strict()
+    .optional(),
   name: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1).optional(),
   icon: PluginAssetPathSchema.refine(

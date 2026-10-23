@@ -1,3 +1,4 @@
+import type { PluginRequestOrigin } from "@getpaseo/plugin/server";
 import { stat } from "node:fs/promises";
 import type { CreationSnapshot } from "@getpaseo/protocol/messages";
 import { CreationService } from "./creation/index.js";
@@ -460,6 +461,7 @@ interface PluginSessionConnection extends SessionConnectionBase {
 type SessionConnection = ReconnectableSessionConnection | PluginSessionConnection;
 
 interface SocketSessionOptions {
+  origin?: PluginRequestOrigin;
   clientId: string;
   appVersion: string | null;
   clientCapabilities: Record<string, unknown> | null;
@@ -1370,6 +1372,7 @@ export class VoiceAssistantWebSocketServer {
   }
 
   private createSessionConnection(params: {
+    clientType: string;
     ws: WebSocketLike;
     clientId: string;
     appVersion: string | null;
@@ -1383,6 +1386,15 @@ export class VoiceAssistantWebSocketServer {
     let connection: SessionConnection | null = null;
 
     const session = this.createSocketSession({
+      origin:
+        lifecycle.kind === "ephemeral-plugin"
+          ? { kind: "plugin", pluginId: lifecycle.pluginId }
+          : {
+              kind: "client",
+              principalId: admission.principalId,
+              clientId,
+              clientType: params.clientType,
+            },
       clientId,
       appVersion,
       clientCapabilities,
@@ -1458,6 +1470,7 @@ export class VoiceAssistantWebSocketServer {
     return new Session({
       browserToolsBroker: this.browserToolsBroker,
       clientId: options.clientId,
+      origin: options.origin,
       appVersion: options.appVersion,
       clientCapabilities: options.clientCapabilities,
       permissions: options.permissions,
@@ -1625,6 +1638,7 @@ export class VoiceAssistantWebSocketServer {
     const connectionLogger = pending.connectionLogger.child({ clientId });
     this.incrementRuntimeCounter("helloNew");
     const connection = this.createSessionConnection({
+      clientType: message.clientType,
       ws,
       clientId,
       appVersion: message.appVersion ?? null,

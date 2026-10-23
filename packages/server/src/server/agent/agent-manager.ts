@@ -1,3 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { PluginAgentBinding, PluginAdmissionRecord } from "@getpaseo/plugin/server";
+import { AdmissionJournal, type AdmissionJournalRecord } from "../plugins/admission-journal.js";
+import { admissionOutcome } from "../plugins/admission-journal.js";
+import { currentRequestOrigin, requestOrigin } from "../plugins/request-origin.js";
+import { PluginAdmissionError } from "../plugins/lifecycle/index.js";
+import { validateBindingData } from "./agent-storage.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
@@ -307,6 +314,7 @@ type ProviderEnabledMap = Partial<Record<AgentProvider, ProviderEnabledFlag>>;
 type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
 export interface CreateAgentOptions {
+  origin?: import("@getpaseo/plugin/server").PluginRequestOrigin;
   labels?: Record<string, string>;
   initialPrompt?: string;
   env?: Record<string, string>;
@@ -318,6 +326,7 @@ export interface CreateAgentOptions {
 }
 
 export interface AgentManagerOptions {
+  admissionJournal?: AdmissionJournal;
   pluginLifecycle?: PluginLifecycle;
   /** An internal workspace makes every agent created inside it internal. */
   clients?: ProviderClientMap;
@@ -732,6 +741,12 @@ export interface RetiredInternalAgent {
 }
 
 export class AgentManager {
+  private readonly admissionJournal: AdmissionJournal | undefined;
+  private readonly admissionContext = new AsyncLocalStorage<{
+    record: AdmissionJournalRecord;
+    history: PluginSessionOpenRequest["history"];
+    initialBindings?: Record<string, PluginAgentBinding>;
+  }>();
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly retiredInternalAgents = new Map<
     string,
@@ -778,6 +793,7 @@ export class AgentManager {
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
+    this.admissionJournal = options.admissionJournal;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
@@ -1271,7 +1287,11 @@ export class AgentManager {
     agentId: string | undefined,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(this.createAgentInternal(config, agentId, options));
+    return this.trackAgentRegistrationOperation(
+      requestOrigin.run(options.origin ?? currentRequestOrigin(), () =>
+        this.createAgentInternal(config, agentId, options),
+      ),
+    );
   }
 
   private async createAgentInternal(
@@ -1281,50 +1301,78 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
-    if (this.pluginLifecycle && !config.internal) {
-      const request = await this.pluginLifecycle.before("agent.create", {
-        config,
-        env: options.env,
-      });
-      config = { ...request.config, internal: config.internal };
-      options = { ...options, env: request.env };
-    }
-    await this.deleteAgentState(resolvedAgentId);
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      config,
+    return this.withAdmission(
       resolvedAgentId,
-      { env: options?.env },
+      "create",
+      {
+        ...config,
+        id: resolvedAgentId,
+        workspaceId: options.workspaceId,
+        labels: options.labels ?? {},
+      },
+      async () => {
+        if (this.pluginLifecycle && !config.internal) {
+          const request = await this.pluginLifecycle.before("agent.create", {
+            config,
+            env: options.env,
+            origin: currentRequestOrigin(),
+          });
+          config = { ...request.config, internal: config.internal };
+          options = { ...options, env: request.env };
+          if (request.bindingIntent !== undefined && request.origin.kind === "plugin") {
+            const context = this.admissionContext.getStore()!;
+            context.initialBindings = {
+              [request.origin.pluginId]: {
+                revision: 1,
+                data: validateBindingData(request.bindingIntent),
+                boundAt: new Date().toISOString(),
+                boundBy: request.origin,
+              },
+            };
+          }
+        }
+        await this.deleteAgentState(resolvedAgentId);
+        const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
+          config,
+          resolvedAgentId,
+          { env: options?.env },
+        );
+        this.requireEnabledProvider(storedConfig.provider);
+        const client = await this.requireAvailableClient({
+          provider: storedConfig.provider,
+        });
+        this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
+        const launchContext = await this.buildLaunchContext(
+          resolvedAgentId,
+          client,
+          storedConfig.cwd,
+          paseoToolPolicy,
+          options?.env,
+          { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+        );
+        const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+        const createOptions = this.buildCreateSessionOptions(options);
+        const session = await client.createSession(
+          providerLaunchConfig,
+          launchContext,
+          createOptions,
+        );
+        await this.requireExternalMcpSupport(session, storedConfig);
+        const agent = await this.registerSession(session, storedConfig, resolvedAgentId, {
+          labels: options.labels,
+          initialTitle: options.initialTitle,
+          workspaceId: options.workspaceId,
+          owner: options.owner,
+          historyPrimed: true,
+        });
+        if (!agent.internal) {
+          this.pluginLifecycle?.emit("agent.created", {
+            agent: describeHookAgent({ ...agent, title: agent.config.title }),
+          });
+        }
+        return agent;
+      },
     );
-    this.requireEnabledProvider(storedConfig.provider);
-    const client = await this.requireAvailableClient({
-      provider: storedConfig.provider,
-    });
-    this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
-      resolvedAgentId,
-      client,
-      storedConfig.cwd,
-      paseoToolPolicy,
-      options?.env,
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
-    );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-    const createOptions = this.buildCreateSessionOptions(options);
-    const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
-    await this.requireExternalMcpSupport(session, storedConfig);
-    const agent = await this.registerSession(session, storedConfig, resolvedAgentId, {
-      labels: options.labels,
-      initialTitle: options.initialTitle,
-      workspaceId: options.workspaceId,
-      owner: options.owner,
-      historyPrimed: true,
-    });
-    if (!agent.internal) {
-      this.pluginLifecycle?.emit("agent.created", {
-        agent: describeHookAgent({ ...agent, title: agent.config.title }),
-      });
-    }
-    return agent;
   }
 
   private buildCreateSessionOptions(options?: {
@@ -1395,54 +1443,66 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
-    // Decide residency from durable state inside the lifecycle lane. A loader may
-    // have read the record before a queued archive or restore completed. Residency is
-    // settled before the config is prepared, because a history load reads an archived
-    // agent whose working directory may be gone.
-    const record = this.registry ? await this.registry.get(resolvedAgentId) : null;
-    const currentResumeOptions = record
-      ? { purpose: record.archivedAt ? ("history" as const) : ("interactive" as const) }
-      : resumeOptions;
-    const purpose = currentResumeOptions?.purpose ?? "interactive";
-
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      mergedConfig,
+    return this.withAdmission(
       resolvedAgentId,
-      { purpose },
-    );
-    const client = this.requireClient(handle.provider);
-    const available = await client.isAvailable();
-    if (!available) {
-      throw new Error(
-        `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
-      );
-    }
-    this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
-      resolvedAgentId,
-      client,
-      storedConfig.cwd,
-      paseoToolPolicy,
-      undefined,
+      "resume",
       {
-        reason: "resume",
-        purpose,
-        workspaceId: options?.workspaceId ?? null,
+        ...mergedConfig,
+        id: resolvedAgentId,
+        workspaceId: options?.workspaceId,
+        labels: options?.labels ?? {},
+      },
+      async () => {
+        // Decide residency from durable state inside the lifecycle lane. A loader may
+        // have read the record before a queued archive or restore completed. Residency is
+        // settled before the config is prepared, because a history load reads an archived
+        // agent whose working directory may be gone.
+        const record = this.registry ? await this.registry.get(resolvedAgentId) : null;
+        const currentResumeOptions = record
+          ? { purpose: record.archivedAt ? ("history" as const) : ("interactive" as const) }
+          : resumeOptions;
+        const purpose = currentResumeOptions?.purpose ?? "interactive";
+
+        const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
+          mergedConfig,
+          resolvedAgentId,
+          { purpose },
+        );
+        const client = this.requireClient(handle.provider);
+        const available = await client.isAvailable();
+        if (!available) {
+          throw new Error(
+            `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
+          );
+        }
+        this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
+        const launchContext = await this.buildLaunchContext(
+          resolvedAgentId,
+          client,
+          storedConfig.cwd,
+          paseoToolPolicy,
+          undefined,
+          {
+            reason: "resume",
+            purpose,
+            workspaceId: options?.workspaceId ?? null,
+          },
+        );
+        const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+        const session = await client.resumeSession(
+          handle,
+          providerLaunchConfig,
+          launchContext,
+          currentResumeOptions,
+        );
+        await this.requireExternalMcpSupport(session, storedConfig);
+        return this.registerSession(session, storedConfig, resolvedAgentId, {
+          ...options,
+          persistence: handle,
+          restoring: true,
+        });
       },
     );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-    const session = await client.resumeSession(
-      handle,
-      providerLaunchConfig,
-      launchContext,
-      currentResumeOptions,
-    );
-    await this.requireExternalMcpSupport(session, storedConfig);
-    return this.registerSession(session, storedConfig, resolvedAgentId, {
-      ...options,
-      persistence: handle,
-      restoring: true,
-    });
   }
 
   importProviderSession(input: {
@@ -1464,66 +1524,78 @@ export class AgentManager {
   }): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(this.idFactory(), "importProviderSession");
-    this.requireEnabledProvider(input.provider);
-
-    const client = await this.requireAvailableClient({ provider: input.provider });
-    if (!client.importSession) {
-      throw new Error(`Provider '${input.provider}' does not support importing sessions`);
-    }
-
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      {
-        provider: input.provider,
-        cwd: input.cwd,
-      },
+    return this.withAdmission(
       resolvedAgentId,
-    );
-    this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
-      resolvedAgentId,
-      client,
-      storedConfig.cwd,
-      paseoToolPolicy,
-      undefined,
-      { reason: "import", purpose: "interactive", workspaceId: input.workspaceId },
-    );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-    const imported = await client.importSession(
-      {
-        providerHandleId: input.providerHandleId,
-        cwd: input.cwd,
-      },
-      { config: providerLaunchConfig, storedConfig, launchContext },
-    );
-    let handedToRegistration = false;
-    try {
-      const importedConfig = await this.normalizeConfig(
-        stripInternalPaseoMcpServer(imported.config),
-      );
-      const timelineRows = buildImportedTimelineRows(imported.timeline);
-      const initialTitle = resolveImportedAgentTitle(importedConfig, timelineRows);
+      "import",
+      { ...input, id: resolvedAgentId, labels: input.labels ?? {} },
+      async () => {
+        this.requireEnabledProvider(input.provider);
 
-      handedToRegistration = true;
-      const agent = await this.registerSession(imported.session, importedConfig, resolvedAgentId, {
-        labels: input.labels,
-        workspaceId: input.workspaceId,
-        timelineRows,
-        timelineNextSeq: timelineRows.length + 1,
-        persistence: imported.persistence,
-        historyPrimed: true,
-        initialTitle,
-        publishWhenReady: true,
-      });
-      for (const event of imported.providerSubagentEvents ?? []) {
-        const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
-        this.dispatch({ type: "provider_subagent", event: update });
-      }
-      return agent;
-    } finally {
-      if (!handedToRegistration) {
-        await this.closeUnregisteredSession(imported.session);
-      }
-    }
+        const client = await this.requireAvailableClient({ provider: input.provider });
+        if (!client.importSession) {
+          throw new Error(`Provider '${input.provider}' does not support importing sessions`);
+        }
+
+        const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
+          {
+            provider: input.provider,
+            cwd: input.cwd,
+          },
+          resolvedAgentId,
+        );
+        this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
+        const launchContext = await this.buildLaunchContext(
+          resolvedAgentId,
+          client,
+          storedConfig.cwd,
+          paseoToolPolicy,
+          undefined,
+          { reason: "import", purpose: "interactive", workspaceId: input.workspaceId },
+        );
+        const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+        const imported = await client.importSession(
+          {
+            providerHandleId: input.providerHandleId,
+            cwd: input.cwd,
+          },
+          { config: providerLaunchConfig, storedConfig, launchContext },
+        );
+        let handedToRegistration = false;
+        try {
+          const importedConfig = await this.normalizeConfig(
+            stripInternalPaseoMcpServer(imported.config),
+          );
+          const timelineRows = buildImportedTimelineRows(imported.timeline);
+          const initialTitle = resolveImportedAgentTitle(importedConfig, timelineRows);
+
+          handedToRegistration = true;
+          const agent = await this.registerSession(
+            imported.session,
+            importedConfig,
+            resolvedAgentId,
+            {
+              labels: input.labels,
+              workspaceId: input.workspaceId,
+              timelineRows,
+              timelineNextSeq: timelineRows.length + 1,
+              persistence: imported.persistence,
+              historyPrimed: true,
+              initialTitle,
+              publishWhenReady: true,
+            },
+          );
+          for (const event of imported.providerSubagentEvents ?? []) {
+            const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
+            this.dispatch({ type: "provider_subagent", event: update });
+          }
+          return agent;
+        } finally {
+          if (!handedToRegistration) {
+            await this.closeUnregisteredSession(imported.session);
+          }
+        }
+      },
+    );
   }
 
   // Hot-reload an active agent session with config overrides. By default the
@@ -1550,110 +1622,112 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    let existing = this.requireSessionAgent(agentId);
-    if (this.hasInFlightRun(agentId)) {
-      await this.cancelAgentRunBefore(agentId, "reload");
-      existing = this.requireSessionAgent(agentId);
-    }
-    const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
-    const preservedHistoryPrimed = existing.historyPrimed;
-    const preservedLastUsage = existing.lastUsage;
-    const preservedLastError = existing.lastError;
-    const preservedAttention = existing.attention;
-    const handle = existing.persistence;
-    const provider = handle?.provider ?? existing.provider;
-    const client = this.requireClient(provider);
-    const refreshConfig = {
-      ...existing.config,
-      ...overrides,
-      provider,
-    } as AgentSessionConfig;
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      refreshConfig,
-      agentId,
-    );
-    const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
-    const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
-    const launchContext = await this.buildLaunchContext(
-      agentId,
-      client,
-      storedConfig.cwd,
-      paseoToolPolicy,
-      undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
-    );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-    if (
-      Object.keys(storedConfig.mcpServers ?? {}).length > 0 &&
-      existing.session.capabilities.supportsMcpServers !== true
-    ) {
-      throw new Error(`Provider '${provider}' does not support MCP servers`);
-    }
-
-    let session: AgentSession | undefined;
-    let closedExisting: ManagedAgentClosed | undefined;
-    let handedToRegistration = false;
-    try {
-      // A persisted thread can have only one writer, even when its turn is idle.
-      await this.closeReloadedSession(existing.session, agentId);
-      await this.drainSessionEvents(agentId);
-      this.cancelRunningProviderSubagents(agentId);
-      closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
-      await this.persistSnapshot(closedExisting);
-      this.assertAcceptingAgentRegistrations();
-
-      this.paseoToolPolicies.set(agentId, paseoToolPolicy);
-      session = handle
-        ? await client.resumeSession(handle, providerLaunchConfig, launchContext)
-        : await client.createSession(providerLaunchConfig, launchContext);
-      await this.requireExternalMcpSupport(session, storedConfig);
-      this.assertAcceptingAgentRegistrations();
-
-      if (rehydrateFromDisk) {
-        // Wipe the in-memory timeline so registerSession mints a new epoch and
-        // hydrateTimelineFromProvider re-streams the freshly read provider history.
-        this.timelineStore.delete(agentId);
-        for (const event of this.providerSubagents.deleteParent(agentId)) {
-          this.dispatch({ type: "provider_subagent", event });
-        }
+    return this.withAdmission(agentId, "refresh", this.requireSessionAgent(agentId), async () => {
+      let existing = this.requireSessionAgent(agentId);
+      if (this.hasInFlightRun(agentId)) {
+        await this.cancelAgentRunBefore(agentId, "reload");
+        existing = this.requireSessionAgent(agentId);
+      }
+      const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
+      const preservedHistoryPrimed = existing.historyPrimed;
+      const preservedLastUsage = existing.lastUsage;
+      const preservedLastError = existing.lastError;
+      const preservedAttention = existing.attention;
+      const handle = existing.persistence;
+      const provider = handle?.provider ?? existing.provider;
+      const client = this.requireClient(provider);
+      const refreshConfig = {
+        ...existing.config,
+        ...overrides,
+        provider,
+      } as AgentSessionConfig;
+      const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
+        refreshConfig,
+        agentId,
+      );
+      const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
+      const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
+      const launchContext = await this.buildLaunchContext(
+        agentId,
+        client,
+        storedConfig.cwd,
+        paseoToolPolicy,
+        undefined,
+        { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      );
+      const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+      if (
+        Object.keys(storedConfig.mcpServers ?? {}).length > 0 &&
+        existing.session.capabilities.supportsMcpServers !== true
+      ) {
+        throw new Error(`Provider '${provider}' does not support MCP servers`);
       }
 
-      // Preserve existing labels and timeline during reload.
-      handedToRegistration = true;
-      return this.registerSession(session, storedConfig, agentId, {
-        labels: existing.labels,
-        workspaceId: existing.workspaceId,
-        owner: existing.owner,
-        createdAt: existing.createdAt,
-        updatedAt: existing.updatedAt,
-        lastUserMessageAt: existing.lastUserMessageAt,
-        historyPrimed: rehydrateFromDisk ? false : preservedHistoryPrimed,
-        lastUsage: preservedLastUsage,
-        lastError: preservedLastError,
-        attention: preservedAttention,
-        restoring: true,
-      });
-    } catch (error) {
-      if (closedExisting) {
-        this.emitClosedAgent(closedExisting, { persist: false });
-      } else if (this.agents.get(agentId) === existing) {
-        existing.lifecycle = "error";
-        existing.lastError = error instanceof Error ? error.message : String(error);
-        this.emitState(existing);
-      }
-      throw error;
-    } finally {
-      if (!handedToRegistration) {
-        if (hadPreviousPaseoToolPolicy) {
-          this.paseoToolPolicies.set(agentId, previousPaseoToolPolicy);
-        } else {
-          this.paseoToolPolicies.delete(agentId);
+      let session: AgentSession | undefined;
+      let closedExisting: ManagedAgentClosed | undefined;
+      let handedToRegistration = false;
+      try {
+        // A persisted thread can have only one writer, even when its turn is idle.
+        await this.closeReloadedSession(existing.session, agentId);
+        await this.drainSessionEvents(agentId);
+        this.cancelRunningProviderSubagents(agentId);
+        closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
+        await this.persistSnapshot(closedExisting);
+        this.assertAcceptingAgentRegistrations();
+
+        this.paseoToolPolicies.set(agentId, paseoToolPolicy);
+        session = handle
+          ? await client.resumeSession(handle, providerLaunchConfig, launchContext)
+          : await client.createSession(providerLaunchConfig, launchContext);
+        await this.requireExternalMcpSupport(session, storedConfig);
+        this.assertAcceptingAgentRegistrations();
+
+        if (rehydrateFromDisk) {
+          // Wipe the in-memory timeline so registerSession mints a new epoch and
+          // hydrateTimelineFromProvider re-streams the freshly read provider history.
+          this.timelineStore.delete(agentId);
+          for (const event of this.providerSubagents.deleteParent(agentId)) {
+            this.dispatch({ type: "provider_subagent", event });
+          }
         }
-        if (session) {
-          await this.closeUnregisteredSession(session);
+
+        // Preserve existing labels and timeline during reload.
+        handedToRegistration = true;
+        return this.registerSession(session, storedConfig, agentId, {
+          labels: existing.labels,
+          workspaceId: existing.workspaceId,
+          owner: existing.owner,
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt,
+          lastUserMessageAt: existing.lastUserMessageAt,
+          historyPrimed: rehydrateFromDisk ? false : preservedHistoryPrimed,
+          lastUsage: preservedLastUsage,
+          lastError: preservedLastError,
+          attention: preservedAttention,
+          restoring: true,
+        });
+      } catch (error) {
+        if (closedExisting) {
+          this.emitClosedAgent(closedExisting, { persist: false });
+        } else if (this.agents.get(agentId) === existing) {
+          existing.lifecycle = "error";
+          existing.lastError = error instanceof Error ? error.message : String(error);
+          this.emitState(existing);
+        }
+        throw error;
+      } finally {
+        if (!handedToRegistration) {
+          if (hadPreviousPaseoToolPolicy) {
+            this.paseoToolPolicies.set(agentId, previousPaseoToolPolicy);
+          } else {
+            this.paseoToolPolicies.delete(agentId);
+          }
+          if (session) {
+            await this.closeUnregisteredSession(session);
+          }
         }
       }
-    }
+    });
   }
 
   private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {
@@ -4023,7 +4097,10 @@ export class AgentManager {
     if (agent.internal) {
       return;
     }
-    await this.registry.applySnapshot(agent, options);
+    const context = this.admissionContext.getStore();
+    const initialBindings =
+      context?.record.agentId === agent.id ? context.initialBindings : undefined;
+    await this.registry.applySnapshot(agent, { ...options, initialBindings });
   }
 
   private requireRegistry(): AgentStorage {
@@ -5333,6 +5410,93 @@ export class AgentManager {
       : next;
   }
 
+  private async withAdmission(
+    agentId: string,
+    reason: PluginAdmissionRecord["reason"],
+    description: Parameters<typeof describeHookAgent>[0],
+    open: () => Promise<ManagedAgent>,
+  ): Promise<ManagedAgent> {
+    const stored = await this.registry?.get(agentId);
+    const live = this.agents.get(agentId);
+    const previous = (await this.admissionJournal?.query({ agentId, status: ["opened"] }))?.at(-1);
+    const hasTimeline = this.timelineStore.has(agentId);
+    const history: PluginSessionOpenRequest["history"] = {
+      epoch: hasTimeline
+        ? this.timelineStore.getEpoch(agentId)
+        : (previous?.effect?.historyEpoch ?? null),
+      nextSeq: hasTimeline
+        ? this.timelineStore.fetch(agentId).window.nextSeq
+        : ((await this.durableTimelineStore?.getLatestCommittedSeq(agentId)) ?? 0) + 1,
+      persistence: live?.persistence ?? stored?.persistence ?? null,
+    };
+    const origin = currentRequestOrigin();
+    const agent = describeHookAgent(description);
+    const input = {
+      agent,
+      reason,
+      origin,
+      previousEpoch: history.epoch,
+      recipients: this.pluginLifecycle?.admissionRecipients?.() ?? [],
+    };
+    const record: AdmissionJournalRecord = this.admissionJournal
+      ? await this.admissionJournal.begin(input)
+      : {
+          ...input,
+          id: randomUUID(),
+          agentId,
+          attempt: 1,
+          supersedes: null,
+          startedAt: new Date().toISOString(),
+          status: "pending",
+          finishedAt: null,
+          effect: null,
+          error: null,
+          undeliveredTo: [],
+        };
+    return this.admissionContext.run({ record, history }, async () => {
+      let opened: ManagedAgent;
+      try {
+        opened = await open();
+      } catch (error) {
+        const failure =
+          error instanceof PluginAdmissionError
+            ? error
+            : new PluginAdmissionError(
+                "SESSION_OPEN_FAILED",
+                error instanceof Error ? error.message : String(error),
+                "provider",
+              );
+        const outcome = {
+          status: "failed" as const,
+          effect: null,
+          error: { code: failure.code, message: failure.message, stage: failure.stage },
+        };
+        const failed = this.admissionJournal
+          ? await this.admissionJournal.finish(record.id, outcome)
+          : { ...record, ...outcome };
+        this.publishAdmission(failed);
+        throw error;
+      }
+      const effect = {
+        persistence: opened.persistence,
+        historyEpoch: this.timelineStore.getEpoch(agentId),
+      };
+      const outcome = { status: "opened" as const, effect, error: null };
+      const committed = this.admissionJournal
+        ? await this.admissionJournal.finish(record.id, outcome, describeHookAgent(opened))
+        : { ...record, ...outcome, agent: describeHookAgent(opened) };
+      this.publishAdmission(committed);
+      return opened;
+    });
+  }
+
+  private publishAdmission(record: AdmissionJournalRecord): void {
+    const outcome = admissionOutcome(record);
+    if (outcome.name === "agent.session_opened")
+      this.pluginLifecycle?.emit(outcome.name, outcome.event);
+    else this.pluginLifecycle?.emit(outcome.name, outcome.event);
+  }
+
   private async buildLaunchContext(
     agentId: string,
     client: AgentClient,
@@ -5346,7 +5510,15 @@ export class AgentManager {
     },
   ): Promise<AgentLaunchContext> {
     if (this.pluginLifecycle) {
+      const admission = this.admissionContext.getStore()!;
+      const origin = currentRequestOrigin();
+      const binding =
+        origin.kind === "plugin" ? (admission.initialBindings?.[origin.pluginId] ?? null) : null;
       const request: PluginSessionOpenRequest = {
+        origin,
+        operation: admission.record,
+        binding,
+        history: admission.history,
         agentId,
         provider: client.provider,
         cwd,

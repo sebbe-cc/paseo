@@ -513,3 +513,50 @@ test("session create with an internal config skips provider session persistence"
   expect(createAgent.mock.calls[1]?.[0]).not.toHaveProperty("internal");
   expect(createAgent.mock.calls[1]?.[2]).not.toHaveProperty("persistSession");
 });
+
+test("MCP creates stamp their caller agent on both lifecycle hooks", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-origin-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const origins: unknown[] = [];
+  const agentManager = new AgentManager({
+    clients: createTestAgentClients(),
+    registry: storage,
+    logger,
+    pluginLifecycle: {
+      emit() {},
+      async before(name, request) {
+        if (name !== "workspace.create" && "origin" in request) origins.push(request.origin);
+        return request;
+      },
+    },
+  });
+  try {
+    const parent = await agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "ws-parent",
+    });
+    origins.length = 0;
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "mcp",
+        provider: "codex/gpt-5.4",
+        title: "Child",
+        callerAgentId: parent.id,
+        cwd: workdir,
+        workspaceId: "ws-parent",
+        notifyOnFinish: false,
+      },
+    );
+    expect(origins).toEqual([
+      { kind: "agent", callerAgentId: parent.id },
+      { kind: "agent", callerAgentId: parent.id },
+    ]);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});

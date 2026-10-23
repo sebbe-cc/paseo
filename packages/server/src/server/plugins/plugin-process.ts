@@ -23,6 +23,10 @@ import { createPluginClientId } from "./plugin-session-identity.js";
 
 import { PluginSettingsStore } from "./settings/index.js";
 import { readPluginProviderIcon } from "./provider-icon.js";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { PluginAgentBindingSchema, PluginAdmissionRecordSchema } from "@getpaseo/plugin/server";
+import type { AdmissionApiRequest } from "./admission-api.js";
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -38,6 +42,22 @@ export function createPluginWorker(options: {
   contribute: PluginServerContribution;
 }): { shutdown(): Promise<void> } {
   const { channel, contribute } = options;
+  const pendingAdmissions = new Map<
+    string,
+    { resolve(value: unknown): void; reject(error: Error): void }
+  >();
+  async function admissionRequest(request: AdmissionApiRequest): Promise<unknown> {
+    const requestId = randomUUID();
+    let timeout: ReturnType<typeof setTimeout>;
+    return new Promise((resolve, reject) => {
+      timeout = setTimeout(() => {
+        pendingAdmissions.delete(requestId);
+        reject(new Error("Admission API timed out"));
+      }, 30000);
+      pendingAdmissions.set(requestId, { resolve, reject });
+      send({ type: "admission.request", requestId, request });
+    }).finally(() => clearTimeout(timeout));
+  }
   let settingsStore: PluginSettingsStore | null = null;
   function registerSettings<Schema extends ZodType>(definition: SettingsDefinition<Schema>) {
     if (!settingsStore) throw new Error("Plugin settings storage is unavailable");
@@ -280,7 +300,40 @@ export function createPluginWorker(options: {
           send({ type: "settings.changed", settingsId }),
         )
       : null;
+    hooks.setPluginId(message.pluginId);
     const contributedCleanup = contribute({
+      agents: {
+        bindings: {
+          get: async (agentId) =>
+            PluginAgentBindingSchema.nullable().parse(
+              await admissionRequest({ method: "bindings.get", agentId }),
+            ),
+          list: async (filter) =>
+            z
+              .array(z.object({ agentId: z.string(), binding: PluginAgentBindingSchema }))
+              .parse(await admissionRequest({ method: "bindings.list", ...filter })),
+          set: async (agentId, data, opts) =>
+            PluginAgentBindingSchema.parse(
+              await admissionRequest({ method: "bindings.set", agentId, data, ...opts }),
+            ),
+          clear: async (agentId, opts) => {
+            await admissionRequest({ method: "bindings.clear", agentId, ...opts });
+          },
+        },
+      },
+      admissions: {
+        get: async (operationId) =>
+          PluginAdmissionRecordSchema.nullable().parse(
+            await admissionRequest({ method: "admissions.get", operationId }),
+          ),
+        query: async (filter) =>
+          z
+            .array(PluginAdmissionRecordSchema)
+            .parse(await admissionRequest({ method: "admissions.query", filter })),
+        ack: async (operationId) => {
+          await admissionRequest({ method: "admissions.ack", operationId });
+        },
+      },
       handle: (contract, handler) =>
         register(contract, (input, context) => handler(contract.input.parse(input), context)),
       registerProvider,
@@ -316,6 +369,8 @@ export function createPluginWorker(options: {
   }
 
   async function shutdown(): Promise<void> {
+    for (const pending of pendingAdmissions.values()) pending.reject(new Error("Plugin stopped"));
+    pendingAdmissions.clear();
     if (stopping) return;
     stopping = true;
     const releaseApi = paseo
@@ -381,6 +436,17 @@ export function createPluginWorker(options: {
     }
   }
 
+  function handleAdmissionResult(
+    message: Extract<PluginProcessRequest, { type: "admission.result" }>,
+  ): void {
+    const pending = pendingAdmissions.get(message.requestId);
+    if (!pending) return;
+    pendingAdmissions.delete(message.requestId);
+    if (message.error)
+      pending.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+    else pending.resolve(message.output);
+  }
+
   function handleMessage(rawMessage: unknown): void {
     const parsed = PluginProcessRequestSchema.safeParse(rawMessage);
     if (!parsed.success) {
@@ -404,6 +470,10 @@ export function createPluginWorker(options: {
       return;
     }
     const message = parsed.data;
+    if (message.type === "admission.result") {
+      handleAdmissionResult(message);
+      return;
+    }
     if (message.type === "initialize") {
       void initialize(message).catch(async (error) => {
         send({ type: "fatal", error: describeError(error) });

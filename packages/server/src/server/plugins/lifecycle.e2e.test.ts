@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { PluginAdmissionRecordSchema } from "@getpaseo/plugin/server";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -584,3 +586,164 @@ test("reloading a plugin does not send on a closed IPC channel", async () => {
     await rm(pluginDirectory, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("admission binds creates before publication and replays unacknowledged outcomes", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "paseo-admission-"));
+  const daemon = await createTestPaseoDaemon();
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  try {
+    await writeFile(
+      path.join(directory, "paseo-plugin.json"),
+      JSON.stringify({
+        id: "admission",
+        requirements: { paseo: ">=0.12.0" },
+        admission: { fence: "bound-agents", fenceWaitMs: 75, durableEvents: true },
+      }),
+    );
+    await writeFile(
+      path.join(directory, "index.server.ts"),
+      `
+import { defineRpc } from "@getpaseo/plugin";
+import { z } from "zod";
+export default function contribute(server) {
+  const events = [];
+  const requests = [];
+  server.before("agent.create", ({ request }) => {
+    if (request.origin.kind === "plugin" && request.origin.pluginId === "admission") return { ...request, bindingIntent: { pin: "durable" } };
+  });
+  server.before("agent.session_open", async ({ request }) => {
+    requests.push(request);
+    const persisted = await server.admissions.get(request.operation.id);
+    if (persisted.status !== "pending") throw new Error("Operation was not journaled before hook");
+    if (request.binding?.data.deny) return { deny: { code: "NO_RESERVATION", message: "Reservation refused" } };
+  });
+  server.on("agent.created", async ({ agent }) => {
+    events.push({ name: "created", agentId: agent.id, binding: await server.agents.bindings.get(agent.id) });
+  });
+  for (const name of ["agent.session_opened", "agent.session_open_failed"]) server.on(name, (event) => events.push({ name, ...event }));
+  const rpc = defineRpc({ name: "control", input: z.unknown(), output: z.unknown() });
+  server.handle(rpc, async (input, { paseo }) => {
+    if (input.action === "create") {
+      const workspace = await paseo.workspaces.create({ source: { kind: "directory", path: input.path } });
+      const agent = await workspace.agents.create({ config: { provider: "claude/haiku" } });
+      return { agentId: agent.id };
+    }
+    if (input.action === "inspect") return { events, requests, records: await server.admissions.query({}) };
+    if (input.action === "bind") return server.agents.bindings.set(input.agentId, input.data, { expectRevision: input.revision });
+    if (input.action === "ack") { await server.admissions.ack(input.id); return null; }
+  });
+  return () => {};
+}`,
+    );
+    await client.connect();
+    await client.patchDaemonConfig({ pluginsEnabled: true });
+    await client.installDirectoryPlugin(directory);
+    const other = path.join(directory, "other-plugin");
+    await mkdir(other);
+    await writeFile(
+      path.join(other, "paseo-plugin.json"),
+      JSON.stringify({ id: "other", requirements: { paseo: ">=0.12.0" } }),
+    );
+    await writeFile(
+      path.join(other, "index.server.ts"),
+      'export default function(server) { server.before("agent.session_open", ({request}) => console.log(JSON.stringify({ seenBinding: request.binding }))); return () => {}; }',
+    );
+    await client.installDirectoryPlugin(other);
+    const control = (input: unknown) => client.invokePluginRpc("admission", "control", input);
+    const inspect = async () => admissionInspection.parse(await control({ action: "inspect" }));
+    const { agentId } = z
+      .object({ agentId: z.string() })
+      .parse(await control({ action: "create", path: directory }));
+    await expect
+      .poll(async () => (await inspect()).events)
+      .toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "created",
+            agentId,
+            binding: expect.objectContaining({ revision: 1, data: { pin: "durable" } }),
+          }),
+          expect.objectContaining({
+            name: "agent.session_opened",
+            agent: expect.objectContaining({ id: agentId }),
+          }),
+        ]),
+      );
+    const initial = await inspect();
+    const first = initial.records.find((record) => record.agentId === agentId)!;
+    expect(first).toMatchObject({
+      status: "opened",
+      origin: { kind: "plugin", pluginId: "admission" },
+    });
+    expect(initial.requests[0]).toMatchObject({
+      binding: { revision: 1, data: { pin: "durable" } },
+      operation: { id: first.id },
+    });
+    expect(
+      (await client.getPluginLogs("other"))
+        .filter((log) => log.message.startsWith('{"seenBinding":'))
+        .map((log) => JSON.parse(log.message)),
+    ).toEqual([{ seenBinding: null }]);
+    await client.refreshAgent(agentId);
+    const refreshed = await inspect();
+    const second = refreshed.records.find((record) => record.reason === "refresh")!;
+    expect(second).toMatchObject({
+      status: "opened",
+      supersedes: first.id,
+      origin: { kind: "client", principalId: "owner" },
+    });
+    expect(refreshed.requests[1]).toMatchObject({
+      binding: { revision: 1, data: { pin: "durable" } },
+    });
+    await control({ action: "ack", id: first.id });
+    await client.reloadPlugin("admission");
+    await expect
+      .poll(async () => (await inspect()).events)
+      .toMatchObject([{ name: "agent.session_opened", operation: { id: second.id } }]);
+    const manager = daemon.daemon.agentManager;
+    const live = manager.getAgent(agentId)!;
+    const handle = live.persistence!;
+    await manager.closeAgent(agentId);
+    await manager.resumeAgentFromPersistence(
+      handle,
+      { provider: live.provider, cwd: directory },
+      agentId,
+      { workspaceId: live.workspaceId },
+    );
+    const resumed = await inspect();
+    const third = resumed.records.find((record) => record.reason === "resume")!;
+    expect(third).toMatchObject({ status: "opened", supersedes: second.id });
+    expect(resumed.requests.at(-1)).toMatchObject({
+      binding: { revision: 1, data: { pin: "durable" } },
+      operation: { id: third.id },
+    });
+    await control({ action: "bind", agentId, revision: 1, data: { deny: true } });
+    await expect(client.refreshAgent(agentId)).rejects.toThrow("Reservation refused");
+    const failure = (await inspect()).records.find((record) => record.status === "failed")!;
+    expect(failure).toMatchObject({
+      supersedes: third.id,
+      error: { code: "NO_RESERVATION", stage: "hook" },
+    });
+    await expect
+      .poll(async () => (await inspect()).events)
+      .toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "agent.session_open_failed",
+            operation: expect.objectContaining({ id: failure.id }),
+            error: { code: "NO_RESERVATION", message: "Reservation refused" },
+          }),
+        ]),
+      );
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 60_000);
+
+const admissionInspection = z.object({
+  events: z.array(z.record(z.string(), z.unknown())),
+  requests: z.array(z.record(z.string(), z.unknown())),
+  records: z.array(PluginAdmissionRecordSchema),
+});

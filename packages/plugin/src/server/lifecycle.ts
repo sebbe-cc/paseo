@@ -1,4 +1,9 @@
 import type {
+  PluginRequestOrigin,
+  PluginAgentBinding,
+  PluginAdmissionOperation,
+} from "./admission.js";
+import type {
   AgentPermissionRequest,
   AgentPermissionResponse,
   AgentTimelineItem,
@@ -30,6 +35,14 @@ export interface PluginHookAgent {
 }
 
 export interface PluginSessionOpenRequest {
+  origin: PluginRequestOrigin;
+  operation: PluginAdmissionOperation;
+  binding: PluginAgentBinding | null;
+  history: {
+    epoch: string | null;
+    nextSeq: number;
+    persistence: { provider: string; sessionId: string | null } | null;
+  };
   agentId: string;
   workspaceId: string | null;
   provider: string;
@@ -45,6 +58,18 @@ export type PluginTurnOutcome =
   | { kind: "canceled"; reason: string };
 
 export interface PluginLifecycleEvents {
+  "agent.session_opened": {
+    agent: PluginHookAgent;
+    operation: PluginAdmissionOperation;
+    persistence: { provider: string; sessionId: string | null } | null;
+    historyEpochChanged: boolean;
+  };
+  "agent.session_open_failed": {
+    agent: PluginHookAgent;
+    operation: PluginAdmissionOperation;
+    error: { code: string; message: string };
+    stage: "hook" | "fence" | "provider" | "interrupted";
+  };
   "agent.turn_started": { agent: PluginHookAgent; turnId: string | null };
   "agent.turn_ended": {
     agent: PluginHookAgent;
@@ -66,10 +91,17 @@ export interface PluginLifecycleEvents {
 }
 
 export interface PluginBeforeRequests {
-  "agent.create": { config: AgentSessionConfig; env?: Record<string, string> };
+  "agent.create": {
+    config: AgentSessionConfig;
+    env?: Record<string, string>;
+    origin: PluginRequestOrigin;
+    bindingIntent?: unknown;
+  };
   "agent.session_open": PluginSessionOpenRequest;
   "workspace.create": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
+
+export type PluginBeforeResult<R> = R | void | { deny: { code: string; message: string } };
 
 export interface PluginLifecycleRegistration {
   on<Name extends keyof PluginLifecycleEvents>(
@@ -84,6 +116,8 @@ export interface PluginLifecycleRegistration {
     handler: (
       input: { request: PluginBeforeRequests[Name] },
       context: PluginHookContext,
-    ) => PluginBeforeRequests[Name] | void | Promise<PluginBeforeRequests[Name] | void>,
+    ) =>
+      | PluginBeforeResult<PluginBeforeRequests[Name]>
+      | Promise<PluginBeforeResult<PluginBeforeRequests[Name]>>,
   ): () => void;
 }
