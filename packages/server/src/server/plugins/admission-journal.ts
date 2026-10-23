@@ -23,7 +23,6 @@ const JournalRecordSchema = PluginAdmissionRecordSchema.extend({
 });
 export type AdmissionJournalRecord = z.infer<typeof JournalRecordSchema>;
 
-// ULIDs retain journal ordering across processes without embedding host identity.
 function operationId(): string {
   const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   let value = (BigInt(Date.now()) << 80n) | BigInt("0x" + randomBytes(10).toString("hex"));
@@ -41,6 +40,7 @@ export class AdmissionJournal {
   private outcomes = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
   private ready: Promise<void> | undefined;
+  private prunedOn = "";
   constructor(
     private readonly directory: string,
     private readonly retentionDays = 14,
@@ -91,9 +91,16 @@ export class AdmissionJournal {
         },
       });
     }
+    await this.prune(files);
+  }
+
+  private async prune(files: string[]): Promise<void> {
     const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString();
     for (const [id, record] of this.records) {
-      if (record.finishedAt && record.finishedAt < cutoff) this.records.delete(id);
+      if (record.finishedAt && record.finishedAt < cutoff) {
+        this.records.delete(id);
+        this.outcomes.delete(id);
+      }
     }
     // Rewrite retained states durably before deleting old segments. Pending and replayable
     // operations from older segments must not vanish with the file that introduced them.
@@ -107,6 +114,7 @@ export class AdmissionJournal {
       }
       for (const file of old) await fs.unlink(path.join(this.directory, file));
     }
+    this.prunedOn = new Date().toISOString().slice(0, 10);
   }
 
   private async append(record: AdmissionJournalRecord): Promise<void> {
@@ -133,6 +141,12 @@ export class AdmissionJournal {
   private mutate<T>(action: () => Promise<T>): Promise<T> {
     const result = this.queue.then(async () => {
       await this.initialize();
+      if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
+        const files = (await fs.readdir(this.directory)).filter((file) =>
+          /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
+        );
+        await this.prune(files);
+      }
       return action();
     });
     this.queue = result.catch(() => undefined);

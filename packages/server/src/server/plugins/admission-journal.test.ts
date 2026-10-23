@@ -138,3 +138,23 @@ test("begin fsyncs the real journal before acknowledging the operation", async (
   );
   expect(JSON.parse(content)).toMatchObject({ id: operation.id, status: "pending" });
 });
+
+test("retention also runs on journal rotation without a daemon restart", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  onTestFinished(() => {
+    vi.useRealTimers();
+  });
+  vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+  const { directory, journal } = await fixture();
+  const old = await journal.begin(input);
+  await journal.finish(old.id, {
+    status: "opened",
+    effect: { persistence: null, historyEpoch: null },
+    error: null,
+  });
+  vi.setSystemTime(new Date("2026-10-17T12:00:00Z"));
+  const current = await journal.begin(input);
+  expect(await journal.get(old.id)).toBeNull();
+  expect(await journal.get(current.id)).toMatchObject({ status: "pending" });
+  expect(await readdir(directory)).toEqual(["2026-10-17.jsonl"]);
+});
