@@ -25,19 +25,43 @@ test("a hook may take the host fence and dispatch its original effect only once"
   expect(effects).toBe(1);
 });
 
-test("changed generation, sequence, or record prevents an effect", async () => {
+test("changed original record or post-validation sequence prevents an effect", async () => {
   const clock = await fixture();
   let record = { operation: "original", binding: 1 };
   let validate = await admissionBoundary(clock, async () => record);
+  record = { ...record, operation: "replaced" };
+  await expect(validate()).rejects.toMatchObject({ code: "ADMISSION_RETRY" });
+  validate = await admissionBoundary(clock, async () => record);
   record = { ...record, binding: 2 };
   await expect(validate()).rejects.toMatchObject({ code: "ADMISSION_RETRY" });
   validate = await admissionBoundary(clock, async () => record);
-  clock.run("agent-records", () => {});
-  await expect(validate()).rejects.toMatchObject({ code: "ADMISSION_RETRY" });
-  validate = await admissionBoundary(clock, async () => record);
+
   const dispatch = await validate();
   clock.run("admissions", () => {});
   let effects = 0;
   expect(() => dispatch(() => ++effects)).toThrow();
   expect(effects).toBe(0);
+});
+
+test("hook writes unrelated to the original operation and binding do not invalidate admission", async () => {
+  const clock = await fixture();
+  const record = { operation: "original", binding: 1 };
+  const validate = await admissionBoundary(clock, async () => record);
+  clock.run("agent-records", () => {});
+  clock.run("admissions", () => {});
+  const dispatch = await validate();
+  let effects = 0;
+  dispatch(() => ++effects);
+  expect(effects).toBe(1);
+});
+
+test("a writer during the final observation cannot produce a dispatch permit", async () => {
+  const clock = await fixture();
+  let readingFinal = false;
+  const validate = await admissionBoundary(clock, async () => {
+    if (readingFinal) clock.run("agent-records", () => {});
+    return { operation: "original", binding: 1 };
+  });
+  readingFinal = true;
+  await expect(validate()).rejects.toMatchObject({ code: "ADMISSION_RETRY" });
 });

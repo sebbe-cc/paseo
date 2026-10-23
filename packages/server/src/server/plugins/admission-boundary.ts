@@ -17,16 +17,17 @@ function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-/** No lock spans a plugin callback. The read is bracketed by native generation
- * checks, then checked again at the synchronous provider dispatch point. The
- * original pending journal entry makes any in-flight effect visible to census.
+/** No lock spans a plugin callback. Compare the original operation and binding,
+ * not the host-wide sequence across the hook: hooks may acknowledge other
+ * outcomes or refresh host metadata. Each read must itself be coherent, and the
+ * final observation is checked again at synchronous provider dispatch. The
+ * original pending journal entry keeps in-flight effects visible to census.
  */
 export async function admissionBoundary(
   clock: HostInventoryClock | undefined,
   read: () => Promise<unknown>,
 ): Promise<() => Promise<AdmissionPermit>> {
-  const generation: HostWatermark | undefined = clock?.snapshot();
-  const check = () => {
+  const check = (generation: HostWatermark | undefined) => {
     if (!clock || !generation) return;
     const now = clock.snapshot();
     if (
@@ -37,17 +38,20 @@ export async function admissionBoundary(
     )
       retry();
   };
+  const originalGeneration = clock?.snapshot();
   const original = digest(await read());
-  check();
+  check(originalGeneration);
   return async () => {
+    const generation = clock?.snapshot();
+    if (originalGeneration?.epoch !== generation?.epoch) retry();
     const current = digest(await read());
     if (original !== current) retry();
-    check();
+    check(generation);
     let used = false;
     return (effect) => {
       const dispatch = () => {
         if (used) retry();
-        check();
+        check(generation);
         used = true;
         return effect();
       };

@@ -21,6 +21,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
         effects++;
       },
     });
+    const resumes = vi.spyOn(provider, "resumeSession");
     const daemon = await createTestPaseoDaemon({ agentClients: { claude: provider } });
     const url = `ws://127.0.0.1:${daemon.port}/ws`;
     const client = new DaemonClient({ url });
@@ -71,9 +72,11 @@ export default function contribute(server) {
       await client.installDirectoryPlugin(root);
       const first = await client.createAgent({ provider: "claude", cwd: root });
       expect(effects).toBe(1);
+      await daemon.daemon.agentManager.closeAgent(first.id);
+      await daemon.daemon.agentManager.flush();
       await writeFile(hold, "hold");
-      const creating = client.createAgent({ provider: "claude", cwd: root });
-      const rejected = expect(creating).rejects.toMatchObject({ code: "ADMISSION_RETRY" });
+      const opening = client.fetchAgentTimeline(first.id);
+      const rejected = expect(opening).rejects.toThrow(/Host state changed/);
       await expect.poll(() => readFile(entered, "utf8").catch(() => "")).toBe("ready");
       // Separate process -> authenticated host IPC -> real native record writer.
       const source = `import {DaemonClient} from ${JSON.stringify(fileURLToPath(new URL("../test-utils/daemon-client.ts", import.meta.url)))};
@@ -92,6 +95,17 @@ export default function contribute(server) {
       await writeFile(release, "release");
       await rejected;
       expect(effects).toBe(1);
+      expect(resumes).not.toHaveBeenCalled();
+      await rm(release);
+      await rm(entered);
+      const retrying = client.fetchAgentTimeline(first.id);
+      void retrying.catch(() => {});
+      await expect.poll(() => readFile(entered, "utf8").catch(() => "")).toBe("ready");
+      // Metadata for this same agent is not its admission authority.
+      await daemon.daemon.agentStorage.setTitle(first.id, "Refreshed metadata");
+      await writeFile(release, "release");
+      await retrying;
+      expect(resumes).toHaveBeenCalledTimes(1);
       await rm(hold);
       const retried = await client.createAgent({ provider: "claude", cwd: root });
       expect(effects).toBe(2);
