@@ -4036,6 +4036,7 @@ export class Session {
               onReady,
             );
           } catch (error) {
+            if (error instanceof PluginAdmissionError) throw error;
             throw new WorktreeRequestError(toWorktreeWireError(error));
           }
         },
@@ -4232,7 +4233,10 @@ export class Session {
         },
       });
     } catch (error) {
-      const wireError = error instanceof SessionRequestError ? error : toWorktreeWireError(error);
+      const wireError =
+        error instanceof SessionRequestError || error instanceof PluginAdmissionError
+          ? error
+          : toWorktreeWireError(error);
       this.sessionLogger.error({ err: error }, "Failed to create agent");
       this.emit({
         type: "status",

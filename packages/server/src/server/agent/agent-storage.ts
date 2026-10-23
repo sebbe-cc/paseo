@@ -1,5 +1,12 @@
 import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
 import { PluginAgentBindingSchema, type PluginAgentBinding } from "@getpaseo/plugin/server";
+import {
+  PluginBindingCasSchema,
+  PluginBindingProofSchema,
+  type PluginBindingObservationSchema,
+  type PluginBindingSuccessorSchema,
+} from "@getpaseo/plugin/server";
+import { canonicalDigest, nativeRecordDigest } from "../plugins/binding-proof.js";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -79,6 +86,7 @@ const STORED_AGENT_SCHEMA = z.object({
   owner: AgentOwnerSchema.optional(),
   pluginBindings: z.record(z.string(), PluginAgentBindingSchema).optional(),
   pluginBindingRevisions: z.record(z.string(), z.number().int()).optional(),
+  pluginBindingProofs: z.record(z.string(), PluginBindingProofSchema).optional(),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -170,6 +178,7 @@ export class AgentStorage {
       ...record,
       pluginBindings: existing?.pluginBindings ?? record.pluginBindings,
       pluginBindingRevisions: existing?.pluginBindingRevisions ?? record.pluginBindingRevisions,
+      pluginBindingProofs: existing?.pluginBindingProofs ?? record.pluginBindingProofs,
     }));
   }
 
@@ -297,6 +306,7 @@ export class AgentStorage {
       }
       record.pluginBindings = existing?.pluginBindings ?? options?.initialBindings;
       record.pluginBindingRevisions = existing?.pluginBindingRevisions;
+      record.pluginBindingProofs = existing?.pluginBindingProofs;
       return record;
     });
   }
@@ -312,6 +322,113 @@ export class AgentStorage {
   async getBinding(agentId: string, pluginId: string): Promise<PluginAgentBinding | null> {
     const record = await this.get(agentId);
     return structuredClone(record?.pluginBindings?.[pluginId] ?? null);
+  }
+
+  async observeBinding(
+    agentId: string,
+    pluginId: string,
+  ): Promise<z.infer<typeof PluginBindingObservationSchema>> {
+    await this.load();
+    const record = this.cache.get(agentId);
+    const generation = this.inventoryClock?.snapshot();
+    if (!record || !generation || generation.activeWriters) throw new BindingConflictError();
+    return {
+      binding: structuredClone(record.pluginBindings?.[pluginId] ?? null),
+      state: {
+        epoch: generation.epoch,
+        sequence: generation.sequence,
+        recordDigest: nativeRecordDigest(record),
+      },
+    };
+  }
+
+  async setBindingWithProof(
+    agentId: string,
+    pluginId: string,
+    data: unknown,
+    options: z.infer<typeof PluginBindingCasSchema>,
+  ): Promise<z.infer<typeof PluginBindingSuccessorSchema>> {
+    const input = PluginBindingCasSchema.parse(options);
+    const payload = validateBindingData(data);
+    await this.load();
+    const current = this.cache.get(agentId);
+    const clock = this.inventoryClock;
+    if (!current || !clock) throw new BindingConflictError();
+    const generation = clock.snapshot();
+    const observed = {
+      epoch: generation.epoch,
+      sequence: generation.sequence,
+      recordDigest: nativeRecordDigest(current),
+    };
+    const original = current.pluginBindingProofs?.[pluginId];
+    const prior = current.pluginBindings?.[pluginId];
+    if (original?.operationKey === input.operationKey) {
+      if (
+        generation.activeWriters ||
+        !prior ||
+        original.expectRevision !== input.expectRevision ||
+        canonicalDigest(original.predecessor) !== canonicalDigest(input.expected) ||
+        canonicalDigest(original.successor) !== canonicalDigest(observed) ||
+        canonicalDigest(prior.data) !== canonicalDigest(payload)
+      )
+        throw new BindingConflictError();
+      return structuredClone({ binding: prior, proof: original });
+    }
+    if (
+      generation.activeWriters ||
+      canonicalDigest(observed) !== canonicalDigest(input.expected) ||
+      (prior?.revision ?? null) !== input.expectRevision
+    )
+      throw new BindingConflictError();
+    let result!: z.infer<typeof PluginBindingSuccessorSchema>;
+    // compare + queued writer acquisition are synchronous. The write itself
+    // retains native SH; any interleaving writer invalidates the successor below.
+    await clock.compare(generation, () =>
+      this.queueRecordMutation(agentId, (record) => {
+        if (!record || nativeRecordDigest(record) !== input.expected.recordDigest)
+          throw new BindingConflictError();
+        const binding: PluginAgentBinding = {
+          revision: (record.pluginBindingRevisions?.[pluginId] ?? prior?.revision ?? 0) + 1,
+          data: payload,
+          boundAt: new Date().toISOString(),
+          boundBy: { kind: "plugin", pluginId },
+        };
+        const next = {
+          ...record,
+          pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
+          pluginBindingRevisions: {
+            ...record.pluginBindingRevisions,
+            [pluginId]: binding.revision,
+          },
+        };
+        const proof = {
+          operationKey: input.operationKey,
+          agentId,
+          pluginId,
+          expectRevision: input.expectRevision,
+          predecessor: input.expected,
+          successor: {
+            epoch: generation.epoch,
+            sequence: generation.sequence + 2,
+            recordDigest: nativeRecordDigest(next),
+          },
+        };
+        result = { binding, proof };
+        return { ...next, pluginBindingProofs: { ...next.pluginBindingProofs, [pluginId]: proof } };
+      }),
+    );
+    const after = await this.observeBinding(agentId, pluginId);
+    if (!result || canonicalDigest(after.state) !== canonicalDigest(result.proof.successor)) {
+      // The CAS may be durable. Never manufacture a successor over another
+      // writer; retain its original receipt for explicit reconciliation.
+      throw Object.assign(
+        new Error("Binding CAS committed with an unclassified concurrent writer"),
+        {
+          code: "BINDING_SUCCESSOR_UNCERTAIN",
+        },
+      );
+    }
+    return structuredClone(result);
   }
 
   async listBindings(pluginId: string, since?: string) {

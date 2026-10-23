@@ -1,4 +1,5 @@
 import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
+import { admissionBoundary, type AdmissionPermit } from "../plugins/admission-boundary.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PluginAgentBinding, PluginAdmissionRecord } from "@getpaseo/plugin/server";
 import { AdmissionJournal, type AdmissionJournalRecord } from "../plugins/admission-journal.js";
@@ -749,6 +750,7 @@ export class AgentManager {
     record: AdmissionJournalRecord;
     history: PluginSessionOpenRequest["history"];
     initialBindings?: Record<string, PluginAgentBinding>;
+    effectPermit?: AdmissionPermit;
   }>();
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly retiredInternalAgents = new Map<
@@ -1367,10 +1369,8 @@ export class AgentManager {
         );
         const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
         const createOptions = this.buildCreateSessionOptions(options);
-        const session = await client.createSession(
-          providerLaunchConfig,
-          launchContext,
-          createOptions,
+        const session = await this.openAdmittedProvider(() =>
+          client.createSession(providerLaunchConfig, launchContext, createOptions),
         );
         await this.requireExternalMcpSupport(session, storedConfig);
         const agent = await this.registerSession(session, storedConfig, resolvedAgentId, {
@@ -1504,11 +1504,8 @@ export class AgentManager {
           },
         );
         const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-        const session = await client.resumeSession(
-          handle,
-          providerLaunchConfig,
-          launchContext,
-          currentResumeOptions,
+        const session = await this.openAdmittedProvider(() =>
+          client.resumeSession(handle, providerLaunchConfig, launchContext, currentResumeOptions),
         );
         await this.requireExternalMcpSupport(session, storedConfig);
         return this.registerSession(session, storedConfig, resolvedAgentId, {
@@ -1568,12 +1565,14 @@ export class AgentManager {
           { reason: "import", purpose: "interactive", workspaceId: input.workspaceId },
         );
         const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
-        const imported = await client.importSession(
-          {
-            providerHandleId: input.providerHandleId,
-            cwd: input.cwd,
-          },
-          { config: providerLaunchConfig, storedConfig, launchContext },
+        const imported = await this.openAdmittedProvider(() =>
+          client.importSession!(
+            {
+              providerHandleId: input.providerHandleId,
+              cwd: input.cwd,
+            },
+            { config: providerLaunchConfig, storedConfig, launchContext },
+          ),
         );
         let handedToRegistration = false;
         try {
@@ -1683,7 +1682,7 @@ export class AgentManager {
       let handedToRegistration = false;
       try {
         // A persisted thread can have only one writer, even when its turn is idle.
-        await this.closeReloadedSession(existing.session, agentId);
+        await this.openAdmittedProvider(() => this.closeReloadedSession(existing.session, agentId));
         await this.drainSessionEvents(agentId);
         this.cancelRunningProviderSubagents(agentId);
         closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
@@ -5435,8 +5434,9 @@ export class AgentManager {
     description: Parameters<typeof describeHookAgent>[0],
     open: () => Promise<ManagedAgent>,
   ): Promise<ManagedAgent> {
-    const action = () => this.runAdmission(agentId, reason, description, open);
-    return this.inventoryClock ? this.inventoryClock.track("admissions", action) : action();
+    // Journal/record writes have their own short writer leases. Holding a lease
+    // across a plugin hook prevents that hook from taking publication EX.
+    return this.runAdmission(agentId, reason, description, open);
   }
 
   private async runAdmission(
@@ -5541,8 +5541,15 @@ export class AgentManager {
       workspaceId?: string | null;
     },
   ): Promise<AgentLaunchContext> {
+    const admission = this.admissionContext.getStore()!;
+    const validate = await admissionBoundary(this.inventoryClock, async () => ({
+      operation: this.admissionJournal
+        ? await this.admissionJournal.get(admission.record.id)
+        : admission.record,
+      agent: (await this.registry?.get(agentId)) ?? null,
+      initialBindings: admission.initialBindings ?? null,
+    }));
     if (this.pluginLifecycle) {
-      const admission = this.admissionContext.getStore()!;
       const origin = currentRequestOrigin();
       const binding =
         origin.kind === "plugin" ? (admission.initialBindings?.[origin.pluginId] ?? null) : null;
@@ -5581,7 +5588,15 @@ export class AgentManager {
         paseoToolPolicy,
       });
     }
+    admission.effectPermit = await validate();
     return context;
+  }
+
+  private openAdmittedProvider<T>(effect: () => T): T {
+    const permit = this.admissionContext.getStore()?.effectPermit;
+    if (!permit)
+      throw new PluginAdmissionError("ADMISSION_RETRY", "Missing admission decision", "fence");
+    return permit(effect);
   }
 
   private resolveProviderLaunchConfig(

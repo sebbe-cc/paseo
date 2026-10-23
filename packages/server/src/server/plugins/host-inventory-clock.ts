@@ -108,6 +108,30 @@ export class HostInventoryClock {
     }
   }
 
+  /** Linearize an already observed decision without retaining SH over async I/O.
+   * Native writers serialize on this event loop; external publication uses EX.
+   */
+  compare<T>(expected: HostWatermark, action: () => T): T {
+    const release = this.acquireFence();
+    try {
+      const current = this.snapshot();
+      if (
+        expected.activeWriters ||
+        current.activeWriters ||
+        expected.epoch !== current.epoch ||
+        expected.sequence !== current.sequence
+      ) {
+        throw Object.assign(new Error("Host changed before admission dispatch"), {
+          code: "ADMISSION_RETRY",
+          stage: "fence",
+        });
+      }
+      return action();
+    } finally {
+      release();
+    }
+  }
+
   fence() {
     if (!this.fenceLock)
       throw new HostFenceError("HOST_FENCE_UNAVAILABLE", "Native host fencing is unavailable");

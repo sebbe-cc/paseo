@@ -26,6 +26,42 @@ export const PluginAgentBindingSchema = z.object({
   boundBy: PluginRequestOriginSchema,
 });
 export type PluginAgentBinding = z.infer<typeof PluginAgentBindingSchema>;
+export const PluginBindingStateSchema = z
+  .object({
+    epoch: z.string().uuid(),
+    sequence: z.number().int().nonnegative(),
+    recordDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export const PluginBindingCasSchema = z
+  .object({
+    operationKey: z.string().regex(/^[a-f0-9]{64}$/),
+    expected: PluginBindingStateSchema,
+    expectRevision: z.number().int().positive().nullable(),
+  })
+  .strict();
+export const PluginBindingProofSchema = z
+  .object({
+    operationKey: z.string().regex(/^[a-f0-9]{64}$/),
+    agentId: z.string(),
+    pluginId: z.string(),
+    expectRevision: z.number().int().positive().nullable(),
+    predecessor: PluginBindingStateSchema,
+    successor: PluginBindingStateSchema,
+  })
+  .strict();
+export const PluginBindingObservationSchema = z
+  .object({
+    binding: PluginAgentBindingSchema.nullable(),
+    state: PluginBindingStateSchema,
+  })
+  .strict();
+export const PluginBindingSuccessorSchema = z
+  .object({
+    binding: PluginAgentBindingSchema,
+    proof: PluginBindingProofSchema,
+  })
+  .strict();
 export const PluginAdmissionOperationSchema = z.object({
   id: z.string(),
   agentId: z.string(),
@@ -69,6 +105,12 @@ export const PluginAdmissionQuerySchema = z.object({
   limit: z.number().int().positive().max(10000).optional(),
 });
 export interface PluginAgentBindings {
+  observe(agentId: string): Promise<z.infer<typeof PluginBindingObservationSchema>>;
+  setWithProof(
+    agentId: string,
+    data: unknown,
+    opts: z.infer<typeof PluginBindingCasSchema>,
+  ): Promise<z.infer<typeof PluginBindingSuccessorSchema>>;
   get(agentId: string): Promise<PluginAgentBinding | null>;
   list(filter?: {
     since?: string;
