@@ -2634,11 +2634,15 @@ provider I/O. The durable pending admission remains in the complete inventory;
 zero active native writers does **not** mean there are no pending provider effects.
 A publisher must account for those pending operations before transitioning.
 
-The host snapshots the original operation and agent record (including bindings)
-before the session-open hook. After the hook it compares their digests and the
-native epoch/sequence, and checks the generation again at synchronous dispatch.
-A concurrent native writer yields `ADMISSION_RETRY` before a provider effect;
-retry the original creation key with fresh observations. For refresh, the commit
+The host snapshots the original operation, agent existence, bindings and binding
+revision counters before the session-open hook. After the hook it compares these
+values, preserving set/clear ABA detection. Changes to unrelated admissions or to
+agent labels, status and timestamps do not invalidate the operation. Both reads
+must be coherent within their own native epoch/sequence; the host checks the
+final observation again at synchronous dispatch. A changed operation or binding,
+a daemon epoch change, or a writer racing that final observation yields
+`ADMISSION_RETRY` before a provider effect. Retry the original creation key with
+fresh observations. For refresh, the commit
 point precedes closing the old provider session, then the already admitted refresh
 continues through reopening. A failed check does not close that existing session.
 The one-use dispatch permit cannot start its effect twice. A writer
