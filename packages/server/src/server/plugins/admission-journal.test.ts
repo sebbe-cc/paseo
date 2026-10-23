@@ -100,7 +100,7 @@ test("outcomes replay in transition order rather than operation start order", as
 
 test("expired completed records are pruned while current records remain queryable", async () => {
   const { directory, journal } = await fixture();
-  const first = await journal.begin(input);
+  const first = await journal.begin({ ...input, recipients: [] });
   const old = await journal.finish(first.id, {
     status: "opened",
     effect: { persistence: null, historyEpoch: null },
@@ -146,7 +146,7 @@ test("retention also runs on journal rotation without a daemon restart", async (
   });
   vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
   const { directory, journal } = await fixture();
-  const old = await journal.begin(input);
+  const old = await journal.begin({ ...input, recipients: [] });
   await journal.finish(old.id, {
     status: "opened",
     effect: { persistence: null, historyEpoch: null },
@@ -157,4 +157,116 @@ test("retention also runs on journal rotation without a daemon restart", async (
   expect(await journal.get(old.id)).toBeNull();
   expect(await journal.get(current.id)).toMatchObject({ status: "pending" });
   expect(await readdir(directory)).toEqual(["2026-10-17.jsonl"]);
+});
+
+test("a permanently failing history session keeps delivered failures and disk rows bounded", async () => {
+  const { directory, journal } = await fixture();
+  const pending = await journal.begin(input);
+  const replayable = await journal.begin(input);
+  const failure = {
+    status: "failed" as const,
+    effect: null,
+    error: {
+      code: "SESSION_OPEN_FAILED",
+      message: "history unavailable",
+      stage: "provider" as const,
+    },
+  };
+  await journal.finish(replayable.id, failure);
+  for (let attempt = 0; attempt < 300; attempt++) {
+    const operation = await journal.begin({ ...input, recipients: [] });
+    await journal.finish(operation.id, failure);
+  }
+  expect((await journal.query({ status: ["failed"] })).length).toBeLessThanOrEqual(65);
+  expect(await journal.get(pending.id)).toMatchObject({ status: "pending" });
+  expect((await journal.undelivered("one")).map((row) => row.id)).toContain(replayable.id);
+  const rows = (
+    await Promise.all(
+      (
+        await readdir(directory)
+      )
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => readFile(path.join(directory, name), "utf8")),
+    )
+  )
+    .join("")
+    .trim()
+    .split("\n");
+  expect(rows.length).toBeLessThan(256);
+  const restarted = new AdmissionJournal(directory);
+  expect((await restarted.query({ status: ["failed"] })).length).toBeLessThanOrEqual(65);
+  expect(await restarted.get(pending.id)).toMatchObject({ status: "interrupted" });
+  expect((await restarted.undelivered("two")).map((row) => row.id)).toContain(replayable.id);
+});
+
+test("expired undelivered outcomes survive rotation and only the final ack makes failures eligible", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  onTestFinished(() => vi.useRealTimers());
+  vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+  const { directory, journal } = await fixture();
+  const operation = await journal.begin(input);
+  const failed = {
+    status: "failed" as const,
+    effect: null,
+    error: { code: "SESSION_OPEN_FAILED", message: "failed", stage: "provider" as const },
+  };
+  await journal.finish(operation.id, failed);
+  vi.setSystemTime(new Date("2026-10-20T12:00:00Z"));
+  for (let i = 0; i < 130; i++) {
+    const next = await journal.begin({ ...input, recipients: [] });
+    await journal.finish(next.id, failed);
+  }
+  expect(await journal.get(operation.id)).toMatchObject({ undeliveredTo: ["one", "two"] });
+  await journal.ack(operation.id, "one");
+  expect(await journal.get(operation.id)).toMatchObject({ undeliveredTo: ["two"] });
+  const restarted = new AdmissionJournal(directory);
+  expect((await restarted.undelivered("two")).map((row) => row.id)).toEqual([operation.id]);
+  await restarted.ack(operation.id, "two");
+  expect((await restarted.query({ status: ["failed"] })).length).toBeLessThanOrEqual(64);
+});
+
+test("startup compacts an existing 34006-operation failure storm before exposing inventory", async () => {
+  const { directory, journal } = await fixture();
+  const operation = await journal.begin({ ...input, recipients: [] });
+  const failed = await journal.finish(operation.id, {
+    status: "failed",
+    effect: null,
+    error: { code: "SESSION_OPEN_FAILED", message: "history failed", stage: "provider" },
+  });
+  const file = path.join(directory, (await readdir(directory))[0]);
+  await writeFile(
+    file,
+    Array.from({ length: 34006 }, (_, index) =>
+      JSON.stringify({ ...failed, id: `storm-${index}`, attempt: index + 1 }),
+    ).join("\n") + "\n",
+  );
+  const restarted = new AdmissionJournal(directory);
+  await restarted.initialize();
+  expect([...restarted.inventoryRecords()]).toHaveLength(64);
+  expect(await restarted.get("storm-34005")).toMatchObject({ status: "failed" });
+  expect((await readFile(file, "utf8")).trim().split("\n")).toHaveLength(64);
+});
+
+test("a crash after checkpoint rename cannot resurrect replay from an undeleted old segment", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  onTestFinished(() => vi.useRealTimers());
+  vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+  const { directory, journal } = await fixture();
+  const operation = await journal.begin(input);
+  await journal.finish(operation.id, {
+    status: "failed",
+    effect: null,
+    error: { code: "SESSION_OPEN_FAILED", message: "failed", stage: "provider" },
+  });
+  const oldFile = path.join(directory, "2026-10-01.jsonl");
+  const oldContents = await readFile(oldFile, "utf8");
+  await journal.ack(operation.id, "one");
+  await journal.ack(operation.id, "two");
+  vi.setSystemTime(new Date("2026-10-20T12:00:00Z"));
+  await journal.begin({ ...input, recipients: [] });
+  // Simulate interruption after the new checkpoint is durable, before unlink.
+  await writeFile(oldFile, oldContents);
+  const restarted = new AdmissionJournal(directory);
+  expect(await restarted.get(operation.id)).toBeNull();
+  expect(await restarted.undelivered("one")).toEqual([]);
 });
