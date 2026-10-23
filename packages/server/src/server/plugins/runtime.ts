@@ -1,3 +1,5 @@
+import type { HostInventory } from "./host-inventory.js";
+import type { HostInventoryClock } from "./host-inventory-clock.js";
 import type { UsageScope } from "@getpaseo/plugin/server/usage";
 import {
   ProviderStatusSchema,
@@ -126,7 +128,12 @@ interface RemoteProviderConnection {
 }
 
 interface PluginRuntimeDependencies {
-  admission?: { storage: () => AgentStorage; journal: AdmissionJournal };
+  admission?: {
+    storage: () => AgentStorage;
+    journal: AdmissionJournal;
+    inventory?: () => HostInventory;
+    clock?: HostInventoryClock;
+  };
   settingsDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
@@ -344,7 +351,9 @@ export class PluginRuntime {
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
-    this.plugins.set(pluginId, loaded);
+    this.inventoryChange(() => {
+      this.plugins.set(pluginId, loaded);
+    });
     this.replayAdmissions(loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
   }
@@ -368,7 +377,9 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
-    this.plugins.set(input.id, loaded);
+    this.inventoryChange(() => {
+      this.plugins.set(input.id, loaded);
+    });
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
   }
 
@@ -383,13 +394,19 @@ export class PluginRuntime {
   async stopPluginById(pluginId: string): Promise<boolean> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) return false;
-    this.plugins.delete(pluginId);
+    this.inventoryChange(() => {
+      this.plugins.delete(pluginId);
+    });
     this.rejectPending(loaded, `Plugin stopped: ${pluginId}`);
     await this.stopPlugin(loaded);
     return true;
   }
 
-  catalog(): Array<{ id: string; clientBundle: string; requirements?: PluginRequirements }> {
+  catalog(): Array<{
+    id: string;
+    clientBundle: string;
+    requirements?: PluginRequirements;
+  }> {
     return [...this.plugins.values()]
       .map(({ id, clientBundle, requirements }) => ({ id, clientBundle, requirements }))
       .sort((left, right) => left.id.localeCompare(right.id));
@@ -733,7 +750,9 @@ export class PluginRuntime {
 
   async stopAll(): Promise<void> {
     const loaded = [...this.plugins.values()];
-    this.plugins.clear();
+    this.inventoryChange(() => {
+      this.plugins.clear();
+    });
     for (const plugin of loaded) {
       this.rejectPending(plugin, `Plugin stopped: ${plugin.id}`);
     }
@@ -839,6 +858,7 @@ export class PluginRuntime {
                     message.request,
                     admission.storage(),
                     admission.journal,
+                    admission.inventory?.(),
                   )
                 : Promise.reject(new Error("Admission storage is unavailable"));
               void response
@@ -989,7 +1009,9 @@ export class PluginRuntime {
 
   private handleChildMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {
     if (message.type === "hooks.changed") {
-      loaded.hooks = message.hooks;
+      this.inventoryChange(() => {
+        loaded.hooks = message.hooks;
+      });
       return;
     }
     if (message.type === "settings.changed") {
@@ -1302,7 +1324,9 @@ export class PluginRuntime {
     loaded.sessionSocket?.peerClosed();
     const wasPublished = this.plugins.get(loaded.id) === loaded;
     if (wasPublished) {
-      this.plugins.delete(loaded.id);
+      this.inventoryChange(() => {
+        this.plugins.delete(loaded.id);
+      });
     }
     this.rejectPending(loaded, `Plugin process exited: ${loaded.id}`);
     for (const state of loaded.providerConnections.values()) {
@@ -1386,6 +1410,12 @@ export class PluginRuntime {
       tail.bytes -= Buffer.byteLength(removed.message);
     }
     this.logger.info({ pluginId, ...entry }, "Plugin output");
+  }
+
+  private inventoryChange(action: () => void): void {
+    const clock = this.dependencies.admission?.clock;
+    if (clock) clock.run("plugin-lifecycle", action);
+    else action();
   }
 
   private notify(pluginId: string, error?: string): void {

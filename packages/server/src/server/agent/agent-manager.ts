@@ -1,3 +1,4 @@
+import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PluginAgentBinding, PluginAdmissionRecord } from "@getpaseo/plugin/server";
 import { AdmissionJournal, type AdmissionJournalRecord } from "../plugins/admission-journal.js";
@@ -327,6 +328,7 @@ export interface CreateAgentOptions {
 
 export interface AgentManagerOptions {
   admissionJournal?: AdmissionJournal;
+  inventoryClock?: HostInventoryClock;
   pluginLifecycle?: PluginLifecycle;
   /** An internal workspace makes every agent created inside it internal. */
   clients?: ProviderClientMap;
@@ -741,6 +743,7 @@ export interface RetiredInternalAgent {
 }
 
 export class AgentManager {
+  private readonly inventoryClock?: HostInventoryClock;
   private readonly admissionJournal: AdmissionJournal | undefined;
   private readonly admissionContext = new AsyncLocalStorage<{
     record: AdmissionJournalRecord;
@@ -756,7 +759,7 @@ export class AgentManager {
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
   private readonly agents = new Map<string, LiveManagedAgent>();
-  private readonly timelineStore = new InMemoryAgentTimelineStore();
+  private readonly timelineStore: InMemoryAgentTimelineStore;
   private readonly providerSubagents = new ProviderSubagentStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
@@ -792,6 +795,8 @@ export class AgentManager {
   private acceptingAgentRegistrations = true;
 
   constructor(options: AgentManagerOptions) {
+    this.inventoryClock = options.inventoryClock;
+    this.timelineStore = new InMemoryAgentTimelineStore(options.inventoryClock);
     this.pluginLifecycle = options.pluginLifecycle;
     this.admissionJournal = options.admissionJournal;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
@@ -832,7 +837,12 @@ export class AgentManager {
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
-    this.clients.set(provider, client);
+    const finish = this.inventoryClock?.begin("provider-registry");
+    try {
+      this.clients.set(provider, client);
+    } finally {
+      finish?.();
+    }
   }
 
   updateProviderRegistry(input: {
@@ -840,32 +850,37 @@ export class AgentManager {
     clients: ProviderClientMap;
     retiredProviders?: readonly AgentProvider[];
   }): void {
-    this.providerEnabled.clear();
-    this.providerDefinitions.clear();
-    for (const [provider, definition] of Object.entries(input.providerDefinitions)) {
-      if (definition) {
-        this.providerEnabled.set(provider, definition.enabled);
-        this.providerDefinitions.set(provider, definition);
+    const finish = this.inventoryClock?.begin("provider-registry");
+    try {
+      this.providerEnabled.clear();
+      this.providerDefinitions.clear();
+      for (const [provider, definition] of Object.entries(input.providerDefinitions)) {
+        if (definition) {
+          this.providerEnabled.set(provider, definition.enabled);
+          this.providerDefinitions.set(provider, definition);
+        }
       }
-    }
 
-    this.clients.clear();
-    for (const [provider, client] of Object.entries(input.clients)) {
-      if (client) {
-        this.clients.set(provider, client);
+      this.clients.clear();
+      for (const [provider, client] of Object.entries(input.clients)) {
+        if (client) {
+          this.clients.set(provider, client);
+        }
       }
-    }
 
-    for (const provider of input.retiredProviders ?? []) {
-      for (const agent of this.agents.values()) {
-        if (agent.provider !== provider) continue;
-        void this.closeAgent(agent.id).catch((error) => {
-          this.logger.warn(
-            { err: error, agentId: agent.id, provider },
-            "Failed to close agent after provider retirement",
-          );
-        });
+      for (const provider of input.retiredProviders ?? []) {
+        for (const agent of this.agents.values()) {
+          if (agent.provider !== provider) continue;
+          void this.closeAgent(agent.id).catch((error) => {
+            this.logger.warn(
+              { err: error, agentId: agent.id, provider },
+              "Failed to close agent after provider retirement",
+            );
+          });
+        }
       }
+    } finally {
+      finish?.();
     }
   }
 
@@ -4891,7 +4906,11 @@ export class AgentManager {
     prompt: AgentPromptInput,
     clientMessageId: string,
     outcome: "accepted" | "rejected",
-    options?: { messageId?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      messageId?: string;
+      providerMessageId?: string;
+      turnId?: string;
+    },
   ): void {
     const item = projectAgentMessage({
       type: "user_message",
@@ -5410,7 +5429,17 @@ export class AgentManager {
       : next;
   }
 
-  private async withAdmission(
+  private withAdmission(
+    agentId: string,
+    reason: PluginAdmissionRecord["reason"],
+    description: Parameters<typeof describeHookAgent>[0],
+    open: () => Promise<ManagedAgent>,
+  ): Promise<ManagedAgent> {
+    const action = () => this.runAdmission(agentId, reason, description, open);
+    return this.inventoryClock ? this.inventoryClock.track("admissions", action) : action();
+  }
+
+  private async runAdmission(
     agentId: string,
     reason: PluginAdmissionRecord["reason"],
     description: Parameters<typeof describeHookAgent>[0],

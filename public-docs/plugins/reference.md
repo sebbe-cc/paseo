@@ -2536,3 +2536,80 @@ Use `paseo plugin ls` to read the current status and error.
 | Edited code does not appear                                           | Run `npm run typecheck`, then `paseo plugin reload <id>`.                                                                                          |
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
+
+### Native host inventory and observation watermark (fork API)
+
+The server-only `server.inventory` API enumerates the daemon's authoritative
+stored agents and its retained admission journal in one host generation. It is
+available in the fork containing `feat/plugin-runtime-inventory`. It does not
+open providers or change bindings. Existing binding/admission APIs keep their
+contracts and original operation IDs.
+
+```ts
+let page = await server.inventory.read({ limit: 100 });
+const generation = page.watermark;
+const agents = [...page.agents];
+const admissions = [...page.admissions];
+while (!page.complete) {
+  page = await server.inventory.read({ cursor: page.nextCursor!, limit: 100 });
+  agents.push(...page.agents);
+  admissions.push(...page.admissions);
+}
+const after = (await server.inventory.watermark()).watermark;
+const unchanged = generation.epoch === after.epoch &&
+  generation.sequence === after.sequence &&
+  generation.activeWriters === 0 && after.activeWriters === 0;
+```
+
+A page contains at most **100 combined rows and 256 KiB**, including the envelope.
+A row that cannot fit fails with `HOST_INVENTORY_ROW_TOO_LARGE`; it is never
+omitted. `complete` is true only when both stores are exhausted; otherwise
+`truncated=true` and `nextCursor` is required. Completeness covers stored agents,
+including closed, archived and marker-free records, and the retained journal
+(`admissionRetentionDays`, currently 14); it does not claim historical records
+beyond retention, transient internal agents or provider-native history. Agent
+rows expose only the calling plugin's binding; they do not expose other plugins'
+bindings, full configuration, credentials or native persistence handles.
+
+Cursors are opaque, plugin-scoped, single-use, expire after 10 seconds and are
+limited to one per plugin / 64 per daemon. `HOST_INVENTORY_STALE` means restart
+from page one and discard the partial aggregate. `HOST_INVENTORY_BUSY` means a
+write or another read is in progress; retry outside publication locks. Corrupt or
+unreadable agent files produce `HOST_INVENTORY_INCOMPLETE`, never a complete empty
+result. Cold store initialization may read disk; subsequent pages walk only the
+bounded number of entries and one lookahead, without a full-store query/sort.
+
+The watermark includes a fresh daemon `epoch`, monotonic `sequence`, active writer
+count and a suffix of at most 64 domain changes. Compare epoch **and** sequence,
+require no active writers, and reject a suffix gap (`oldestSequence`) when using
+the suffix diagnostically. Participating mutation paths cover agent-record
+writes/deletes (including bindings and stored provider identity), admission
+begin/finish/ack/retention/recovery, live timeline initialization/append/enrichment/
+delete, provider registry replacement and plugin publication/removal/hook changes.
+Failures and conservative no-ops can also advance it. The suffix contains no
+session data. `productionFence` is always **false**.
+
+`server.inventory.watermark()` also leases a local observation file for ten
+seconds at the returned `local.path` (under the host's `runtime-inventory`
+directory). The directory is private/daemon-owned and each atomically replaced
+file is mode 0600, bounded below 16 KiB. Writers publish `activeWriters > 0`
+**before** their mutation and the completion generation afterwards. While the
+lease is active, a failed pre-mutation file publication rejects the write; a
+failed completion leaves the busy file and disables inventory until restart.
+Without a lease, ordinary writes only update the in-memory counter. There are no
+background export timers. A local reader must bound the read to 16 KiB, validate
+owner/mode/schema, require `expiresAt > now` on **both** reads, match the expected
+epoch and compare the full sequence with zero active writers. Renewal requires
+RPC outside critical locks. The file is ephemeral observation data, not a durable
+receipt or restart/replay record. It does not replace the original journal.
+
+**This is host-only observation, not a production publication fence.** The host
+does not participate in external admission/publication locks. A compare before
+and after publication can detect intervening changes, but does not prevent them
+or undo an effect. GC ownership/incarnation, Git workspace identity, external
+capability/revocation files, old publishers and provider-native histories are
+explicitly excluded. Preserve `HOST_COHERENT_FENCE_UNSUPPORTED`,
+`production_verified=false` and `promotion_allowed=false` until the separate
+writer-lock participation (`pa-6ec27.1`) and S3/T6 qualification are complete.
+Never call inventory RPCs, provider callbacks or full scans under the Gas City
+`admission.lock -> registry.json.lock` critical section.

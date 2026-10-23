@@ -1,3 +1,4 @@
+import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
 import { PluginAgentBindingSchema, type PluginAgentBinding } from "@getpaseo/plugin/server";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
@@ -105,17 +106,23 @@ export class AgentStorage {
   private deleting: Set<string> = new Set();
   private daemonAgentIdsByExecution: Map<string, string> = new Map();
   private daemonExecutionKeysByAgentId: Map<string, string> = new Map();
+  private inventoryComplete = true;
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
   private logger: Logger;
 
-  constructor(baseDir: string, logger: Logger) {
+  constructor(
+    baseDir: string,
+    logger: Logger,
+    readonly inventoryClock?: HostInventoryClock,
+  ) {
     this.baseDir = baseDir;
     this.logger = logger.child({ module: "agent", component: "agent-storage" });
   }
 
   async initialize(): Promise<void> {
+    if (this.loaded) return;
     await this.load();
   }
 
@@ -171,6 +178,7 @@ export class AgentStorage {
     mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
+    const finish = this.inventoryClock?.begin("agent-records");
     const next = prev
       .catch(() => undefined)
       .then(async () => {
@@ -179,13 +187,20 @@ export class AgentStorage {
         }
 
         const record = mutate(this.cache.get(agentId) ?? null);
-        await this.writeRecord(record);
+        try {
+          await this.writeRecord(record);
+        } catch (error) {
+          this.inventoryComplete = false;
+          throw error;
+        }
         return undefined;
       });
 
     const tracked = next.finally(() => {
-      if (this.pendingWrites.get(agentId) === tracked) {
-        this.pendingWrites.delete(agentId);
+      try {
+        finish?.();
+      } finally {
+        if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
       }
     });
 
@@ -216,34 +231,42 @@ export class AgentStorage {
   }
 
   beginDelete(agentId: string): void {
-    this.deleting.add(agentId);
+    if (this.inventoryClock)
+      this.inventoryClock.run("agent-records", () => this.deleting.add(agentId));
+    else this.deleting.add(agentId);
   }
 
   async remove(agentId: string): Promise<void> {
     await this.load();
-    this.beginDelete(agentId);
-    await (this.pendingWrites.get(agentId) ?? Promise.resolve());
-    const paths = Array.from(this.pathsById.get(agentId) ?? []);
-    await Promise.all(
-      paths.map(async (filePath) => {
-        try {
-          await fs.unlink(filePath);
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (code && code !== "ENOENT") {
-            this.logger.warn(
-              { err: error, agentId, filePath },
-              "Failed to remove agent record file",
-            );
+    const finish = this.inventoryClock?.begin("agent-records");
+    try {
+      this.beginDelete(agentId);
+      await (this.pendingWrites.get(agentId) ?? Promise.resolve());
+      const paths = Array.from(this.pathsById.get(agentId) ?? []);
+      await Promise.all(
+        paths.map(async (filePath) => {
+          try {
+            await fs.unlink(filePath);
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== "ENOENT") {
+              this.inventoryComplete = false;
+              this.logger.warn(
+                { err: error, agentId, filePath },
+                "Failed to remove agent record file",
+              );
+            }
           }
-        }
-      }),
-    );
+        }),
+      );
 
-    this.cache.delete(agentId);
-    this.removeOwnerIndex(agentId);
-    this.pathById.delete(agentId);
-    this.pathsById.delete(agentId);
+      this.cache.delete(agentId);
+      this.removeOwnerIndex(agentId);
+      this.pathById.delete(agentId);
+      this.pathsById.delete(agentId);
+    } finally {
+      finish?.();
+    }
   }
 
   async applySnapshot(
@@ -355,6 +378,15 @@ export class AgentStorage {
     await Promise.allSettled(writes);
   }
 
+  inventoryRecords(): IterableIterator<StoredAgentRecord> {
+    if (!this.loaded || !this.inventoryComplete) {
+      throw Object.assign(new Error("Agent inventory is unavailable or has unreadable records"), {
+        code: "HOST_INVENTORY_INCOMPLETE",
+      });
+    }
+    return this.cache.values();
+  }
+
   private async load(): Promise<StoredAgentRecord[]> {
     if (this.loaded) {
       return Array.from(this.cache.values());
@@ -383,6 +415,7 @@ export class AgentStorage {
         this.loaded = true;
         return [];
       }
+      this.inventoryComplete = false;
       this.logger.error({ err: error }, "Failed to load agents");
       this.loaded = true;
       return [];
@@ -417,6 +450,7 @@ export class AgentStorage {
             .filter((file) => file.isFile() && file.name.endsWith(".json"))
             .map((file) => path.join(projectDir, file.name));
         } catch {
+          this.inventoryComplete = false;
           return [];
         }
       }),
@@ -449,6 +483,7 @@ export class AgentStorage {
       const parsed = JSON.parse(content);
       return parseStoredAgentRecord(parsed);
     } catch (error) {
+      this.inventoryComplete = false;
       this.logger.error({ err: error, filePath }, "Skipping invalid agent record");
       return null;
     }

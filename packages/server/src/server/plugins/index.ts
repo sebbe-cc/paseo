@@ -1,3 +1,5 @@
+import type { HostInventoryClock } from "./host-inventory-clock.js";
+import type { HostInventory } from "./host-inventory.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AdmissionJournal } from "./admission-journal.js";
 import { validateBeforeRequest, type PluginLifecycle } from "./lifecycle/index.js";
@@ -63,7 +65,12 @@ interface PluginRuntimePort {
 }
 
 interface PluginServiceDependencies {
-  admission?: { storage: () => AgentStorage; journal: AdmissionJournal };
+  admission?: {
+    storage: () => AgentStorage;
+    journal: AdmissionJournal;
+    inventory?: () => HostInventory;
+    clock?: HostInventoryClock;
+  };
   usageAgents?: AgentUsageLookup;
   settingsDirectory?: string;
   runtime?: PluginRuntimePort;

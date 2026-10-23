@@ -1,3 +1,4 @@
+import { HostInventoryPageSchema, HostWatermarkResultSchema } from "@getpaseo/plugin/server";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
 import {
@@ -87,7 +88,11 @@ export function createPluginWorker(options: {
   const usageSources = new Map<string, UsageSourceRegistration>();
   const providerConnections = new Map<
     string,
-    { connection: ProviderConnection; unsubscribe: () => void; closing?: Promise<void> }
+    {
+      connection: ProviderConnection;
+      unsubscribe: () => void;
+      closing?: Promise<void>;
+    }
   >();
   const pendingProviderConnections = new Map<string, { tombstoned: boolean }>();
   let cleanup: (() => void | Promise<void>) | null = null;
@@ -313,6 +318,16 @@ export function createPluginWorker(options: {
       : null;
     hooks.setPluginId(message.pluginId);
     const contributedCleanup = contribute({
+      inventory: {
+        read: async (request = {}) =>
+          HostInventoryPageSchema.parse(
+            await admissionRequest({ method: "inventory.read", request }),
+          ),
+        watermark: async () =>
+          HostWatermarkResultSchema.parse(
+            await admissionRequest({ method: "inventory.watermark" }),
+          ),
+      },
       agents: {
         bindings: {
           get: async (agentId) =>
@@ -450,7 +465,10 @@ export function createPluginWorker(options: {
   function handleMessage(rawMessage: unknown): void {
     const parsed = PluginProcessRequestSchema.safeParse(rawMessage);
     if (!parsed.success) {
-      const value = rawMessage as { connectionId?: unknown; acceptanceId?: unknown } | null;
+      const value = rawMessage as {
+        connectionId?: unknown;
+        acceptanceId?: unknown;
+      } | null;
       if (
         value &&
         typeof value.connectionId === "string" &&
