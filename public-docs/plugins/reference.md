@@ -2556,9 +2556,11 @@ while (!page.complete) {
   admissions.push(...page.admissions);
 }
 const after = (await server.inventory.watermark()).watermark;
-const unchanged = generation.epoch === after.epoch &&
+const unchanged =
+  generation.epoch === after.epoch &&
   generation.sequence === after.sequence &&
-  generation.activeWriters === 0 && after.activeWriters === 0;
+  generation.activeWriters === 0 &&
+  after.activeWriters === 0;
 ```
 
 A page contains at most **100 combined rows and 256 KiB**, including the envelope.
