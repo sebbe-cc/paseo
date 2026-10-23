@@ -110,6 +110,17 @@ export function createPluginWorker(options: {
     return JSON.parse(encoded) as Value;
   }
 
+  function handleAdmissionResult(
+    message: Extract<PluginProcessRequest, { type: "admission.result" }>,
+  ): void {
+    const pending = pendingAdmissions.get(message.requestId);
+    if (!pending) return;
+    pendingAdmissions.delete(message.requestId);
+    if (message.error)
+      pending.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+    else pending.resolve(message.output);
+  }
+
   function validateMethod(method: string): string {
     const normalized = method.trim();
     if (!/^[a-z][a-z0-9._-]*$/.test(normalized)) {
@@ -434,17 +445,6 @@ export function createPluginWorker(options: {
     } else if (message.type === "provider.close") {
       send({ type: "provider.closed", connectionId: message.connectionId });
     }
-  }
-
-  function handleAdmissionResult(
-    message: Extract<PluginProcessRequest, { type: "admission.result" }>,
-  ): void {
-    const pending = pendingAdmissions.get(message.requestId);
-    if (!pending) return;
-    pendingAdmissions.delete(message.requestId);
-    if (message.error)
-      pending.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
-    else pending.resolve(message.output);
   }
 
   function handleMessage(rawMessage: unknown): void {

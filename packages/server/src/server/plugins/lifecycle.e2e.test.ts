@@ -675,6 +675,8 @@ export default function contribute(server) {
       status: "opened",
       origin: { kind: "plugin", pluginId: "admission" },
     });
+    const openedEvent = initial.events.find((event) => event.name === "agent.session_opened")!;
+    expect(openedEvent.persistence).toEqual(first.effect!.persistence);
     expect(initial.requests[0]).toMatchObject({
       binding: { revision: 1, data: { pin: "durable" } },
       operation: { id: first.id },

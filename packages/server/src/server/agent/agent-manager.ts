@@ -5477,8 +5477,11 @@ export class AgentManager {
         this.publishAdmission(failed);
         throw error;
       }
+      const persistence = opened.persistence
+        ? { provider: opened.persistence.provider, sessionId: opened.persistence.sessionId }
+        : null;
       const effect = {
-        persistence: opened.persistence,
+        persistence,
         historyEpoch: this.timelineStore.getEpoch(agentId),
       };
       const outcome = { status: "opened" as const, effect, error: null };
