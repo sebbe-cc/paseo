@@ -71,7 +71,7 @@ buildNpmPackage rec {
 
   # Prevent onnxruntime-node's install script from running during automatic
   # npm rebuild (it tries to download from api.nuget.org, which fails in the sandbox).
-  # We manually rebuild only node-pty in buildPhase.
+  # We manually rebuild node-pty and fs-ext in buildPhase.
   npmRebuildFlags = [ "--ignore-scripts" ];
 
   nativeBuildInputs = [
@@ -96,10 +96,10 @@ buildNpmPackage rec {
   buildPhase = ''
     runHook preBuild
 
-    # Rebuild only node-pty (native addon for terminal emulation). The sherpa
+    # Rebuild terminal emulation and native host fencing addons. The sherpa
     # speech runtime ships prebuilt platform packages and is copied into the
     # daemon closure by scripts/trace-daemon.mjs.
-    npm rebuild node-pty
+    npm rebuild node-pty fs-ext
 
     # Build all server packages in dependency order (defined in package.json)
     npm run build:server

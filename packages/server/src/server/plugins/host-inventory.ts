@@ -154,6 +154,10 @@ export class HostInventory {
     return cursor;
   }
 
+  fence() {
+    return this.clock.fence();
+  }
+
   watermark() {
     return this.clock.export();
   }
