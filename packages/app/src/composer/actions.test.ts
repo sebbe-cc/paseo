@@ -889,6 +889,9 @@ describe("openComposerAttachment", () => {
       setLightboxMetadata: (metadata) => {
         lightboxCalls.push(metadata);
       },
+      openTextAttachment: () => {
+        throw new Error("unexpected text preview");
+      },
       openWorkspaceAttachment: () => false,
       openExternalUrl: (url) => {
         externalUrlCalls.push(url);
@@ -905,6 +908,9 @@ describe("openComposerAttachment", () => {
       attachment: review,
       setLightboxMetadata: () => {
         throw new Error("unexpected lightbox call");
+      },
+      openTextAttachment: () => {
+        throw new Error("unexpected text preview");
       },
       openWorkspaceAttachment: ({ attachment }) => {
         workspaceCalls.push(attachment);
@@ -924,12 +930,49 @@ describe("openComposerAttachment", () => {
       setLightboxMetadata: () => {
         throw new Error("unexpected lightbox call");
       },
+      openTextAttachment: () => {
+        throw new Error("unexpected text preview");
+      },
       openWorkspaceAttachment: () => false,
       openExternalUrl: (url) => {
         externalUrlCalls.push(url);
       },
     });
     expect(externalUrlCalls).toEqual([issueItem.url]);
+  });
+
+  it("opens local plugin snapshots through the text preview without a plugin runtime", () => {
+    const local: ComposerAttachment = {
+      kind: "plugin_resource",
+      pluginId: "disabled-plugin",
+      sourceId: "notes",
+      sourceTitle: "Note",
+      sourceIcon: "Quote",
+      item: {
+        id: "note",
+        identifier: "",
+        title: "Explain",
+        text: "Full quote and comment",
+        resourceType: "note",
+      },
+    };
+    const previews: ComposerAttachment[] = [];
+    openComposerAttachment({
+      attachment: local,
+      setLightboxMetadata: () => {
+        throw new Error("unexpected image");
+      },
+      openWorkspaceAttachment: () => {
+        throw new Error("unexpected workspace");
+      },
+      openExternalUrl: () => {
+        throw new Error("unexpected URL");
+      },
+      openTextAttachment: (attachment) => {
+        previews.push(attachment);
+      },
+    });
+    expect(previews).toEqual([local]);
   });
 
   it("opens plugin resource URLs through the external url opener", () => {
@@ -952,6 +995,9 @@ describe("openComposerAttachment", () => {
       },
       setLightboxMetadata: () => {
         throw new Error("unexpected lightbox call");
+      },
+      openTextAttachment: () => {
+        throw new Error("unexpected text preview");
       },
       openWorkspaceAttachment: () => false,
       openExternalUrl: (url) => {
