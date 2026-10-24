@@ -100,13 +100,13 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       const creating = client.createAgent({ provider: "claude", cwd: root });
       await createEntered;
       try {
-        expect(await client.invokePluginRpc("inventory", "read-error", {})).toEqual({
-          code: "HOST_INVENTORY_BUSY",
-        });
-        expect((await watermark()).watermark.activeWriters).toBeGreaterThan(0);
+        // Provider I/O is represented by the durable pending admission. Native
+        // SH protects the journal writes, not awaited hooks/provider callbacks.
+        expect((await read()).admissions.some((row) => row.status === "pending")).toBe(true);
+        expect((await watermark()).watermark.activeWriters).toBe(0);
         const pendingPublication = openSync(fence.lock.path, "r+");
         try {
-          expect(() => flockSync(pendingPublication, "exnb")).toThrow();
+          expect(() => flockSync(pendingPublication, "exnb")).not.toThrow();
         } finally {
           closeSync(pendingPublication);
         }
