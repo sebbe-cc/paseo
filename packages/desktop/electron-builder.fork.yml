@@ -1,0 +1,13 @@
+# Fork (sebbe-cc/paseo) desktop builds; nix/desktop-release.nix runs this (nix build .#desktop-release on tempus).
+# Signs with the Apple Development key via sign-fork.js (rcodesign), skips notarization and updates from the fork.
+extends: ./electron-builder.yml
+# The version is 0.9.2-desvio.<n>; keep publishing latest-mac.yml, not desvio-mac.yml.
+detectUpdateChannel: false
+publish:
+  provider: github
+  owner: sebbe-cc
+  repo: paseo
+  releaseType: release
+mac:
+  notarize: false
+  sign: ./scripts/sign-fork.js
