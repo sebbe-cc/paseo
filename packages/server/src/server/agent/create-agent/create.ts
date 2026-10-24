@@ -82,6 +82,7 @@ export interface CreateAgentFromSessionInput {
 }
 
 export interface CreateAgentFromMcpInput {
+  origin?: import("@getpaseo/plugin/server").PluginRequestOrigin;
   kind: "mcp";
   provider: string;
   title: string;
@@ -376,6 +377,9 @@ async function resolveMcpCreateAgent(
     createOptions: {
       ...(Object.keys(intent.labels).length > 0 ? { labels: intent.labels } : {}),
       workspaceId: intent.workspaceId,
+      origin: input.callerAgentId
+        ? { kind: "agent", callerAgentId: input.callerAgentId }
+        : input.origin,
       owner: input.owner,
       env: input.env,
     },

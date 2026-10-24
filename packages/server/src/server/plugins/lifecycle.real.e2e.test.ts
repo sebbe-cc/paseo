@@ -26,6 +26,18 @@ type RecordedHook =
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const evidenceDirectory = path.join(repoRoot, ".dev", "lifecycle-proof");
 
+async function providerPidsInWorkspace(cwd: string): Promise<number[]> {
+  const rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], { encoding: "utf8" }).split("\n");
+  const pids: number[] = [];
+  for (const row of rows) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(row);
+    if (match && Number(match[2]) === process.pid && match[3].includes("claude")) {
+      if ((await readlink(`/proc/${match[1]}/cwd`)) === cwd) pids.push(Number(match[1]));
+    }
+  }
+  return pids;
+}
+
 async function readHooks(client: DaemonClient): Promise<RecordedHook[]> {
   const logs = await client.getPluginLogs("lifecycle-logger");
   const events: RecordedHook[] = [];
@@ -134,6 +146,21 @@ test.skipIf(process.platform !== "linux")(
       await client.patchDaemonConfig({ pluginsEnabled: true });
       await client.installDirectoryPlugin(path.join(repoRoot, "plugin-examples/lifecycle-logger"));
       await client.installDirectoryPlugin(path.join(repoRoot, "plugin-examples/lifecycle-actions"));
+      const admissionPlugin = path.join(fixture, "admission-plugin");
+      await mkdir(admissionPlugin);
+      await writeFile(
+        path.join(admissionPlugin, "paseo-plugin.json"),
+        JSON.stringify({
+          id: "real-admission",
+          requirements: { paseo: ">=0.8.0" },
+          admission: { fence: "bound-agents", fenceWaitMs: 1000, durableEvents: true },
+        }),
+      );
+      await writeFile(
+        path.join(admissionPlugin, "index.server.ts"),
+        'export default function(server) { server.before("agent.session_open", () => {}); server.on("agent.created", async ({agent}) => { await server.agents.bindings.set(agent.id, {managed: true}, {expectRevision: null}); }); return () => {}; }',
+      );
+      await client.installDirectoryPlugin(admissionPlugin);
       const created = await client.createWorkspace({
         title: "Isolated lifecycle example",
         source: { kind: "directory", path: project },
@@ -205,6 +232,29 @@ test.skipIf(process.platform !== "linux")(
         `Call Bash with exactly this command: ${envCommand}. Reply with its exact output only.`,
       );
       const envPermission = await waitForPermission(client, agent.id, envCommand);
+      const manager = daemon.daemon.agentManager;
+      const beforeReload = manager.getAgent(agent.id)!;
+      const timelineBefore = manager.fetchTimeline(agent.id);
+      const pidsBefore = await providerPidsInWorkspace(workspace.workspaceDirectory);
+      expect(pidsBefore).toHaveLength(1);
+      expect(await daemon.daemon.agentStorage.getBinding(agent.id, "real-admission")).toMatchObject(
+        { revision: 1, data: { managed: true } },
+      );
+      await client.reloadPlugin("real-admission");
+      const afterReload = manager.getAgent(agent.id)!;
+      expect(afterReload.session).toBe(beforeReload.session);
+      expect(afterReload.persistence).toEqual(beforeReload.persistence);
+      expect(afterReload.activeForegroundTurnId).toBe(beforeReload.activeForegroundTurnId);
+      expect(manager.fetchTimeline(agent.id).epoch).toBe(timelineBefore.epoch);
+      expect(manager.fetchTimeline(agent.id).window.nextSeq).toBe(timelineBefore.window.nextSeq);
+      expect(await providerPidsInWorkspace(workspace.workspaceDirectory)).toEqual(pidsBefore);
+      proof.reloadPreserved = {
+        pid: pidsBefore[0],
+        turnId: afterReload.activeForegroundTurnId,
+        persistence: afterReload.persistence,
+        epoch: timelineBefore.epoch,
+        nextSeq: timelineBefore.window.nextSeq,
+      };
       await client.respondToPermission(agent.id, envPermission, { behavior: "allow" });
       await waitForTurns(client, agent.id, 5);
       const envTurns = await endedTurns(client, agent.id);
@@ -244,19 +294,7 @@ test.skipIf(process.platform !== "linux")(
       });
       await client.sendMessage(failed.id, "Reply READY. Do not use tools.");
       await waitForTurns(client, failed.id, 1);
-      const rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], { encoding: "utf8" }).split(
-        "\n",
-      );
-      const providerPids: number[] = [];
-      for (const row of rows) {
-        const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(row);
-        if (match && Number(match[2]) === process.pid && match[3].includes("claude")) {
-          const cwd = await readlink(`/proc/${match[1]}/cwd`);
-          if (cwd === workspace.workspaceDirectory) {
-            providerPids.push(Number(match[1]));
-          }
-        }
-      }
+      const providerPids = await providerPidsInWorkspace(workspace.workspaceDirectory);
       expect(providerPids).toHaveLength(1);
       const providerPid = providerPids[0];
       await client.sendMessage(

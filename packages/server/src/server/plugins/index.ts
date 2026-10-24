@@ -1,4 +1,6 @@
-import type { PluginLifecycle } from "./lifecycle/index.js";
+import type { AgentStorage } from "../agent/agent-storage.js";
+import type { AdmissionJournal } from "./admission-journal.js";
+import { validateBeforeRequest, type PluginLifecycle } from "./lifecycle/index.js";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
 import type pino from "pino";
@@ -39,7 +41,7 @@ const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_ID
 interface PluginRuntimePort {
   emit?: PluginLifecycle["emit"];
   drainEvents?: PluginRuntime["drainEvents"];
-  before?: PluginLifecycle["before"];
+  before?: PluginRuntime["before"];
   catalog: PluginRuntime["catalog"];
   invoke(pluginId: string, method: string, input: unknown): Promise<unknown>;
   agentTools?(): PluginAgentTool[];
@@ -65,6 +67,7 @@ interface PluginRuntimePort {
 }
 
 interface PluginServiceDependencies {
+  admission?: { storage: () => AgentStorage; journal: AdmissionJournal };
   usageAgents?: AgentUsageLookup;
   settingsDirectory?: string;
   runtime?: PluginRuntimePort;
@@ -116,6 +119,7 @@ export class PluginService {
       dependencies.runtime ??
       new PluginRuntime(logger, daemonVersion, {
         settingsDirectory: dependencies.settingsDirectory,
+        admission: dependencies.admission,
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
@@ -139,9 +143,66 @@ export class PluginService {
     await this.runtime.drainEvents?.();
   }
 
+  private readonly admissionPolicies = new Map<
+    string,
+    NonNullable<Awaited<ReturnType<typeof readPluginManifest>>["admission"]>
+  >();
+
+  async prepareAdmission(): Promise<void> {
+    await this.dependencies.admission?.journal.initialize();
+    await this.dependencies.admission?.storage().initialize();
+    const config = this.configStore.get();
+    if (!config.pluginsEnabled) return;
+    for (const [id, source] of Object.entries(config.plugins ?? {})) {
+      if (source.enabled === false) continue;
+      try {
+        const manifest = await readPluginManifest(expandTilde(source.path));
+        if (manifest.admission) this.admissionPolicies.set(id, manifest.admission);
+        else this.admissionPolicies.delete(id);
+      } catch {
+        // An unreadable enabled plugin cannot revoke the fence on its durable bindings.
+        if (!this.admissionPolicies.has(id))
+          this.admissionPolicies.set(id, {
+            fence: "bound-agents",
+            fenceWaitMs: 20000,
+            durableEvents: true,
+          });
+      }
+    }
+  }
+
+  readonly admissionRecipients = (): string[] => {
+    const config = this.configStore.get();
+    if (!config.pluginsEnabled) return [];
+    return [...this.admissionPolicies]
+      .filter(
+        ([id, policy]) =>
+          config.plugins?.[id]?.enabled !== false &&
+          config.plugins?.[id] &&
+          (policy.durableEvents || policy.fence),
+      )
+      .map(([id]) => id);
+  };
+
   readonly before: PluginLifecycle["before"] = async (name, request) => {
+    const fences: Array<{ pluginId: string; waitMs: number }> = [];
+    if (name === "agent.session_open") {
+      const opening = validateBeforeRequest("agent.session_open", request);
+      const record = await this.dependencies.admission?.storage().get(opening.agentId);
+      const bindings = { ...record?.pluginBindings };
+      if (opening.binding && opening.origin.kind === "plugin")
+        bindings[opening.origin.pluginId] = opening.binding;
+      const config = this.configStore.get();
+      for (const id of Object.keys(bindings)) {
+        if (!config.pluginsEnabled || !config.plugins?.[id] || config.plugins[id].enabled === false)
+          continue;
+        const policy = this.admissionPolicies.get(id);
+        if (policy?.fence === "bound-agents")
+          fences.push({ pluginId: id, waitMs: policy.fenceWaitMs });
+      }
+    }
     if (this.runtime.before) {
-      return this.runtime.before(name, request);
+      return this.runtime.before(name, request, fences);
     }
     return request;
   };
@@ -178,6 +239,7 @@ export class PluginService {
   }
 
   async start(): Promise<void> {
+    await this.prepareAdmission();
     if (this.started) return;
     this.started = true;
     const config = this.configStore.get();
@@ -560,6 +622,7 @@ export class PluginService {
   }
 
   private async startPlugin(pluginId: string, sourcePath: string): Promise<void> {
+    await this.prepareAdmission();
     await this.runtime.startPlugin(pluginId, sourcePath, () => this.canPublish(pluginId));
     try {
       await this.publishProviderRegistrations(pluginId, sourcePath);

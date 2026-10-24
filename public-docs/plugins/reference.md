@@ -875,11 +875,11 @@ type PluginTurnOutcome =
 
 ### Before hooks
 
-| Name                 | Request fields                                                          | Editable                                |
-| -------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| `agent.create`       | `config`, optional `env`                                                | Public agent config except `cwd`; `env` |
-| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env` | Only `env`                              |
-| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                         | Entire explicit creation request        |
+| Name                 | Request fields                                                                                                       | Editable                                |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `agent.create`       | `config`, `origin`, optional `env` and `bindingIntent`                                                               | Public agent config except `cwd`; `env` |
+| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env`, `origin`, `operation`, `binding`, `history` | Only `env`                              |
+| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                                                                      | Entire explicit creation request        |
 
 **`agent.create.config`** uses `AgentSessionConfig`:
 
@@ -917,6 +917,7 @@ type PluginTurnOutcome =
 
 ```text
 Creation request
+  → journal pending admission operation (append + fsync)
   → agent.create hooks (plugin-ID order; registration order within each plugin)
   → resolve defaults and validate provider configuration
   → derive launch configuration with Paseo runtime tools and daemon prompt
@@ -935,6 +936,67 @@ Creation request
 No automatic deep merge. Later callbacks can overwrite earlier values. Agent configuration is
 saved; environment overrides are not persisted with it.
 
+### Origin, bindings and admission
+
+Paseo stamps `origin` from the authenticated plugin socket, client principal and hello identity,
+MCP caller agent, or daemon source (`restore`, `schedule`, `hub`, `voice`, `loop`). Hooks cannot
+change it. Labels, titles and environment variables do not establish origin or a binding.
+
+A plugin's own `agent.create` hook may return `bindingIntent` when that plugin originated the
+create. Paseo stores the JSON as revision 1 with the first agent record, before `agent.created`.
+For existing agents, use the server context's namespace:
+
+```ts
+const binding = await server.agents.bindings.get(agentId);
+await server.agents.bindings.set(
+  agentId,
+  { locator: "opaque-value" },
+  {
+    expectRevision: binding?.revision ?? null,
+  },
+);
+await server.agents.bindings.list({ since: "2026-10-23T00:00:00Z" });
+// Clearing requires the current revision, too:
+await server.agents.bindings.clear(agentId, { expectRevision: currentRevision });
+```
+
+Writes compare revisions atomically. A stale revision rejects with `PLUGIN_BINDING_CONFLICT`.
+Revisions increase across clearing and rebinding; `null` means no current binding. Values must
+be JSON no larger than 16 KiB. Bindings survive snapshots, title changes, archive, and restart.
+Each plugin can read and write only its own namespace. Its session-open hooks receive that
+binding; other plugins receive their own binding or `null`.
+
+Every opening has a journaled `operation` (`id`, `agentId`, `reason`, `attempt`, `supersedes`,
+`startedAt`) before hooks run. `attempt` counts this daemon's attempts for the agent;
+`supersedes` identifies the previous successful opening for resume or refresh. `history`
+contains the prior epoch, next sequence and provider persistence. These fields and `binding`
+are read-only. A before hook can return `{ deny: { code, message } }` to abort with its own code.
+
+`agent.session_opened` carries `agent`, `operation`, `persistence` and `historyEpochChanged`.
+`agent.session_open_failed` carries `agent`, `operation`, `error` and `stage` (`hook`, `fence`,
+`provider`, `interrupted`). Query the original effect through `server.admissions.get(id)` or
+`server.admissions.query({ agentId, status: ["opened", "failed"], since, limit })`.
+The journal includes openings made without plugins. It does not reconstruct earlier history.
+
+Declare admission behavior in `paseo-plugin.json`:
+
+```json
+{ "admission": { "fence": "bound-agents", "fenceWaitMs": 20000, "durableEvents": true } }
+```
+
+With `durableEvents`, unacknowledged outcomes replay at the next plugin load. Deduplicate by
+operation ID and call `server.admissions.ack(id)` after saving the result; a crash can cause
+redelivery. Acknowledgement affects only the calling plugin. Pending operations become
+`interrupted` on daemon restart. The host retains completed journal records for 14 days.
+
+The fence waits at most `fenceWaitMs` for a bound agent's plugin and its session-open hook.
+Unavailable hooks reject with `PLUGIN_ADMISSION_UNAVAILABLE`, including during reload, failed
+startup and before scheduled startup work. Unbound agents keep their ordinary behavior.
+Disabling the plugin removes its fence without deleting bindings. Reload does not stop existing
+provider sessions or turns. Do not call agent mutations from a before hook for the same agent:
+those commands queue behind the operation invoking the hook. Binding and admission queries do
+not use that lifecycle queue.
+
 ### Context and cleanup
 
 | Contract                           | Behavior                                                                                                  |
@@ -947,7 +1009,7 @@ saved; environment overrides are not persisted with it.
 | Unknown hook name                  | Registration fails                                                                                        |
 | Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation; an event handler logs an error. |
 | Event-handler error                | Logged against plugin; original operation continues                                                       |
-| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                             |
+| Event delivery                     | Live, best effort except admission outcomes declared durable below                                        |
 | Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                 |
 
 ### Complete examples

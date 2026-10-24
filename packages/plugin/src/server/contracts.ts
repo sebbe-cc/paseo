@@ -28,6 +28,8 @@ export interface PluginSettings<Schema extends ZodType> {
 }
 
 export interface PluginServerContext extends PluginLifecycleRegistration {
+  agents: { bindings: import("./admission.js").PluginAgentBindings };
+  admissions: import("./admission.js").PluginAdmissions;
   registerSettings<Schema extends ZodType>(
     definition: import("../settings.js").SettingsDefinition<Schema>,
   ): PluginSettings<Schema>;
