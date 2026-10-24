@@ -2897,11 +2897,26 @@ only history. It therefore keeps the same operation/binding guard. A warm
 timeline fetch reads the existing projection without provider-open, journal
 publication or admission CAS; it is already outside this guard. Tests assert
 both paths, including archived history through the installed hooks.
-The one-use dispatch permit cannot start its effect twice. A writer
-that encounters EX returns `HOST_FENCE_BUSY` before mutation. Callers retry outside
-publication locks. Kernel descriptor cleanup releases SH when a writer process
-crashes; restart changes the epoch. Filesystem replacement, direct out-of-process
-host edits and simultaneous daemons sharing one home are outside this contract.
+The one-use dispatch permit cannot start its effect twice. Async
+host writes wait before mutation for up to 30 seconds (at most 1,024 pending lock
+acquisitions). Live timeline flushes retain their uncommitted suffix in order.
+Only acquisition is retried; an action that already started is never replayed.
+Synchronous low-level writers and observation exports still return
+`HOST_FENCE_BUSY`; their callers must retry outside publication locks.
+
+The session-event and coalescer queues each admit at most 2 MiB per agent and
+32 MiB globally, accounting for serialized UTF-16 payloads plus entry overhead.
+After five seconds of contention the host warns at most once per minute. At the
+30-second or memory limit, the affected turn is interrupted and reports
+`HOST_FENCE_SATURATED` in its timeline after publication releases the fence.
+Pending payloads for that failed turn are discarded explicitly; one small error
+marker remains until it can be recorded. Other agents are not interrupted and a
+new turn can run after the fence clears. This is bounded buffering, not a durable
+queue: process death before delivery does not persist queued provider events.
+
+Kernel descriptor cleanup releases SH when a writer process crashes; restart
+changes the epoch. Filesystem replacement, direct out-of-process host edits and
+simultaneous daemons sharing one home are outside this contract.
 
 Fork `fix/admission-publication-boundary` also adds exact binding CAS receipts:
 

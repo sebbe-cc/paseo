@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 
 export class HostFenceError extends Error {
   constructor(
-    readonly code: "HOST_FENCE_BUSY" | "HOST_FENCE_UNAVAILABLE",
+    readonly code: "HOST_FENCE_BUSY" | "HOST_FENCE_UNAVAILABLE" | "HOST_FENCE_SATURATED",
     message: string,
   ) {
     super(message);

@@ -208,7 +208,6 @@ export class AgentStorage {
     bindingChange = false,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
-    const finish = this.inventoryClock?.begin("agent-records");
     const authorityChange = bindingChange || !this.cache.has(agentId);
     if (authorityChange) {
       const state = this.bindingMutations.get(agentId) ?? { generation: 0, pending: 0 };
@@ -219,27 +218,28 @@ export class AgentStorage {
     const next = prev
       .catch(() => undefined)
       .then(async () => {
-        if (this.deleting.has(agentId)) {
-          return undefined;
-        }
-
-        const record = mutate(this.cache.get(agentId) ?? null);
+        const finish = await this.inventoryClock?.beginAsync("agent-records");
         try {
-          await this.writeRecord(record);
-        } catch (error) {
-          this.inventoryComplete = false;
-          throw error;
+          if (this.deleting.has(agentId)) {
+            return undefined;
+          }
+
+          const record = mutate(this.cache.get(agentId) ?? null);
+          try {
+            await this.writeRecord(record);
+          } catch (error) {
+            this.inventoryComplete = false;
+            throw error;
+          }
+          return undefined;
+        } finally {
+          finish?.();
         }
-        return undefined;
       });
 
     const tracked = next.finally(() => {
-      try {
-        if (authorityChange) this.bindingMutations.get(agentId)!.pending--;
-        finish?.();
-      } finally {
-        if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
-      }
+      if (authorityChange) this.bindingMutations.get(agentId)!.pending--;
+      if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
     });
 
     this.pendingWrites.set(agentId, tracked);
@@ -276,7 +276,7 @@ export class AgentStorage {
 
   async remove(agentId: string): Promise<void> {
     await this.load();
-    const finish = this.inventoryClock?.begin("agent-records");
+    const finish = await this.inventoryClock?.beginAsync("agent-records");
     try {
       this.beginDelete(agentId);
       await (this.pendingWrites.get(agentId) ?? Promise.resolve());
