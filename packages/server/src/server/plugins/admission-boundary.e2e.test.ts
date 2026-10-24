@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { expect, test, vi } from "vitest";
@@ -98,9 +99,24 @@ export default function contribute(server) {
       expect(resumes).not.toHaveBeenCalled();
       await rm(release);
       await rm(entered);
-      const retrying = client.fetchAgentTimeline(first.id);
+      const retrying = (async () => {
+        try {
+          return await client.fetchAgentTimeline(first.id);
+        } catch (error) {
+          // The fleet storm guard deliberately delays a second history read.
+          // Retry only its explicit pre-dispatch refusal, never a host effect.
+          const backoff = error as { code?: string; retryAfterMs?: number };
+          if (backoff.code !== "AGENT_RETRY_BACKOFF") throw error;
+          expect(backoff.retryAfterMs).toBeGreaterThan(0);
+          expect(backoff.retryAfterMs).toBeLessThanOrEqual(1000);
+          await delay(backoff.retryAfterMs! + 1);
+          return client.fetchAgentTimeline(first.id);
+        }
+      })();
       void retrying.catch(() => {});
-      await expect.poll(() => readFile(entered, "utf8").catch(() => "")).toBe("ready");
+      await expect
+        .poll(() => readFile(entered, "utf8").catch(() => ""), { timeout: 5000 })
+        .toBe("ready");
       // Metadata for this same agent is not its admission authority.
       await daemon.daemon.agentStorage.setTitle(first.id, "Refreshed metadata");
       await writeFile(release, "release");
