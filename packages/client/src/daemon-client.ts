@@ -1,3 +1,4 @@
+import { AgentRetryBackoff } from "./agent-retry-backoff.js";
 import { messageTooLargeError } from "./daemon-client-transport-utils.js";
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
@@ -1267,6 +1268,7 @@ function buildFetchAgentsRequest(
 }
 
 export class DaemonClient {
+  private readonly agentRetryBackoff = new AgentRetryBackoff();
   private readonly providerSnapshotUpdates = new ProviderSnapshotUpdates({
     active: (message) => this.owned.owns(message),
     fetch: (cwd) => this.requestProvidersSnapshot({ cwd }),
@@ -3417,31 +3419,36 @@ export class DaemonClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
   ): Promise<AgentSnapshotPayload> {
-    const requestId = this.createRequestId();
-    const message = SessionInboundMessageSchema.parse({
-      type: "resume_agent_request",
-      requestId,
-      handle,
-      ...(overrides ? { overrides } : {}),
-    });
+    return this.agentRetryBackoff.run(
+      JSON.stringify(["resume", handle.provider, handle.sessionId]),
+      async () => {
+        const requestId = this.createRequestId();
+        const message = SessionInboundMessageSchema.parse({
+          type: "resume_agent_request",
+          requestId,
+          handle,
+          ...(overrides ? { overrides } : {}),
+        });
 
-    const status = await this.sendRequest({
-      requestId,
-      message,
-      options: { skipQueue: true },
-      select: (msg) => {
-        if (msg.type !== "status") {
-          return null;
-        }
-        const resumed = AgentResumedStatusPayloadSchema.safeParse(msg.payload);
-        if (resumed.success && resumed.data.requestId === requestId) {
-          return resumed.data;
-        }
-        return null;
+        const status = await this.sendRequest({
+          requestId,
+          message,
+          options: { skipQueue: true },
+          select: (msg) => {
+            if (msg.type !== "status") {
+              return null;
+            }
+            const resumed = AgentResumedStatusPayloadSchema.safeParse(msg.payload);
+            if (resumed.success && resumed.data.requestId === requestId) {
+              return resumed.data;
+            }
+            return null;
+          },
+        });
+
+        return status.agent;
       },
-    });
-
-    return status.agent;
+    );
   }
 
   async importAgent(input: ImportAgentInput): Promise<AgentSnapshotPayload> {
@@ -3514,39 +3521,41 @@ export class DaemonClient {
     agentId: string,
     options: FetchAgentTimelineOptions = {},
   ): Promise<FetchAgentTimelinePayload> {
-    const resolvedRequestId = this.createRequestId(options.requestId);
-    const message = SessionInboundMessageSchema.parse({
-      type: "fetch_agent_timeline_request",
-      agentId,
-      requestId: resolvedRequestId,
-      ...(options.direction ? { direction: options.direction } : {}),
-      ...(options.cursor ? { cursor: options.cursor } : {}),
-      ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
-      ...(options.projection ? { projection: options.projection } : {}),
-      ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
+    return this.agentRetryBackoff.run("history:" + agentId, async () => {
+      const resolvedRequestId = this.createRequestId(options.requestId);
+      const message = SessionInboundMessageSchema.parse({
+        type: "fetch_agent_timeline_request",
+        agentId,
+        requestId: resolvedRequestId,
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+        ...(options.projection ? { projection: options.projection } : {}),
+        ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
+      });
+
+      const payload = await this.sendRequest({
+        requestId: resolvedRequestId,
+        message,
+        timeout: options.timeout,
+        options: { skipQueue: true },
+        select: (msg) => {
+          if (msg.type !== "fetch_agent_timeline_response") {
+            return null;
+          }
+          if (msg.payload.requestId !== resolvedRequestId) {
+            return null;
+          }
+          return msg.payload;
+        },
+      });
+
+      if (payload.error) {
+        throw new Error(payload.error);
+      }
+
+      return payload;
     });
-
-    const payload = await this.sendRequest({
-      requestId: resolvedRequestId,
-      message,
-      timeout: options.timeout,
-      options: { skipQueue: true },
-      select: (msg) => {
-        if (msg.type !== "fetch_agent_timeline_response") {
-          return null;
-        }
-        if (msg.payload.requestId !== resolvedRequestId) {
-          return null;
-        }
-        return msg.payload;
-      },
-    });
-
-    if (payload.error) {
-      throw new Error(payload.error);
-    }
-
-    return payload;
   }
 
   async appendAgentTimelineItem(

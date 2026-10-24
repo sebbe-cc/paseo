@@ -1173,3 +1173,20 @@ test("disposing a view releases its pending observation before bootstrap complet
   await Promise.resolve();
   world.expectNoPendingFetch();
 });
+
+test("a permanent history failure reaches the retry cap without resetting on membership updates", async () => {
+  const world = new TimelineWorld();
+  world.sync.setConnected(true);
+  world.sync.replaceVisibleAgentIds("workspace", ["agent-a"]);
+  (await world.nextMembership()).succeed();
+  for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+    const fetch = await world.nextFetch("agent-a");
+    fetch.fail("history permanently unavailable");
+    await world.nextError();
+    const retry = await world.nextRetry(delay);
+    world.sync.replaceVisibleAgentIds("workspace", ["agent-a"]);
+    expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("error");
+    retry();
+  }
+  (await world.nextFetch("agent-a")).respond({ hasNewer: false });
+});
