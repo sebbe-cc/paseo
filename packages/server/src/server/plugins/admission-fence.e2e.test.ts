@@ -2,10 +2,10 @@ import { createPaseoDaemon } from "../bootstrap.js";
 import { BuiltinPluginLoader } from "./builtin/index.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AdmissionJournal } from "./admission-journal.js";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { z } from "zod";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
@@ -230,3 +230,53 @@ test("restart recovers pending outcomes and fences stored agents before plugins 
     await rm(first.staticDir, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("a failing history provider cannot fill the admission census or append log", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "admission-storm-"));
+  vi.stubEnv("PASEO_HOME", path.join(root, "paseo"));
+  vi.stubEnv("FLEET_TOWN_STATE_DIR", path.join(root, "town"));
+  let attempts = 0;
+  const provider = createTestAgentClient("claude", {
+    beforeResumeSession: async () => {
+      attempts++;
+      throw new Error("history session always fails");
+    },
+  });
+  const daemon = await createTestPaseoDaemon({
+    paseoHomeRoot: root,
+    cleanup: false,
+    agentClients: { claude: provider },
+  });
+  try {
+    for (let attempt = 0; attempt < 300; attempt++) {
+      await expect(
+        daemon.daemon.agentManager.resumeAgentFromPersistence(
+          { provider: "claude", sessionId: "broken-history" },
+          { provider: "claude", cwd: root },
+          "aff44237-d53b-4e29-950c-cf2a9c18f025",
+          undefined,
+          { purpose: "history" },
+        ),
+      ).rejects.toThrow("history session always fails");
+    }
+    expect(attempts).toBe(300);
+    const directory = path.join(daemon.paseoHome, "admissions");
+    const files = (await readdir(directory)).filter((name) => name.endsWith(".jsonl"));
+    const rows = (
+      await Promise.all(files.map((name) => readFile(path.join(directory, name), "utf8")))
+    )
+      .join("")
+      .trim()
+      .split("\n");
+    expect(rows.length).toBeLessThan(256);
+    await daemon.close();
+    const recovered = new AdmissionJournal(directory);
+    expect([...(await recovered.query({ status: ["failed"] }))]).toHaveLength(64);
+    expect([...recovered.inventoryRecords()]).toHaveLength(64);
+  } finally {
+    await daemon.close();
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+    await rm(daemon.staticDir, { recursive: true, force: true });
+  }
+}, 60000);

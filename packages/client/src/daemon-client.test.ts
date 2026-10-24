@@ -7874,3 +7874,82 @@ test("measures an outbound message in UTF-8 bytes against the daemon's message l
   expect(mock.sent).toHaveLength(1);
   expect(client.getConnectionState().status).toBe("connected");
 });
+
+test("repeated failed history reads are backed off per agent before sending another request", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "storm",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen();
+  await connecting;
+  const request = client.fetchAgentTimeline("broken", { requestId: "storm-first" });
+  mock.triggerMessage(
+    JSON.stringify({
+      type: "session",
+      message: {
+        type: "fetch_agent_timeline_response",
+        payload: {
+          requestId: "storm-first",
+          agentId: "broken",
+          agent: null,
+          direction: "tail",
+          projection: "projected",
+          epoch: "e",
+          reset: false,
+          staleCursor: false,
+          gap: false,
+          window: { minSeq: 0, maxSeq: 0, nextSeq: 1 },
+          startCursor: null,
+          endCursor: null,
+          hasOlder: false,
+          hasNewer: false,
+          entries: [],
+          error: "SESSION_OPEN_FAILED",
+        },
+      },
+    }),
+  );
+  await expect(request).rejects.toThrow("SESSION_OPEN_FAILED");
+  const sent = mock.sent.length;
+  await expect(client.fetchAgentTimeline("broken")).rejects.toMatchObject({
+    code: "AGENT_RETRY_BACKOFF",
+  });
+  expect(mock.sent).toHaveLength(sent);
+});
+
+test("failed explicit resumes back off by provider and session before opening again", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "resume-storm",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen();
+  await connecting;
+  const handle = { provider: "claude", sessionId: "broken" };
+  const request = client.resumeAgent(handle);
+  const frame = parseSentFrame(mock.sent[0]) as { requestId: string };
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "rpc_error",
+      payload: {
+        requestId: frame.requestId,
+        requestType: "resume_agent_request",
+        error: "provider failed",
+        code: "agent_resume_failed",
+      },
+    }),
+  );
+  await expect(request).rejects.toThrow("provider failed");
+  const sent = mock.sent.length;
+  await expect(client.resumeAgent(handle)).rejects.toMatchObject({ code: "AGENT_RETRY_BACKOFF" });
+  expect(mock.sent).toHaveLength(sent);
+});
