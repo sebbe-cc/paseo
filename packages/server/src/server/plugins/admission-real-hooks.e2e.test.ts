@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test, vi } from "vitest";
@@ -47,22 +47,93 @@ export default function contribute(server) {
   return () => {dispose(); stop();};
 }`,
     );
-    const provider = createTestAgentClient("codex", { supportsMcpServers: true });
+    const provider = createTestAgentClient("codex", {
+      supportsMcpServers: true,
+    });
+    const claude = createTestAgentClient("claude", {
+      supportsMcpServers: true,
+    });
     const resumes = vi.spyOn(provider, "resumeSession");
+    const snapshotTargets: string[] = [];
+    const snapshotRoot = process.env.PASEO_TEST_AGENT_SNAPSHOT;
+    if (snapshotRoot) {
+      // Read-only production snapshot, sanitized before entering the isolated
+      // daemon: never copy env, prompts, credentials, native handles or tools.
+      // IDs/provider thread IDs survive; cwd and GC lookup point to this fixture.
+      const files = (await readdir(snapshotRoot, { recursive: true })).filter((name) =>
+        name.endsWith(".json"),
+      );
+      expect(files.length).toBeLessThanOrEqual(20000);
+      const destination = path.join(root, ".paseo/agents/snapshot");
+      await mkdir(destination, { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        const row = JSON.parse(await readFile(path.join(snapshotRoot, file), "utf8"));
+        if (!row.id || !row.provider || !row.persistence?.sessionId) continue;
+        const selected = ["4c3fe5c", "d5a82a57", "0834d4d0"].some((prefix) =>
+          row.id.startsWith(prefix),
+        );
+        const labels = selected
+          ? { "gc-city": "isolated", "gc-session": `snapshot-${row.id}` }
+          : {};
+        const copy = {
+          id: row.id,
+          provider: row.provider,
+          cwd: root,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          lastStatus: "closed",
+          archivedAt: row.archivedAt ?? null,
+          labels,
+          persistence: {
+            provider: row.provider,
+            sessionId: row.persistence.sessionId,
+          },
+        };
+        await writeFile(path.join(destination, `${row.id}.json`), JSON.stringify(copy), {
+          mode: 0o600,
+        });
+        if (selected) {
+          snapshotTargets.push(row.id);
+          const session = path.join(gcRoot, "isolated/sessions", `snapshot-${row.id}`);
+          await mkdir(session, { recursive: true });
+          await writeFile(path.join(session, "agent"), row.id);
+          await writeFile(
+            path.join(session, "env"),
+            "BEADS_ACTOR='isolated-snapshot'\nGC_SESSION_NAME='snapshot'\n",
+          );
+        }
+      }
+      expect(snapshotTargets).toHaveLength(3);
+    }
     const options = {
       paseoHomeRoot: root,
       cleanup: false,
-      agentClients: { codex: provider },
+      agentClients: { codex: provider, claude },
       pluginsEnabled: true,
       plugins: {
         gascity: { source: "directory" as const, path: plugin, enabled: true },
-        "zz-bifrost": { source: "directory" as const, path: bifrost!, enabled: true },
+        "zz-bifrost": {
+          source: "directory" as const,
+          path: bifrost!,
+          enabled: true,
+        },
       },
     };
     let daemon = await createTestPaseoDaemon(options);
     let client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     try {
       await client.connect();
+      for (const id of snapshotTargets) {
+        const before = await daemon.daemon.agentStorage.get(id);
+        await client.fetchAgentTimeline(id, { limit: 1 });
+        // Resume may enrich provider metadata (for example cwd); the durable
+        // provider/thread identity must survive the real history hook chain.
+        expect((await daemon.daemon.agentStorage.get(id))!.persistence).toMatchObject({
+          provider: before!.persistence!.provider,
+          sessionId: before!.persistence!.sessionId,
+        });
+        await daemon.daemon.agentManager.closeAgent(id);
+      }
       const agent = await client.createAgent({
         provider: "codex",
         cwd: root,
@@ -123,5 +194,5 @@ export default function contribute(server) {
       await rm(root, { recursive: true, force: true });
     }
   },
-  60000,
+  120000,
 );
