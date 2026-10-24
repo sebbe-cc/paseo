@@ -5690,7 +5690,10 @@ export class DaemonClient {
     const requestId = this.createRequestId();
     await this.sendCorrelatedSessionRequest({
       requestId,
-      message: { type: "plugin.remove.request", requestId, pluginId, ...(releaseAdmissions === undefined ? {} : { releaseAdmissions }) },
+      message: {
+        type: "plugin.remove.request", requestId, pluginId,
+        ...(releaseAdmissions === undefined ? {} : { releaseAdmissions }),
+      },
       responseType: "plugin.remove.response",
     });
   }

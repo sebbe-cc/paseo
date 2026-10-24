@@ -5448,6 +5448,15 @@ export class AgentManager {
     return this.runAdmission(agentId, reason, description, open);
   }
 
+  private selectAdmissionRecipients(agentId: string, bindings: StoredAgentRecord["pluginBindings"]) {
+    return (
+      this.pluginLifecycle?.admissionRecipients?.({ agentId, bindings: bindings ?? {} }) ?? {
+        recipients: [],
+        boundRecipients: {},
+      }
+    );
+  }
+
   private async runAdmission(
     agentId: string,
     reason: PluginAdmissionRecord["reason"],
@@ -5474,10 +5483,7 @@ export class AgentManager {
       reason,
       origin,
       previousEpoch: history.epoch,
-      ...(this.pluginLifecycle?.admissionRecipients?.({
-        agentId,
-        bindings: stored?.pluginBindings ?? {},
-      }) ?? { recipients: [], boundRecipients: {} }),
+      ...this.selectAdmissionRecipients(agentId, stored?.pluginBindings),
     };
     const record: AdmissionJournalRecord = this.admissionJournal
       ? await this.admissionJournal.begin(input)

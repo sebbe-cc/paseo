@@ -240,3 +240,52 @@ test("release refuses unfinished operations and create intent is journaled befor
     undeliveredTo: ["global", "scoped"],
   });
 });
+
+test("release audit survives retention and the delivered-failure budget", async () => {
+  const { journal, home } = await fixture();
+  const input = {
+    agent: {
+      id: "audited",
+      provider: "claude",
+      cwd: home,
+      title: null,
+      workspaceId: null,
+      parentAgentId: null,
+    },
+    reason: "resume" as const,
+    origin: { kind: "daemon" as const, source: "restore" as const },
+    previousEpoch: null,
+    recipients: ["scoped"],
+    boundRecipients: { scoped: binding },
+  };
+  const failed = {
+    status: "failed" as const,
+    effect: null,
+    error: { code: "UNAVAILABLE", message: "offline", stage: "fence" as const },
+  };
+  const audited = await journal.begin(input);
+  await journal.finish(audited.id, failed);
+  await journal.releaseBoundRecipient(
+    "scoped",
+    { kind: "client", principalId: "operator", clientId: "cli", clientType: "cli" },
+    "retired",
+  );
+  for (let i = 0; i < 66; i++) {
+    const record = await journal.begin({ ...input, recipients: [], boundRecipients: undefined });
+    await journal.finish(record.id, failed);
+  }
+  expect(await journal.get(audited.id)).toMatchObject({
+    recipientReleases: [{ reason: "retired" }],
+  });
+  // Expire all delivered rows and force a checkpoint on restart.
+  const restarted = new AdmissionJournal(path.join(home, "admissions"), 0);
+  expect(await restarted.get(audited.id)).toMatchObject({
+    id: audited.id,
+    recipientReleases: [{ reason: "retired" }],
+  });
+  const again = new AdmissionJournal(path.join(home, "admissions"));
+  expect(await again.get(audited.id)).toMatchObject({
+    id: audited.id,
+    recipientReleases: [{ reason: "retired" }],
+  });
+});

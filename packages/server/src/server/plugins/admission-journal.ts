@@ -148,7 +148,12 @@ export class AdmissionJournal {
   private async prune(files: string[]): Promise<void> {
     const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString();
     for (const [id, record] of this.records) {
-      if (record.finishedAt && record.finishedAt < cutoff && !record.undeliveredTo.length) {
+      if (
+        record.finishedAt &&
+        record.finishedAt < cutoff &&
+        !record.undeliveredTo.length &&
+        !record.recipientReleases?.length
+      ) {
         this.checkpointAnchor = record;
         this.records.delete(id);
         this.outcomes.delete(id);
@@ -166,7 +171,12 @@ export class AdmissionJournal {
   private async boundFailures(): Promise<void> {
     const counts = new Map<string, number>();
     for (const record of [...this.records.values()].toReversed()) {
-      if (record.status !== "failed" || record.undeliveredTo.length) continue;
+      if (
+        record.status !== "failed" ||
+        record.undeliveredTo.length ||
+        record.recipientReleases?.length
+      )
+        continue;
       const count = (counts.get(record.agentId) ?? 0) + 1;
       counts.set(record.agentId, count);
       if (count <= 64) continue;
@@ -272,7 +282,7 @@ export class AdmissionJournal {
   rememberBoundPolicy(pluginId: string, fenceWaitMs?: number): Promise<void> {
     return this.mutate(async () => {
       // A removed/disabled manifest cannot revoke a fence on durable bindings.
-      const prior = this.policies[pluginId];
+      const prior = Object.hasOwn(this.policies, pluginId) ? this.policies[pluginId] : undefined;
       const policy = { fenceWaitMs: fenceWaitMs ?? prior?.fenceWaitMs };
       if (prior && prior.fenceWaitMs === policy.fenceWaitMs) return;
       const next = { ...this.policies, [pluginId]: policy };

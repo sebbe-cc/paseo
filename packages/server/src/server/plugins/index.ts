@@ -3,7 +3,11 @@ import type { HostInventoryClock } from "./host-inventory-clock.js";
 import type { HostInventory } from "./host-inventory.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AdmissionJournal } from "./admission-journal.js";
-import { PluginAdmissionError, validateBeforeRequest, type PluginLifecycle } from "./lifecycle/index.js";
+import {
+  PluginAdmissionError,
+  validateBeforeRequest,
+  type PluginLifecycle,
+} from "./lifecycle/index.js";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
 import type pino from "pino";
@@ -219,7 +223,8 @@ export class PluginService {
       const config = this.configStore.get();
       for (const id of Object.keys(bindings)) {
         const retained = this.dependencies.admission?.journal.boundPolicies()[id];
-        const enabled = config.pluginsEnabled && !!config.plugins?.[id] && config.plugins[id].enabled !== false;
+        const enabled =
+          config.pluginsEnabled && !!config.plugins?.[id] && config.plugins[id].enabled !== false;
         if (retained?.fenceWaitMs !== undefined) {
           if (!enabled)
             throw new PluginAdmissionError(
@@ -567,7 +572,7 @@ export class PluginService {
         throw new Error("Only an operator client can release admissions");
       if (!releaseAdmissions.trim() || releaseAdmissions.length > 2000)
         throw new Error("A bounded release reason is required");
-      if (!this.dependencies.admission?.journal.boundPolicies()[pluginId])
+      if (!Object.hasOwn(this.dependencies.admission?.journal.boundPolicies() ?? {}, pluginId))
         throw new Error("Only a bound-recipient plugin can be released");
     }
     if (!this.configStore.get().plugins?.[pluginId] && releaseAdmissions !== undefined) {

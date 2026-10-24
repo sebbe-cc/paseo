@@ -57,6 +57,23 @@ test("subject delivery replays the original outcome without provider effects and
       `await writeFile(${JSON.stringify(stopping)}, "stopping"); await new Promise(r => setTimeout(r, 400));`,
     ),
   );
+  const globalDirectory = path.join(root, "global");
+  await mkdir(globalDirectory);
+  await writeFile(
+    path.join(globalDirectory, "paseo-plugin.json"),
+    JSON.stringify({ id: "global", requirements: { paseo: ">=0.12.0" }, admission: { durableEvents: true } }),
+  );
+  await writeFile(
+    path.join(globalDirectory, "index.server.ts"),
+    `
+    import { defineRpc } from "@getpaseo/plugin";
+    import { z } from "zod";
+    export default function(server) {
+      server.handle(defineRpc({ name: "census", input: z.object({}), output: z.unknown() }), () => server.inventory.read());
+      return () => {};
+    }
+  `,
+  );
   let effects = 0;
   const provider = createTestAgentClient("claude", {
     beforeCreateSession: async () => {
@@ -71,12 +88,14 @@ test("subject delivery replays the original outcome without provider effects and
     pluginsEnabled: true,
     plugins: {
       scoped: { source: "directory" as const, path: directory, enabled: true },
+      global: { source: "directory" as const, path: globalDirectory, enabled: true },
     },
   };
   let daemon = await createTestPaseoDaemon(options);
   let client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
   try {
     await client.connect();
+    expect((await client.listPlugins()).find(plugin => plugin.id === "global")).toMatchObject({ status: "running" });
     const own = await client.createAgent({ provider: "claude", cwd: root });
     const foreign = await client.createAgent({ provider: "claude", cwd: root });
     await client.invokePluginRpc("scoped", "bind", { agentId: own.id });
@@ -90,7 +109,7 @@ test("subject delivery replays the original outcome without provider effects and
     const original = records.find(
       (record) => record.agentId === own.id && record.reason === "refresh",
     )!;
-    expect(original.undeliveredTo).toEqual(["scoped"]);
+    expect(original.undeliveredTo).toEqual(["scoped", "global"]);
     expect(original.boundRecipients?.scoped?.revision).toBe(1);
     const census = (await client.invokePluginRpc("scoped", "census", {})) as {
       complete: boolean;
@@ -108,7 +127,7 @@ test("subject delivery replays the original outcome without provider effects and
     ).toMatchObject({
       reason: "create",
       status: "opened",
-      undeliveredTo: ["scoped"],
+      undeliveredTo: ["global", "scoped"],
       boundRecipients: { scoped: { revision: 1 } },
     });
     await client.close();
@@ -154,7 +173,24 @@ test("subject delivery replays the original outcome without provider effects and
     expect(
       pending.every((record) => record.agentId === own.id || record.agentId === born.agentId),
     ).toBe(true);
+    await client.removePlugin("scoped");
+    expect(
+      (await journalRecords(daemon.paseoHome)).filter((record) =>
+        record.undeliveredTo.includes("scoped"),
+      ),
+    ).toHaveLength(pending.length);
     await client.removePlugin("scoped", "probe completed");
+    const releasedCensus = (await client.invokePluginRpc("global", "census", {})) as {
+      complete: boolean;
+      admissions: AdmissionJournalRecord[];
+    };
+    expect(releasedCensus.complete).toBe(true);
+    expect(
+      releasedCensus.admissions.filter((record) => record.undeliveredTo.includes("scoped")),
+    ).toHaveLength(0);
+    expect(
+      releasedCensus.admissions.every((record) => record.undeliveredTo.includes("global")),
+    ).toBe(true);
     expect(
       (await journalRecords(daemon.paseoHome)).filter((record) =>
         record.undeliveredTo.includes("scoped"),
