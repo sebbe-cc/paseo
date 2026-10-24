@@ -892,10 +892,45 @@ redelivery. Acknowledgement affects only the calling plugin. Pending operations 
 The fence waits at most `fenceWaitMs` for a bound agent's plugin and its session-open hook.
 Unavailable hooks reject with `PLUGIN_ADMISSION_UNAVAILABLE`, including during reload, failed
 startup and before scheduled startup work. Unbound agents keep their ordinary behavior.
-Disabling the plugin removes its fence without deleting bindings. Reload does not stop existing
+With the default global recipient policy, disabling the plugin removes its fence without deleting bindings. Reload does not stop existing
 provider sessions or turns. Do not call agent mutations from a before hook for the same agent:
 those commands queue behind the operation invoking the hook. Binding and admission queries do
 not use that lifecycle queue.
+
+#### Subject-bound durable recipients
+
+Set `admission.recipients` to `"bound-agents"` to journal durable delivery only for
+admissions whose agent has a binding in this plugin's namespace. The default is
+`"global"`; existing plugins keep their recipient and fence behavior. Create-time
+`bindingIntent` also enrolls the originating plugin before the provider opens.
+The journal snapshots the binding with each bound recipient, and replay retains
+the original operation ID and provider effect.
+
+```json
+{ "admission": { "recipients": "bound-agents", "durableEvents": true, "fence": "bound-agents", "fenceWaitMs": 20000 } }
+```
+
+For this policy the host persists fence requirements in `admissions/bound-policies.json`.
+Disable, removal, global disable, unreadable manifests and restart cannot revoke a
+bound agent's fence. Reload still waits for its hook. Ordinary agents stay available.
+Clearing the binding explicitly through its owning plugin removes that subject's
+association; releasing delivery records does **not** clear bindings or disable fences.
+
+An operator can remove the plugin and release its completed bound recipients:
+
+```sh
+paseo plugin remove replay-probe --release-admissions "Replay experiment completed"
+```
+
+This can also be repeated after removal. It requires an operator client and a
+nonempty reason. Plugin/agent-origin requests are refused. The host fsyncs a
+`recipientReleases` entry on each changed journal record, including operator origin,
+time, reason and the original binding. Audited records survive retention/checkpoints.
+Other recipients, original effects, and historical records without proof of a bound
+recipient remain untouched. Pending operations must finish before release; on an I/O
+failure, retry safely after inspecting the journal. Without the explicit option,
+removal never acknowledges outstanding outcomes. Removal is not rolled back if a
+release fails, and the same command can finish the release after removal.
 
 ### Context and cleanup
 

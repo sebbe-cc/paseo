@@ -1346,6 +1346,15 @@ export class AgentManager {
                 boundBy: request.origin,
               },
             };
+            const selection = this.pluginLifecycle.admissionRecipients?.({
+              agentId: resolvedAgentId,
+              bindings: context.initialBindings,
+            });
+            if (selection && this.admissionJournal)
+              context.record = await this.admissionJournal.addBoundRecipients(
+                context.record.id,
+                selection.boundRecipients,
+              );
           }
         }
         await this.deleteAgentState(resolvedAgentId);
@@ -5465,7 +5474,10 @@ export class AgentManager {
       reason,
       origin,
       previousEpoch: history.epoch,
-      recipients: this.pluginLifecycle?.admissionRecipients?.() ?? [],
+      ...(this.pluginLifecycle?.admissionRecipients?.({
+        agentId,
+        bindings: stored?.pluginBindings ?? {},
+      }) ?? { recipients: [], boundRecipients: {} }),
     };
     const record: AdmissionJournalRecord = this.admissionJournal
       ? await this.admissionJournal.begin(input)

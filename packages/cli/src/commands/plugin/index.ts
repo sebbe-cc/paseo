@@ -29,6 +29,7 @@ interface PluginOptions extends CommandOptions {
   version?: string;
   check?: boolean;
   yes?: boolean;
+  releaseAdmissions?: string;
 }
 
 const pluginSchema: OutputSchema<PluginListItem> = {
@@ -197,14 +198,21 @@ async function remove(
   pluginId: string,
   options: PluginOptions,
   _command: Command,
-): Promise<SingleResult<PluginListItem>> {
-  const data = await withPluginManagementClient(options.daemonTarget, async (client) => {
-    const current = (await client.listPlugins()).find((plugin) => plugin.id === pluginId);
-    if (!current) throw new Error(`Plugin is not configured: ${pluginId}`);
-    await client.removePlugin(pluginId);
-    return { ...current, enabled: false, status: "disabled" as const };
+): Promise<SingleResult<{ id: string; status: string }>> {
+  await withPluginManagementClient(options.daemonTarget, async (client) => {
+    await client.removePlugin(pluginId, options.releaseAdmissions);
   });
-  return { type: "single", data, schema: pluginSchema };
+  return {
+    type: "single",
+    data: { id: pluginId, status: "removed" },
+    schema: {
+      idField: "id",
+      columns: [
+        { header: "PLUGIN", field: "id" },
+        { header: "STATUS", field: "status" },
+      ],
+    },
+  };
 }
 
 export function createPluginCommand(): Command {
@@ -261,7 +269,14 @@ export function createPluginCommand(): Command {
     );
   }
   addJsonAndDaemonHostOptions(
-    plugin.command("remove").description("Remove plugin configuration").argument("<id>"),
+    plugin
+      .command("remove")
+      .description("Remove plugin configuration")
+      .argument("<id>")
+      .option(
+        "--release-admissions <reason>",
+        "Audit and release only this plugin's bound admission recipients",
+      ),
   ).action(withOutput(remove));
   return plugin;
 }

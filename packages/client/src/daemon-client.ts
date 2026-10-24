@@ -5677,11 +5677,11 @@ export class DaemonClient {
     return this.managePlugin("disable", pluginId);
   }
 
-  async removePlugin(pluginId: string): Promise<void> {
+  async removePlugin(pluginId: string, releaseAdmissions?: string): Promise<void> {
     const requestId = this.createRequestId();
     await this.sendCorrelatedSessionRequest({
       requestId,
-      message: { type: "plugin.remove.request", requestId, pluginId },
+      message: { type: "plugin.remove.request", requestId, pluginId, ...(releaseAdmissions === undefined ? {} : { releaseAdmissions }) },
       responseType: "plugin.remove.response",
     });
   }

@@ -60,7 +60,13 @@ const beforeSchemas = {
 };
 
 export interface PluginLifecycle {
-  admissionRecipients?(): string[];
+  admissionRecipients?(subject: {
+    agentId: string;
+    bindings: Record<string, z.infer<typeof PluginAgentBindingSchema>>;
+  }): {
+    recipients: string[];
+    boundRecipients: Record<string, z.infer<typeof PluginAgentBindingSchema>>;
+  };
   emit<Name extends keyof PluginLifecycleEvents>(
     name: Name,
     event: PluginLifecycleEvents[Name],
