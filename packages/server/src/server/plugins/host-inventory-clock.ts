@@ -108,6 +108,21 @@ export class HostInventoryClock {
     }
   }
 
+  /** Admission observes only its original operation and binding. Native writes
+   * to unrelated records may be in flight. The caller reads committed state
+   * and relevant pending mutations synchronously on this event loop; SH keeps
+   * external publication out only until that decision/dispatch returns.
+   */
+  admission<T>(action: () => T): T {
+    const release = this.acquireFence();
+    try {
+      this.snapshot(); // Preserve fail-closed watermark health checks.
+      return action();
+    } finally {
+      release();
+    }
+  }
+
   /** Linearize an already observed decision without retaining SH over async I/O.
    * Native writers serialize on this event loop; external publication uses EX.
    */

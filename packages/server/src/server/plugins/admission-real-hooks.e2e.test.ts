@@ -123,17 +123,21 @@ export default function contribute(server) {
     let client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     try {
       await client.connect();
-      for (const id of snapshotTargets) {
-        const before = await daemon.daemon.agentStorage.get(id);
-        await client.fetchAgentTimeline(id, { limit: 1 });
-        // Resume may enrich provider metadata (for example cwd); the durable
-        // provider/thread identity must survive the real history hook chain.
-        expect((await daemon.daemon.agentStorage.get(id))!.persistence).toMatchObject({
-          provider: before!.persistence!.provider,
-          sessionId: before!.persistence!.sessionId,
-        });
-        await daemon.daemon.agentManager.closeAgent(id);
-      }
+      // Reconnecting clients request several old timelines concurrently. These
+      // admissions must not reject one another's journal/metadata writes.
+      await Promise.all(
+        snapshotTargets.map(async (id) => {
+          const before = await daemon.daemon.agentStorage.get(id);
+          await client.fetchAgentTimeline(id, { limit: 1 });
+          // Resume may enrich provider metadata (for example cwd); the durable
+          // provider/thread identity must survive the real history hook chain.
+          expect((await daemon.daemon.agentStorage.get(id))!.persistence).toMatchObject({
+            provider: before!.persistence!.provider,
+            sessionId: before!.persistence!.sessionId,
+          });
+          await daemon.daemon.agentManager.closeAgent(id);
+        }),
+      );
       const agent = await client.createAgent({
         provider: "codex",
         cwd: root,
@@ -163,7 +167,43 @@ export default function contribute(server) {
         expect(
           (await client.getPluginLogs(id)).some((log) => log.message.includes("Plugin ready")),
         ).toBe(true);
+      const publication = vi.spyOn(daemon.daemon.agentStorage, "applySnapshot");
+      const admissionCheck = vi.spyOn(daemon.daemon.agentStorage.inventoryClock!, "admission");
       await client.fetchAgentTimeline(agent.id, { limit: 1 });
+      // Even purpose=history opens publish native state: registration persists
+      // the restored agent and withAdmission commits its durable outcome. They
+      // cannot bypass the publication boundary merely because provider I/O is
+      // read-only. A warm timeline fetch, in contrast, does neither.
+      expect(resumes.mock.calls.at(-1)?.[3]).toMatchObject({ purpose: "history" });
+      expect(publication.mock.calls.some(([published]) => published.id === agent.id)).toBe(true);
+      expect(admissionCheck).toHaveBeenCalled();
+      await daemon.daemon.agentManager.flush();
+      publication.mockClear();
+      admissionCheck.mockClear();
+      const journalFile = path.join(
+        daemon.paseoHome,
+        "admissions",
+        new Date().toISOString().slice(0, 10) + ".jsonl",
+      );
+      const journalBefore = await readFile(journalFile, "utf8");
+      expect(
+        journalBefore
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .some(
+            (row) => row.agentId === agent.id && row.reason === "resume" && row.status === "opened",
+          ),
+      ).toBe(true);
+      const resumesBefore = resumes.mock.calls.length;
+      await client.fetchAgentTimeline(agent.id, { limit: 1 });
+      await daemon.daemon.agentManager.flush();
+      expect(resumes).toHaveBeenCalledTimes(resumesBefore);
+      expect(publication).not.toHaveBeenCalled();
+      expect(admissionCheck).not.toHaveBeenCalled();
+      expect(await readFile(journalFile, "utf8")).toBe(journalBefore);
+      publication.mockRestore();
+      admissionCheck.mockRestore();
       expect(
         resumes.mock.calls.some((call) => call[2]?.env?.BEADS_ACTOR === "isolated-worker"),
       ).toBe(true);

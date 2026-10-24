@@ -41,6 +41,8 @@ export class AdmissionJournal {
   private outcomes = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
   private ready: Promise<void> | undefined;
+  private loaded = false;
+  private pendingMutations = new Map<string, number>();
   private prunedOn = "";
   constructor(
     private readonly directory: string,
@@ -96,6 +98,7 @@ export class AdmissionJournal {
       });
     }
     await this.prune(files);
+    this.loaded = true;
   }
 
   private async prune(files: string[]): Promise<void> {
@@ -142,8 +145,10 @@ export class AdmissionJournal {
     if (record.status !== "pending") this.outcomes.add(record.id);
   }
 
-  private mutate<T>(action: () => Promise<T>): Promise<T> {
+  private mutate<T>(action: () => Promise<T>, pendingId?: string): Promise<T> {
     const finish = this.inventoryClock?.begin("admissions");
+    if (pendingId)
+      this.pendingMutations.set(pendingId, (this.pendingMutations.get(pendingId) ?? 0) + 1);
     const result = this.queue
       .then(async () => {
         await this.initialize();
@@ -155,7 +160,14 @@ export class AdmissionJournal {
         }
         return action();
       })
-      .finally(() => finish?.());
+      .finally(() => {
+        if (pendingId) {
+          const remaining = this.pendingMutations.get(pendingId)! - 1;
+          if (remaining) this.pendingMutations.set(pendingId, remaining);
+          else this.pendingMutations.delete(pendingId);
+        }
+        finish?.();
+      });
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -213,12 +225,21 @@ export class AdmissionJournal {
       };
       await this.append(record);
       return structuredClone(record);
-    });
+    }, id);
   }
 
   async get(id: string): Promise<AdmissionJournalRecord | null> {
     await this.initialize();
     return structuredClone(this.records.get(id) ?? null);
+  }
+
+  /** Called synchronously with the binding observation and provider dispatch. */
+  observeAdmission(id: string) {
+    if (!this.loaded) throw new Error("Admission journal has not initialized");
+    return {
+      record: structuredClone(this.records.get(id) ?? null),
+      busy: this.pendingMutations.has(id),
+    };
   }
 
   async query(
@@ -265,7 +286,7 @@ export class AdmissionJournal {
         ...record,
         undeliveredTo: record.undeliveredTo.filter((recipient) => recipient !== pluginId),
       });
-    });
+    }, id);
   }
 }
 

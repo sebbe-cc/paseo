@@ -111,6 +111,7 @@ export class AgentStorage {
   private pathById: Map<string, string> = new Map();
   private pathsById: Map<string, Set<string>> = new Map();
   private pendingWrites: Map<string, Promise<void>> = new Map();
+  private bindingMutations = new Map<string, { generation: number; pending: number }>();
   private deleting: Set<string> = new Set();
   private daemonAgentIdsByExecution: Map<string, string> = new Map();
   private daemonExecutionKeysByAgentId: Map<string, string> = new Map();
@@ -142,6 +143,25 @@ export class AgentStorage {
   async get(agentId: string): Promise<StoredAgentRecord | null> {
     await this.load();
     return this.cache.get(agentId) ?? null;
+  }
+
+  /** Admission authority only, observed without an await on the event loop.
+   * Metadata writes do not change it; queued binding writes and deletion do.
+   */
+  observeAdmission(agentId: string) {
+    if (!this.loaded || !this.inventoryComplete)
+      throw new Error("Agent admission inventory is unavailable");
+    const agent = this.cache.get(agentId);
+    const mutations = this.bindingMutations.get(agentId);
+    return {
+      busy: this.deleting.has(agentId) || !!mutations?.pending,
+      value: {
+        agentExists: agent != null,
+        bindings: structuredClone(agent?.pluginBindings ?? {}),
+        bindingRevisions: structuredClone(agent?.pluginBindingRevisions ?? {}),
+        mutationGeneration: mutations?.generation ?? 0,
+      },
+    };
   }
 
   async listByProviderSession(
@@ -185,9 +205,17 @@ export class AgentStorage {
   private queueRecordMutation(
     agentId: string,
     mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
+    bindingChange = false,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const finish = this.inventoryClock?.begin("agent-records");
+    const authorityChange = bindingChange || !this.cache.has(agentId);
+    if (authorityChange) {
+      const state = this.bindingMutations.get(agentId) ?? { generation: 0, pending: 0 };
+      state.generation++;
+      state.pending++;
+      this.bindingMutations.set(agentId, state);
+    }
     const next = prev
       .catch(() => undefined)
       .then(async () => {
@@ -207,6 +235,7 @@ export class AgentStorage {
 
     const tracked = next.finally(() => {
       try {
+        if (authorityChange) this.bindingMutations.get(agentId)!.pending--;
         finish?.();
       } finally {
         if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
@@ -384,38 +413,45 @@ export class AgentStorage {
     // compare + queued writer acquisition are synchronous. The write itself
     // retains native SH; any interleaving writer invalidates the successor below.
     await clock.compare(generation, () =>
-      this.queueRecordMutation(agentId, (record) => {
-        if (!record || nativeRecordDigest(record) !== input.expected.recordDigest)
-          throw new BindingConflictError();
-        const binding: PluginAgentBinding = {
-          revision: (record.pluginBindingRevisions?.[pluginId] ?? prior?.revision ?? 0) + 1,
-          data: payload,
-          boundAt: new Date().toISOString(),
-          boundBy: { kind: "plugin", pluginId },
-        };
-        const next = {
-          ...record,
-          pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
-          pluginBindingRevisions: {
-            ...record.pluginBindingRevisions,
-            [pluginId]: binding.revision,
-          },
-        };
-        const proof = {
-          operationKey: input.operationKey,
-          agentId,
-          pluginId,
-          expectRevision: input.expectRevision,
-          predecessor: input.expected,
-          successor: {
-            epoch: generation.epoch,
-            sequence: generation.sequence + 2,
-            recordDigest: nativeRecordDigest(next),
-          },
-        };
-        result = { binding, proof };
-        return { ...next, pluginBindingProofs: { ...next.pluginBindingProofs, [pluginId]: proof } };
-      }),
+      this.queueRecordMutation(
+        agentId,
+        (record) => {
+          if (!record || nativeRecordDigest(record) !== input.expected.recordDigest)
+            throw new BindingConflictError();
+          const binding: PluginAgentBinding = {
+            revision: (record.pluginBindingRevisions?.[pluginId] ?? prior?.revision ?? 0) + 1,
+            data: payload,
+            boundAt: new Date().toISOString(),
+            boundBy: { kind: "plugin", pluginId },
+          };
+          const next = {
+            ...record,
+            pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
+            pluginBindingRevisions: {
+              ...record.pluginBindingRevisions,
+              [pluginId]: binding.revision,
+            },
+          };
+          const proof = {
+            operationKey: input.operationKey,
+            agentId,
+            pluginId,
+            expectRevision: input.expectRevision,
+            predecessor: input.expected,
+            successor: {
+              epoch: generation.epoch,
+              sequence: generation.sequence + 2,
+              recordDigest: nativeRecordDigest(next),
+            },
+          };
+          result = { binding, proof };
+          return {
+            ...next,
+            pluginBindingProofs: { ...next.pluginBindingProofs, [pluginId]: proof },
+          };
+        },
+        true,
+      ),
     );
     const after = await this.observeBinding(agentId, pluginId);
     if (!result || canonicalDigest(after.state) !== canonicalDigest(result.proof.successor)) {
@@ -450,43 +486,54 @@ export class AgentStorage {
     const payload = validateBindingData(data);
     await this.load();
     let binding!: PluginAgentBinding;
-    await this.queueRecordMutation(agentId, (record) => {
-      if (!record) throw new Error(`Agent ${agentId} not found`);
-      const previous = record.pluginBindings?.[pluginId];
-      if ((previous?.revision ?? null) !== expectRevision) throw new BindingConflictError();
-      binding = {
-        revision: (record.pluginBindingRevisions?.[pluginId] ?? previous?.revision ?? 0) + 1,
-        data: payload,
-        boundAt: new Date().toISOString(),
-        boundBy: { kind: "plugin", pluginId },
-      };
-      return {
-        ...record,
-        pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
-        pluginBindingRevisions: { ...record.pluginBindingRevisions, [pluginId]: binding.revision },
-      };
-    });
+    await this.queueRecordMutation(
+      agentId,
+      (record) => {
+        if (!record) throw new Error(`Agent ${agentId} not found`);
+        const previous = record.pluginBindings?.[pluginId];
+        if ((previous?.revision ?? null) !== expectRevision) throw new BindingConflictError();
+        binding = {
+          revision: (record.pluginBindingRevisions?.[pluginId] ?? previous?.revision ?? 0) + 1,
+          data: payload,
+          boundAt: new Date().toISOString(),
+          boundBy: { kind: "plugin", pluginId },
+        };
+        return {
+          ...record,
+          pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
+          pluginBindingRevisions: {
+            ...record.pluginBindingRevisions,
+            [pluginId]: binding.revision,
+          },
+        };
+      },
+      true,
+    );
     if (!binding) throw new Error(`Agent ${agentId} is being deleted`);
     return structuredClone(binding);
   }
 
   async clearBinding(agentId: string, pluginId: string, expectRevision: number): Promise<void> {
     await this.load();
-    await this.queueRecordMutation(agentId, (record) => {
-      if (!record) throw new Error(`Agent ${agentId} not found`);
-      const previous = record.pluginBindings?.[pluginId];
-      if (!previous || previous.revision !== expectRevision) throw new BindingConflictError();
-      const bindings = { ...record.pluginBindings };
-      delete bindings[pluginId];
-      return {
-        ...record,
-        pluginBindings: bindings,
-        pluginBindingRevisions: {
-          ...record.pluginBindingRevisions,
-          [pluginId]: previous.revision + 1,
-        },
-      };
-    });
+    await this.queueRecordMutation(
+      agentId,
+      (record) => {
+        if (!record) throw new Error(`Agent ${agentId} not found`);
+        const previous = record.pluginBindings?.[pluginId];
+        if (!previous || previous.revision !== expectRevision) throw new BindingConflictError();
+        const bindings = { ...record.pluginBindings };
+        delete bindings[pluginId];
+        return {
+          ...record,
+          pluginBindings: bindings,
+          pluginBindingRevisions: {
+            ...record.pluginBindingRevisions,
+            [pluginId]: previous.revision + 1,
+          },
+        };
+      },
+      true,
+    );
   }
 
   async flush(): Promise<void> {

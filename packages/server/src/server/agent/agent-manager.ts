@@ -5542,19 +5542,17 @@ export class AgentManager {
     },
   ): Promise<AgentLaunchContext> {
     const admission = this.admissionContext.getStore()!;
-    const validate = await admissionBoundary(this.inventoryClock, async () => {
-      const operation = this.admissionJournal
-        ? await this.admissionJournal.get(admission.record.id)
-        : admission.record;
-      const agent = await this.registry?.get(agentId);
+    await Promise.all([this.admissionJournal?.initialize(), this.registry?.initialize()]);
+    const validate = await admissionBoundary(this.inventoryClock, () => {
+      const operation = this.admissionJournal?.observeAdmission(admission.record.id);
+      const agent = this.registry?.observeAdmission(agentId);
       return {
-        operation,
-        // Labels, status and timestamps can legitimately change in a hook.
-        // Binding revisions also detect set/clear ABA with identical final data.
-        agentExists: agent != null,
-        bindings: agent?.pluginBindings ?? {},
-        bindingRevisions: agent?.pluginBindingRevisions ?? {},
-        initialBindings: admission.initialBindings ?? null,
+        busy: !!operation?.busy || !!agent?.busy,
+        value: {
+          operation: operation ? operation.record : admission.record,
+          agent: agent?.value ?? null,
+          initialBindings: admission.initialBindings ?? null,
+        },
       };
     });
     if (this.pluginLifecycle) {

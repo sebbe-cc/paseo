@@ -2637,14 +2637,24 @@ A publisher must account for those pending operations before transitioning.
 The host snapshots the original operation, agent existence, bindings and binding
 revision counters before the session-open hook. After the hook it compares these
 values, preserving set/clear ABA detection. Changes to unrelated admissions or to
-agent labels, status and timestamps do not invalidate the operation. Both reads
-must be coherent within their own native epoch/sequence; the host checks the
-final observation again at synchronous dispatch. A changed operation or binding,
-a daemon epoch change, or a writer racing that final observation yields
+agent labels, status and timestamps do not invalidate the operation. The host
+reads its committed operation and binding synchronously on the event loop and
+tracks queued mutations of those exact records. It repeats that observation
+under native SH at one-use provider dispatch; no await splits the final check
+and dispatch. The host-wide census sequence is **not** an admission CAS: other
+agents may publish or open concurrently. An original operation/binding change,
+a queued binding/operation mutation, or deletion of this agent yields
 `ADMISSION_RETRY` before a provider effect. Retry the original creation key with
 fresh observations. For refresh, the commit
 point precedes closing the old provider session, then the already admitted refresh
 continues through reopening. A failed check does not close that existing session.
+
+A cold `purpose=history` open still publishes an admission begin/outcome and
+registers/persists the restored agent and timeline, even if the provider reads
+only history. It therefore keeps the same operation/binding guard. A warm
+timeline fetch reads the existing projection without provider-open, journal
+publication or admission CAS; it is already outside this guard. Tests assert
+both paths, including archived history through the installed hooks.
 The one-use dispatch permit cannot start its effect twice. A writer
 that encounters EX returns `HOST_FENCE_BUSY` before mutation. Callers retry outside
 publication locks. Kernel descriptor cleanup releases SH when a writer process
