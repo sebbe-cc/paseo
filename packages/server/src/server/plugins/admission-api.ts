@@ -1,9 +1,17 @@
 import { z } from "zod";
-import { PluginAdmissionQuerySchema } from "@getpaseo/plugin/server";
+import type { HostInventory } from "./host-inventory.js";
+import { HostInventoryRequestSchema, PluginAdmissionQuerySchema } from "@getpaseo/plugin/server";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AdmissionJournal } from "./admission-journal.js";
 
 export const AdmissionApiRequestSchema = z.discriminatedUnion("method", [
+  z
+    .object({
+      method: z.literal("inventory.read"),
+      request: HostInventoryRequestSchema,
+    })
+    .strict(),
+  z.object({ method: z.literal("inventory.watermark") }).strict(),
   z.object({ method: z.literal("bindings.get"), agentId: z.string() }).strict(),
   z.object({ method: z.literal("bindings.list"), since: z.string().optional() }).strict(),
   z
@@ -31,8 +39,18 @@ export async function admissionApiRequest(
   request: AdmissionApiRequest,
   storage: AgentStorage,
   journal: AdmissionJournal,
+  inventory?: HostInventory,
 ): Promise<unknown> {
   switch (request.method) {
+    case "inventory.read":
+    case "inventory.watermark":
+      if (!inventory)
+        throw Object.assign(new Error("Host inventory is unavailable"), {
+          code: "HOST_INVENTORY_UNAVAILABLE",
+        });
+      return request.method === "inventory.read"
+        ? inventory.read(pluginId, request.request)
+        : inventory.watermark();
     case "bindings.get":
       return storage.getBinding(request.agentId, pluginId);
     case "bindings.list":

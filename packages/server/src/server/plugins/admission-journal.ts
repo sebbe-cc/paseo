@@ -1,3 +1,4 @@
+import type { HostInventoryClock } from "./host-inventory-clock.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -43,11 +44,14 @@ export class AdmissionJournal {
   private prunedOn = "";
   constructor(
     private readonly directory: string,
-    private readonly retentionDays = 14,
+    readonly retentionDays = 14,
+    readonly inventoryClock?: HostInventoryClock,
   ) {}
 
   initialize(): Promise<void> {
-    return (this.ready ??= this.load());
+    return (this.ready ??= this.inventoryClock
+      ? this.inventoryClock.track("admissions", () => this.load())
+      : this.load());
   }
 
   private async load(): Promise<void> {
@@ -139,16 +143,19 @@ export class AdmissionJournal {
   }
 
   private mutate<T>(action: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(async () => {
-      await this.initialize();
-      if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
-        const files = (await fs.readdir(this.directory)).filter((file) =>
-          /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
-        );
-        await this.prune(files);
-      }
-      return action();
-    });
+    const finish = this.inventoryClock?.begin("admissions");
+    const result = this.queue
+      .then(async () => {
+        await this.initialize();
+        if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
+          const files = (await fs.readdir(this.directory)).filter((file) =>
+            /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
+          );
+          await this.prune(files);
+        }
+        return action();
+      })
+      .finally(() => finish?.());
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -233,6 +240,11 @@ export class AdmissionJournal {
         )
         .slice(0, filter.limit ?? 10000),
     );
+  }
+
+  inventoryRecords(): IterableIterator<AdmissionJournalRecord> {
+    if (!this.ready) throw new Error("Admission inventory has not initialized");
+    return this.records.values();
   }
 
   async undelivered(pluginId: string): Promise<AdmissionJournalRecord[]> {

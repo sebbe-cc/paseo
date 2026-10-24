@@ -38,3 +38,4 @@ export type {
   PluginVoiceHost,
   VoiceProviderCommand,
 } from "./voice.js";
+export * from "./inventory.js";
