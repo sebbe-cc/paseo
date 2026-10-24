@@ -2858,7 +2858,7 @@ The native primitive is available on Linux and Darwin; other platforms return
 Acquire the token and inventory outside publication locks. A Gas City publisher
 then takes **admission.lock → registry.json.lock → host-fence.lock EX|NB**, using
 native `flock`. Never wait for the host lock while holding the first two: an
-in-flight provider opening holds SH while its admission hook needs those locks.
+in-flight native record or journal write may hold SH.
 On BUSY, release **all** locks, back off with jitter and retry within a fixed
 attempt/time budget. Return BUSY when exhausted; never publish without the fence.
 
@@ -2870,12 +2870,60 @@ check; release in reverse order. No RPC, provider call or inventory scan belongs
 inside this critical section. An expired observation or changed inode is a rejected
 token, never a reason to recreate a lock. Token renewal requires leaving the locks.
 
-All covered host writers hold SH over their complete mutation, including awaited
-provider opening, nested storage/journal writes and watermark publication. A writer
+Covered native writers hold SH over their individual storage/journal mutations
+and watermark publication. Admission holds no SH while awaiting plugin hooks or
+provider I/O. The durable pending admission remains in the complete inventory;
+zero active native writers does **not** mean there are no pending provider effects.
+A publisher must account for those pending operations before transitioning.
+
+The host snapshots the original operation, agent existence, bindings and binding
+revision counters before the session-open hook. After the hook it compares these
+values, preserving set/clear ABA detection. Changes to unrelated admissions or to
+agent labels, status and timestamps do not invalidate the operation. The host
+reads its committed operation and binding synchronously on the event loop and
+tracks queued mutations of those exact records. It repeats that observation
+under native SH at one-use provider dispatch; no await splits the final check
+and dispatch. The host-wide census sequence is **not** an admission CAS: other
+agents may publish or open concurrently. An original operation/binding change,
+a queued binding/operation mutation, or deletion of this agent yields
+`ADMISSION_RETRY` before a provider effect. Retry the original creation key with
+fresh observations. For refresh, the commit
+point precedes closing the old provider session, then the already admitted refresh
+continues through reopening. A failed check does not close that existing session.
+
+A cold `purpose=history` open still publishes an admission begin/outcome and
+registers/persists the restored agent and timeline, even if the provider reads
+only history. It therefore keeps the same operation/binding guard. A warm
+timeline fetch reads the existing projection without provider-open, journal
+publication or admission CAS; it is already outside this guard. Tests assert
+both paths, including archived history through the installed hooks.
+The one-use dispatch permit cannot start its effect twice. A writer
 that encounters EX returns `HOST_FENCE_BUSY` before mutation. Callers retry outside
 publication locks. Kernel descriptor cleanup releases SH when a writer process
 crashes; restart changes the epoch. Filesystem replacement, direct out-of-process
 host edits and simultaneous daemons sharing one home are outside this contract.
+
+Fork `fix/admission-publication-boundary` also adds exact binding CAS receipts:
+
+```ts
+const observed = await server.agents.bindings.observe(agentId);
+const result = await server.agents.bindings.setWithProof(agentId, bindingData, {
+  expectRevision: observed.binding?.revision ?? null,
+  expected: observed.state, // epoch, sequence, recordDigest
+  operationKey: originalOperationKey, // 64 lowercase hexadecimal characters
+});
+// result: { binding, proof: { operationKey, agentId, pluginId, expectRevision,
+//                           predecessor, successor } }
+```
+
+`recordDigest` covers the complete native record except its self-referencing
+receipt table. The successor must have the same epoch and exactly the native
+CAS's two sequence increments. A lost acknowledgement can replay the identical
+key/input while that exact successor is current; it returns the durable receipt
+without another write. An intervening writer yields `BINDING_SUCCESSOR_UNCERTAIN`
+if the CAS may have committed. Preserve the original key and reconcile; neither
+domain names in the watermark suffix nor an unchanged binding revision establish
+an exact successor. A restart or changed record requires a fresh observation.
 
 `productionFence` remains **false**: GC ownership/incarnation, Git identity,
 external capability/revocation, old publishers and provider-native histories still

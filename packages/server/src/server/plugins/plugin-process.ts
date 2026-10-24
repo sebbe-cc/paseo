@@ -3,6 +3,8 @@ import {
   HostFenceTokenSchema,
   HostInventoryPageSchema,
   HostWatermarkResultSchema,
+  PluginBindingObservationSchema,
+  PluginBindingSuccessorSchema,
 } from "@getpaseo/plugin/server";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
@@ -351,6 +353,19 @@ export function createPluginWorker(options: {
       },
       agents: {
         bindings: {
+          observe: async (agentId) =>
+            PluginBindingObservationSchema.parse(
+              await admissionRequest({ method: "bindings.observe", agentId }),
+            ),
+          setWithProof: async (agentId, data, casOptions) =>
+            PluginBindingSuccessorSchema.parse(
+              await admissionRequest({
+                method: "bindings.setWithProof",
+                agentId,
+                data,
+                options: casOptions,
+              }),
+            ),
           get: async (agentId) =>
             PluginAgentBindingSchema.nullable().parse(
               await admissionRequest({ method: "bindings.get", agentId }),
