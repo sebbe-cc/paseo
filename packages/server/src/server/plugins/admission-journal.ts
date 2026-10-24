@@ -63,6 +63,8 @@ export class AdmissionJournal {
   private loaded = false;
   private pendingMutations = new Map<string, number>();
   private prunedOn = "";
+  private discarded = 0;
+  private checkpointAnchor: AdmissionJournalRecord | undefined;
   constructor(
     private readonly directory: string,
     readonly retentionDays = 14,
@@ -96,7 +98,21 @@ export class AdmissionJournal {
         const line = lines[index];
         if (!line) continue;
         try {
-          const record = JournalRecordSchema.parse(JSON.parse(line));
+          const parsed = JSON.parse(line) as Record<string, unknown>;
+          const record = JournalRecordSchema.parse(parsed);
+          // Keep the marker on a real record so older daemons can still read the
+          // journal. An empty snapshot uses the last discarded record as its anchor.
+          // The marker and snapshot share an atomic rename: an undeleted old segment
+          // cannot resurrect acknowledged outcomes after a crash.
+          if (parsed.admissionCheckpoint === 1) {
+            this.records.clear();
+            this.outcomes.clear();
+          }
+          if (parsed.admissionCheckpoint === 1 && parsed.checkpointOnly === true) {
+            this.checkpointAnchor = record;
+            validBytes += Buffer.byteLength(line) + 1;
+            continue;
+          }
           this.records.set(record.id, record);
           if (record.status !== "pending") this.outcomes.add(record.id);
           validBytes += Buffer.byteLength(line) + 1;
@@ -124,30 +140,80 @@ export class AdmissionJournal {
       });
     }
     await this.prune(files);
+    await this.boundFailures();
+    if (this.discarded) await this.checkpoint();
     this.loaded = true;
   }
 
   private async prune(files: string[]): Promise<void> {
     const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString();
     for (const [id, record] of this.records) {
-      if (record.finishedAt && record.finishedAt < cutoff) {
+      if (record.finishedAt && record.finishedAt < cutoff && !record.undeliveredTo.length) {
+        this.checkpointAnchor = record;
         this.records.delete(id);
         this.outcomes.delete(id);
+        this.discarded++;
       }
     }
-    // Rewrite retained states durably before deleting old segments. Pending and replayable
-    // operations from older segments must not vanish with the file that introduced them.
-    const old = files.filter((file) => file.slice(0, 10) < cutoff.slice(0, 10));
-    if (old.length) {
-      const pending = [...this.records.values()].filter((record) => record.status === "pending");
-      for (const record of pending) await this.append(record);
-      for (const id of this.outcomes) {
-        const record = this.records.get(id);
-        if (record) await this.append(record);
-      }
-      for (const file of old) await fs.unlink(path.join(this.directory, file));
+    if (this.discarded || files.some((file) => file.slice(0, 10) < cutoff.slice(0, 10))) {
+      await this.checkpoint();
     }
     this.prunedOn = new Date().toISOString().slice(0, 10);
+  }
+
+  // Only fully delivered failures can be discarded. Pending, opened and replayable
+  // outcomes remain census evidence regardless of the per-agent failure budget.
+  private async boundFailures(): Promise<void> {
+    const counts = new Map<string, number>();
+    for (const record of [...this.records.values()].toReversed()) {
+      if (record.status !== "failed" || record.undeliveredTo.length) continue;
+      const count = (counts.get(record.agentId) ?? 0) + 1;
+      counts.set(record.agentId, count);
+      if (count <= 64) continue;
+      this.checkpointAnchor = record;
+      this.records.delete(record.id);
+      this.outcomes.delete(record.id);
+      this.discarded++;
+    }
+    // Amortize fsync/rewrite while keeping the append log bounded too.
+    if (this.discarded >= 64) await this.checkpoint();
+  }
+
+  private async checkpoint(): Promise<void> {
+    const files = (await fs.readdir(this.directory)).filter((file) =>
+      /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
+    );
+    const name = new Date().toISOString().slice(0, 10) + ".jsonl";
+    const filename = path.join(this.directory, name);
+    const temporary = filename + ".tmp";
+    // Outcome insertion order is delivery order; Map insertion order is start order.
+    const records = [
+      ...[...this.records.values()].filter((record) => record.status === "pending"),
+      ...[...this.outcomes].flatMap((id) => this.records.get(id) ?? []),
+    ];
+    const file = await fs.open(temporary, "w", 0o600);
+    try {
+      const checkpointOnly = records.length === 0;
+      const anchor = records.shift() ?? this.checkpointAnchor;
+      const snapshot = anchor
+        ? [{ ...anchor, admissionCheckpoint: 1, checkpointOnly }, ...records]
+        : [];
+      await file.writeFile(snapshot.map((record) => JSON.stringify(record) + "\n").join(""));
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await fs.rename(temporary, filename);
+    if (process.platform !== "win32") {
+      const directory = await fs.open(this.directory, "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    }
+    for (const old of files) if (old !== name) await fs.unlink(path.join(this.directory, old));
+    this.discarded = 0;
   }
 
   private async append(record: AdmissionJournalRecord): Promise<void> {
@@ -338,6 +404,7 @@ export class AdmissionJournal {
         finishedAt: new Date().toISOString(),
       };
       await this.append(record);
+      await this.boundFailures();
       return structuredClone(record);
     }, id);
   }
@@ -400,6 +467,7 @@ export class AdmissionJournal {
         ...record,
         undeliveredTo: record.undeliveredTo.filter((recipient) => recipient !== pluginId),
       });
+      await this.boundFailures();
     }, id);
   }
 }
