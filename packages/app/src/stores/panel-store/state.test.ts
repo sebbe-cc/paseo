@@ -192,7 +192,7 @@ describe("panel-store visibility selectors", () => {
 });
 
 describe("panel-store compact file explorer actions", () => {
-  it("opens the compact explorer and resolves the tab from the explicit checkout", () => {
+  it("opens the compact explorer on the global tab, not the checkout's stored one", () => {
     const checkout = { serverId: "server-1", cwd: "/tmp/repo", isGit: true };
     const key = buildExplorerCheckoutKey(checkout.serverId, checkout.cwd)!;
     const state = makePanelState({
@@ -203,7 +203,7 @@ describe("panel-store compact file explorer actions", () => {
     const patch = buildOpenFileExplorerPatch(state, checkout);
 
     expect(patch.mobilePanel).toEqual({ target: "file-explorer", revision: 1 });
-    expect(patch.explorerTab).toBe("files");
+    expect(patch.explorerTab).toBe("changes");
   });
 
   it("toggles the explorer closed without changing the active tab", () => {
