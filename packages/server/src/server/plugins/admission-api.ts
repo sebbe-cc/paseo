@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { HostInventory } from "./host-inventory.js";
 import { HostInventoryRequestSchema, PluginAdmissionQuerySchema } from "@getpaseo/plugin/server";
+import { PluginBindingCasSchema } from "@getpaseo/plugin/server";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AdmissionJournal } from "./admission-journal.js";
 
@@ -14,6 +15,15 @@ export const AdmissionApiRequestSchema = z.discriminatedUnion("method", [
   z.object({ method: z.literal("inventory.watermark") }).strict(),
   z.object({ method: z.literal("inventory.fence") }).strict(),
   z.object({ method: z.literal("bindings.get"), agentId: z.string() }).strict(),
+  z.object({ method: z.literal("bindings.observe"), agentId: z.string() }).strict(),
+  z
+    .object({
+      method: z.literal("bindings.setWithProof"),
+      agentId: z.string(),
+      data: z.unknown(),
+      options: PluginBindingCasSchema,
+    })
+    .strict(),
   z.object({ method: z.literal("bindings.list"), since: z.string().optional() }).strict(),
   z
     .object({
@@ -56,6 +66,10 @@ export async function admissionApiRequest(
         : inventory.watermark();
     case "bindings.get":
       return storage.getBinding(request.agentId, pluginId);
+    case "bindings.observe":
+      return storage.observeBinding(request.agentId, pluginId);
+    case "bindings.setWithProof":
+      return storage.setBindingWithProof(request.agentId, pluginId, request.data, request.options);
     case "bindings.list":
       return storage.listBindings(pluginId, request.since);
     case "bindings.set":

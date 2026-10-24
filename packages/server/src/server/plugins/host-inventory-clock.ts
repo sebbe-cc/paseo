@@ -108,6 +108,45 @@ export class HostInventoryClock {
     }
   }
 
+  /** Admission observes only its original operation and binding. Native writes
+   * to unrelated records may be in flight. The caller reads committed state
+   * and relevant pending mutations synchronously on this event loop; SH keeps
+   * external publication out only until that decision/dispatch returns.
+   */
+  admission<T>(action: () => T): T {
+    const release = this.acquireFence();
+    try {
+      this.snapshot(); // Preserve fail-closed watermark health checks.
+      return action();
+    } finally {
+      release();
+    }
+  }
+
+  /** Linearize an already observed decision without retaining SH over async I/O.
+   * Native writers serialize on this event loop; external publication uses EX.
+   */
+  compare<T>(expected: HostWatermark, action: () => T): T {
+    const release = this.acquireFence();
+    try {
+      const current = this.snapshot();
+      if (
+        expected.activeWriters ||
+        current.activeWriters ||
+        expected.epoch !== current.epoch ||
+        expected.sequence !== current.sequence
+      ) {
+        throw Object.assign(new Error("Host changed before admission dispatch"), {
+          code: "ADMISSION_RETRY",
+          stage: "fence",
+        });
+      }
+      return action();
+    } finally {
+      release();
+    }
+  }
+
   fence() {
     if (!this.fenceLock)
       throw new HostFenceError("HOST_FENCE_UNAVAILABLE", "Native host fencing is unavailable");

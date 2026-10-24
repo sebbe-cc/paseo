@@ -3143,7 +3143,10 @@ export class DaemonClient {
       ...options,
       config: resolveAgentConfig(options),
     });
-    if (result.error || !result.agent) throw new Error(result.error ?? "Agent creation failed");
+    if (result.error || !result.agent)
+      throw Object.assign(new Error(result.error ?? "Agent creation failed"), {
+        code: result.creation?.errorCode,
+      });
     return result.agent;
   }
 
