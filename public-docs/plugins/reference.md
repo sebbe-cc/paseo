@@ -2779,7 +2779,7 @@ Use `paseo plugin ls` to read the current status and error.
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
 
-### Native host inventory and observation watermark (fork API)
+### Native host inventory, watermark and host fence (fork API)
 
 The server-only `server.inventory` API enumerates the daemon's authoritative
 stored agents and its retained admission journal in one host generation. It is
@@ -2840,20 +2840,45 @@ file is mode 0600, bounded below 16 KiB. Writers publish `activeWriters > 0`
 **before** their mutation and the completion generation afterwards. While the
 lease is active, a failed pre-mutation file publication rejects the write; a
 failed completion leaves the busy file and disables inventory until restart.
-Without a lease, ordinary writes only update the in-memory counter. There are no
+Without an observation lease, writes update the in-memory counter under the host shared lock. There are no
 background export timers. A local reader must bound the read to 16 KiB, validate
 owner/mode/schema, require `expiresAt > now` on **both** reads, match the expected
 epoch and compare the full sequence with zero active writers. Renewal requires
 RPC outside critical locks. The file is ephemeral observation data, not a durable
 receipt or restart/replay record. It does not replace the original journal.
 
-**This is host-only observation, not a production publication fence.** The host
-does not participate in external admission/publication locks. A compare before
-and after publication can detect intervening changes, but does not prevent them
-or undo an effect. GC ownership/incarnation, Git workspace identity, external
-capability/revocation files, old publishers and provider-native histories are
-explicitly excluded. Preserve `HOST_COHERENT_FENCE_UNSUPPORTED`,
-`production_verified=false` and `promotion_allowed=false` until the separate
-writer-lock participation (`pa-6ec27.1`) and S3/T6 qualification are complete.
-Never call inventory RPCs, provider callbacks or full scans under the Gas City
-`admission.lock -> registry.json.lock` critical section.
+`server.inventory.fence()` (fork `feat/plugin-runtime-host-fence`) returns a
+host-only token with `watermark`, `local` observation and `lock: {path, device,
+inode}`. It rejects pending host writers with `HOST_FENCE_BUSY`. The permanent
+0600 `host-fence.lock` is daemon-owned; neither shutdown nor token expiry removes
+or replaces it. Device and inode are decimal strings to preserve 64-bit identity.
+The native primitive is available on Linux and Darwin; other platforms return
+`HOST_FENCE_UNAVAILABLE`. A missing native module on a supported host fails closed.
+
+Acquire the token and inventory outside publication locks. A Gas City publisher
+then takes **admission.lock → registry.json.lock → host-fence.lock EX|NB**, using
+native `flock`. Never wait for the host lock while holding the first two: an
+in-flight provider opening holds SH while its admission hook needs those locks.
+On BUSY, release **all** locks, back off with jitter and retry within a fixed
+attempt/time budget. Return BUSY when exhausted; never publish without the fence.
+
+Under EX, validate the lock fd and named path's device/inode against the token,
+regular-file type, single link, daemon uid and mode 0600. Validate the private
+observation's schema, expiry, expected epoch and sequence, and zero active writers
+before publishing. Keep EX through publication and the final local observation
+check; release in reverse order. No RPC, provider call or inventory scan belongs
+inside this critical section. An expired observation or changed inode is a rejected
+token, never a reason to recreate a lock. Token renewal requires leaving the locks.
+
+All covered host writers hold SH over their complete mutation, including awaited
+provider opening, nested storage/journal writes and watermark publication. A writer
+that encounters EX returns `HOST_FENCE_BUSY` before mutation. Callers retry outside
+publication locks. Kernel descriptor cleanup releases SH when a writer process
+crashes; restart changes the epoch. Filesystem replacement, direct out-of-process
+host edits and simultaneous daemons sharing one home are outside this contract.
+
+`productionFence` remains **false**: GC ownership/incarnation, Git identity,
+external capability/revocation, old publishers and provider-native histories still
+require S3/T6 qualification. Preserve `HOST_COHERENT_FENCE_UNSUPPORTED`,
+`production_verified=false` and `promotion_allowed=false` until that qualification
+and consumer integration pass. Installing this primitive does not activate runtime.
