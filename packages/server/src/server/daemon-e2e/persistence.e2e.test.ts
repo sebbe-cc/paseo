@@ -1,9 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createDaemonTestContext, type DaemonTestContext } from "../test-utils/index.js";
+import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { AgentStorage } from "../agent/agent-storage.js";
+import { createTestLogger } from "../../test-utils/test-logger.js";
 import type { SessionOutboundMessage } from "../messages.js";
 
 function tmpCwd(): string {
@@ -76,6 +80,77 @@ describe("daemon E2E - persistence", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test.each(["claude", "codex", "opencode"])(
+    "%s keeps MCP placeholders and history through daemon restart and resume",
+    async (provider) => {
+      const cwd = tmpCwd();
+      const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "persistence-mcp-home-"));
+      const mcpServers = {
+        external: {
+          type: "http" as const,
+          url: "http://localhost/mcp",
+          headers: { Authorization: "${PASEO_AGENT_ID}" },
+        },
+      };
+      const digest = (value: unknown) =>
+        createHash("sha256")
+          .update(JSON.stringify(value ?? null))
+          .digest("hex");
+      const start = () =>
+        createDaemonTestContext({
+          paseoHomeRoot,
+          cleanup: false,
+          agentClients: createTestAgentClients({ supportsMcpServers: true }),
+        });
+      try {
+        await ctx.cleanup();
+        ctx = await start();
+        const storage = new AgentStorage(
+          path.join(ctx.daemon.paseoHome, "agents"),
+          createTestLogger(),
+        );
+        const assertStored = async (agentId: string) => {
+          const record = await storage.get(agentId);
+          // Only hash comparisons: neither agent records nor header values reach test output.
+          expect(digest(record?.config?.mcpServers)).toBe(digest(mcpServers));
+          expect(digest(record?.persistence?.metadata?.mcpServers)).toBe(digest(mcpServers));
+        };
+        const agent = await ctx.client.createAgent({
+          provider,
+          cwd,
+          mcpServers,
+        });
+        await assertStored(agent.id);
+        await ctx.client.sendMessage(agent.id, "Say 'timeline test' and nothing else");
+        expect((await ctx.client.waitForFinish(agent.id, 5_000)).status).toBe("idle");
+        await assertStored(agent.id);
+
+        await ctx.cleanup();
+        ctx = await start();
+        const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
+          direction: "tail",
+          limit: 0,
+        });
+        expect(
+          timeline.entries
+            .flatMap(({ item }) => (item.type === "assistant_message" ? [item.text] : []))
+            .join(""),
+        ).toBe("timeline test");
+        await assertStored(agent.id);
+        // Sending after restart loads the stored agent and resumes its provider session.
+        await ctx.client.sendMessage(agent.id, "Say 'state saved' and nothing else");
+        expect((await ctx.client.waitForFinish(agent.id, 5_000)).status).toBe("idle");
+        await assertStored(agent.id);
+      } finally {
+        await ctx.cleanup();
+        cleaned = true;
+        rmSync(cwd, { recursive: true, force: true });
+        rmSync(paseoHomeRoot, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   test("timeline survives daemon restart", async () => {
     const cwd = tmpCwd();

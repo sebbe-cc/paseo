@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
@@ -3007,6 +3007,97 @@ test("createAgent injects paseo MCP server only into provider launch config", as
       command: "custom-mcp",
     },
   });
+});
+
+test("persistence keeps stored MCP config across creation, turns and reload", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-persistence-config-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const placeholder = "${PASEO_AGENT_ID}";
+  const token = randomUUID();
+  const digest = (value: unknown) =>
+    createHash("sha256")
+      .update(JSON.stringify(value ?? null))
+      .digest("hex");
+  const mcpServers: AgentSessionConfig["mcpServers"] = {
+    custom: { type: "http", url: "http://localhost/mcp", headers: { Authorization: placeholder } },
+  };
+
+  class LaunchConfigSession extends McpCapableTestAgentSession {
+    private readonly launchConfig: AgentSessionConfig;
+
+    constructor(config: AgentSessionConfig) {
+      super(config);
+      this.launchConfig = config;
+    }
+
+    override describePersistence() {
+      return {
+        ...super.describePersistence(),
+        nativeHandle: this.id,
+        metadata: {
+          ...this.launchConfig,
+          providerSessionMarker: "keep-provider-metadata",
+          // Model a provider copying its expanded launch config, as Claude/OpenCode do.
+          mcpServers: {
+            ...this.launchConfig.mcpServers,
+            custom: { ...mcpServers.custom, headers: { Authorization: token } },
+          },
+        },
+      };
+    }
+  }
+
+  class LaunchConfigClient extends TestAgentClient {
+    session!: LaunchConfigSession;
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.session = new LaunchConfigSession(config);
+      return this.session;
+    }
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config: AgentSessionConfig,
+    ): Promise<AgentSession> {
+      return this.createSession(config);
+    }
+  }
+
+  const client = new LaunchConfigClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpBaseUrl: "http://localhost/paseo/mcp",
+    mcpAuthToken: token,
+  });
+  try {
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: workdir, mcpServers },
+      undefined,
+      { workspaceId: undefined },
+    );
+    const assertStored = async (expected: AgentSessionConfig["mcpServers"]) => {
+      const stored = await storage.get(agent.id);
+      // Compare hashes so assertion failures never print header values.
+      expect(digest(stored?.persistence?.metadata?.mcpServers)).toBe(digest(expected ?? null));
+      expect(stored?.persistence?.metadata?.providerSessionMarker).toBe("keep-provider-metadata");
+      expect(stored?.persistence?.nativeHandle).toBe(client.session.id);
+      expect(JSON.stringify(stored).includes(token)).toBe(false);
+    };
+    await assertStored(mcpServers);
+    client.session.pushEvent({
+      type: "thread_started",
+      provider: "codex",
+      sessionId: client.session.id,
+    });
+    await drainAsyncGenerator(manager.streamAgent(agent.id, "test"));
+    await assertStored(mcpServers);
+    await manager.reloadAgentSession(agent.id);
+    await assertStored(mcpServers);
+    await manager.reloadAgentSession(agent.id, { mcpServers: undefined });
+    await assertStored(undefined);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test("createAgent closes and rejects a provider session that cannot honor MCP servers", async () => {
