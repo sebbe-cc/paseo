@@ -1156,6 +1156,15 @@ export const en = {
       description: "Check your connection and try again.",
     },
   },
+  globalVoice: {
+    choose: "Choose a voice target from an agent tab",
+    off: "Voice off · {{name}}",
+    makeTarget: "Make voice-target",
+    active: "Talking to {{name}}",
+    muted: "Muted · {{name}}",
+    connecting: "Connecting to {{name}}…",
+    agent: "agent",
+  },
   sidebar: {
     statusGroupAccessibility: "{{label}} group",
     statusBucket: {
@@ -2510,6 +2519,7 @@ export const en = {
         cycleTheme: "Cycle theme",
         focusMessageInput: "Focus message input",
         cycleAgentMode: "Cycle agent mode",
+        toggleGlobalVoice: "Toggle global voice",
         toggleVoiceMode: "Toggle voice mode",
         startStopDictation: "Start/stop dictation",
         interruptAgent: "Interrupt agent",

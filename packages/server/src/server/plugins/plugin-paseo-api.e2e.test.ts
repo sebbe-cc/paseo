@@ -465,3 +465,382 @@ export default function contribute(server: PluginServerContext) {
     await daemon.close();
   }
 }, 60_000);
+
+test("plugin voice uses the existing source-owned PCM transport and tears down on unload", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-voice-e2e-"));
+  roots.push(root);
+  const pluginDirectory = path.join(root, "voice-plugin");
+  await mkdir(pluginDirectory);
+  await mkdir(path.join(root, ".paseo"));
+  await writeFile(
+    path.join(root, ".paseo/config.json"),
+    JSON.stringify({
+      features: { voiceMode: { provider: { pluginId: "voice-fixture", providerId: "live" } } },
+    }),
+  );
+  await writeFile(
+    path.join(pluginDirectory, "paseo-plugin.json"),
+    JSON.stringify({ id: "voice-fixture", requirements: { paseo: ">=0.12.0" } }),
+  );
+  await writeFile(
+    path.join(pluginDirectory, "index.server.ts"),
+    `
+export default function contribute(server) {
+  server.registerVoiceProvider({ id: "live", label: "Fixture Live", async start({ agentId, paseo, emit, signal }) {
+    let sent = false;
+    console.log("voice started", agentId);
+    return {
+      async appendAudio(audio) {
+        if (sent) return;
+        sent = true;
+        emit({ type: "speech", isSpeaking: true });
+        await paseo.agents.ref(agentId).send("fixture voice request", { activeTurnBehavior: "steer_only" });
+        emit({ type: "audio", audio, utteranceId: "fixture-output", chunkIndex: 0, isLastChunk: true });
+      },
+      close() { console.log("voice closed", signal.aborted); },
+    };
+  } });
+  return () => {};
+}`,
+  );
+  const daemon = await createTestPaseoDaemon({
+    paseoHomeRoot: root,
+    daemonVersion: "0.12.0",
+    pluginsEnabled: true,
+    plugins: { "voice-fixture": { source: "directory", path: pluginDirectory, enabled: true } },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  const sibling = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+    capabilities: { plugin_voice_providers: false },
+  });
+  const audio: unknown[] = [];
+  const leakedAudio: unknown[] = [];
+  const ended: unknown[] = [];
+  client.on("audio_output", (message) => audio.push(message));
+  sibling.on("audio_output", (message) => leakedAudio.push(message));
+  client.on("voice_input_state", (message) => {
+    if (message.type === "voice_input_state" && message.payload.sessionEnded) ended.push(message);
+  });
+  try {
+    await client.connect();
+    await sibling.connect();
+    await client.observeEvents(["status.server_info"]).ready;
+
+    const created = await client.createAgent({ provider: "codex", cwd: root });
+    expect(client.getLastServerInfoMessage()?.features?.pluginVoiceProviders).toBe(true);
+    expect(client.getLastServerInfoMessage()?.capabilities?.voice?.provider).toEqual({
+      pluginId: "voice-fixture",
+      providerId: "live",
+    });
+    await expect(sibling.setVoiceMode(true, created.id)).rejects.toThrow("Update the Paseo app");
+    await client.setVoiceMode(true, created.id);
+    await client.sendVoiceAudioChunk("AAABAA==", "audio/pcm;rate=16000;bits=16");
+    await expect.poll(() => audio.length).toBe(1);
+    expect(audio[0]).toMatchObject({ payload: { format: "pcm" } });
+    expect(leakedAudio).toEqual([]);
+    const timeline = await client.fetchAgentTimeline(created.id);
+    expect(
+      timeline.entries.some(
+        (entry) =>
+          entry.item.type === "user_message" && entry.item.text.includes("fixture voice request"),
+      ),
+    ).toBe(true);
+    await client.disablePlugin("voice-fixture");
+    await expect.poll(() => ended.length).toBe(1);
+    await expect
+      .poll(() => client.getLastServerInfoMessage()?.capabilities?.voice?.voice.enabled)
+      .toBe(false);
+    expect(
+      (await client.getPluginLogs("voice-fixture")).filter((entry) =>
+        entry.message.includes("voice closed"),
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await client.close();
+    await sibling.close();
+    await daemon.close();
+  }
+}, 60_000);
+
+test("Codex Live saves a validated voice across reload and finds the current Gas City King", async () => {
+  const { settingsRpc } = await import("@getpaseo/plugin");
+  const { createPaseoApi } = await import("@getpaseo/client");
+  const { findKing } = await import("../../../../../plugin-examples/codex-live/shared/king.js");
+  const directory = fileURLToPath(
+    new URL("../../../../../plugin-examples/codex-live/", import.meta.url),
+  );
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.12.0",
+    mcpEnabled: false,
+    agentClients: createTestAgentClients(),
+    pluginsEnabled: true,
+    plugins: { "codex-live": { source: "directory", path: directory, enabled: true } },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  const api = createPaseoApi(client);
+  const rpc = settingsRpc("voice");
+  try {
+    await client.connect();
+    const read = () => client.invokePluginRpc("codex-live", rpc.read.name, {});
+    await expect(read()).resolves.toMatchObject({ status: "ready", values: { voice: "cove" } });
+    const invalid = await client.invokePluginRpc("codex-live", rpc.write.name, {
+      revision: "missing",
+      values: { voice: "not-a-voice" },
+    });
+    expect(invalid).toMatchObject({ status: "invalid" });
+    const saved = await client.invokePluginRpc("codex-live", rpc.write.name, {
+      revision: "missing",
+      values: { voice: "maple" },
+    });
+    expect(saved).toMatchObject({ status: "saved", values: { voice: "maple" } });
+    await client.reloadPlugin("codex-live");
+    await expect(read()).resolves.toMatchObject({ status: "ready", values: { voice: "maple" } });
+    await expect(findKing(api)).rejects.toThrow("Expected one active");
+    const king = await client.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      labels: { "gc-session": "king" },
+    });
+    await expect(findKing(api)).resolves.toBe(king.id);
+    const replacement = await client.createAgent({
+      provider: "codex",
+      cwd: daemon.staticDir,
+      labels: { "gc-session": "king" },
+    });
+    await expect(findKing(api)).rejects.toThrow("Expected one active");
+    await api.agents.ref(king.id).archive();
+    await expect(findKing(api)).resolves.toBe(replacement.id);
+  } finally {
+    await api.dispose();
+    await client.close();
+    await daemon.close();
+  }
+}, 60_000);
+
+test("Codex Live previews every voice with a stable clip without changing saved settings", async () => {
+  const { settingsRpc } = await import("@getpaseo/plugin");
+  const { VoiceSchema } =
+    await import("../../../../../plugin-examples/codex-live/shared/preferences.js");
+  const { previewVoice, previewText } =
+    await import("../../../../../plugin-examples/codex-live/shared/preview.js");
+  const directory = fileURLToPath(
+    new URL("../../../../../plugin-examples/codex-live/", import.meta.url),
+  );
+  const catalog = z
+    .object({
+      text: z.string(),
+      model: z.literal("gpt-live-1-codex"),
+      clips: z.record(VoiceSchema, z.string().min(1).nullable()),
+    })
+    .parse(JSON.parse(await readFile(path.join(directory, "server/previews.json"), "utf8")));
+  expect(catalog.text).toBe(previewText);
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.12.0",
+    mcpEnabled: false,
+    agentClients: createTestAgentClients(),
+    pluginsEnabled: true,
+    plugins: {
+      "codex-live": { source: "directory", path: directory, enabled: true },
+    },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  try {
+    await client.connect();
+    const read = () => client.invokePluginRpc("codex-live", settingsRpc("voice").read.name, {});
+    const settings = await read();
+    const clips = new Set<string>();
+    for (const voice of VoiceSchema.options) {
+      const clip = previewVoice.output.parse(
+        await client.invokePluginRpc("codex-live", previewVoice.name, { voice }),
+      );
+      if ("unavailable" in clip) {
+        expect(["porto", "selva"]).toContain(voice);
+        expect(catalog.clips[voice]).toBeNull();
+        continue;
+      }
+      expect(clip.base64).toBe(catalog.clips[voice]);
+      expect(clip.mimeType).toBe("audio/mpeg");
+      expect(Buffer.from(clip.base64, "base64").length).toBeGreaterThan(5_000);
+      expect(await client.invokePluginRpc("codex-live", previewVoice.name, { voice })).toEqual(
+        clip,
+      );
+      clips.add(clip.base64);
+    }
+    expect(clips.size).toBe(VoiceSchema.options.length - 2);
+    await expect(
+      client.invokePluginRpc("codex-live", previewVoice.name, {
+        voice: "not-a-voice",
+      }),
+    ).rejects.toThrow();
+    expect(await read()).toEqual(settings);
+  } finally {
+    await client.close();
+    await daemon.close();
+  }
+}, 60_000);
+
+test.runIf(process.env.PASEO_TEST_CODEX_LIVE === "1")(
+  "Codex Live carries PCM and delegated file inspection through a real Paseo agent",
+  async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { randomInt } = await import("node:crypto");
+    const { CodexAppServerAgentClient } =
+      await import("../agent/providers/codex-app-server-agent.js");
+    const pino = (await import("pino")).default;
+    const root = await mkdtemp(path.join(tmpdir(), "paseo-live-real-"));
+    roots.push(root);
+    const words = [
+      "copper",
+      "silver",
+      "violet",
+      "amber",
+      "willow",
+      "marble",
+      "panda",
+      "otter",
+      "meadow",
+      "orchid",
+      "falcon",
+      "maple",
+      "forest",
+      "garden",
+      "poppy",
+      "rabbit",
+    ];
+    const phrase = Array.from({ length: 4 }, () => words[randomInt(words.length)]).join(" ");
+    await writeFile(
+      path.join(root, "status.txt"),
+      `The workspace test status is green. The verification phrase is ${phrase}.\n`,
+    );
+    const wavPath = path.join(root, "input.wav");
+    await promisify(execFile)(process.env.PASEO_TEST_ESPEAK ?? "espeak-ng", [
+      "-v",
+      "en-us",
+      "-s",
+      "145",
+      "-w",
+      wavPath,
+      "Please ask the coding agent to inspect the text file in the workspace, then tell me the test status and the exact verification phrase from that file.",
+    ]);
+    const wav = await readFile(wavPath);
+    const rate = wav.readUInt32LE(24);
+    let offset = 12;
+    while (wav.toString("ascii", offset, offset + 4) !== "data")
+      offset += 8 + wav.readUInt32LE(offset + 4);
+    const source = wav.subarray(offset + 8);
+    const pcm = Buffer.alloc(Math.floor(((source.length / 2) * 16_000) / rate) * 2);
+    for (let index = 0; index < pcm.length / 2; index++)
+      pcm.writeInt16LE(source.readInt16LE(Math.floor((index * rate) / 16_000) * 2), index * 2);
+    const directory = fileURLToPath(
+      new URL("../../../../../plugin-examples/codex-live/", import.meta.url),
+    );
+    await mkdir(path.join(root, ".paseo"));
+    await writeFile(
+      path.join(root, ".paseo/config.json"),
+      JSON.stringify({
+        features: { voiceMode: { provider: { pluginId: "codex-live", providerId: "live" } } },
+      }),
+    );
+    const daemon = await createTestPaseoDaemon({
+      paseoHomeRoot: root,
+      daemonVersion: "0.12.0",
+      mcpEnabled: false,
+      agentClients: { codex: new CodexAppServerAgentClient(pino({ level: "silent" })) },
+      pluginsEnabled: true,
+      plugins: { "codex-live": { source: "directory", path: directory, enabled: true } },
+    });
+    const client = new DaemonClient({
+      url: `ws://127.0.0.1:${daemon.port}/ws`,
+      appVersion: "0.12.0",
+    });
+    let energy = 0;
+    const spoken: string[] = [];
+    const failures: string[] = [];
+    client.on("audio_output", (message) => {
+      if (message.type !== "audio_output") return;
+      const audio = Buffer.from(message.payload.audio, "base64");
+      for (let index = 0; index + 1 < audio.length; index += 2)
+        energy += audio.readInt16LE(index) ** 2;
+    });
+    client.on("activity_log", (message) => {
+      if (message.type === "activity_log" && message.payload.type === "assistant")
+        spoken.push(message.payload.content);
+    });
+    client.on("voice_input_state", (message) => {
+      if (message.type === "voice_input_state" && message.payload.error)
+        failures.push(message.payload.error);
+    });
+    try {
+      await client.connect();
+      const { settingsRpc } = await import("@getpaseo/plugin");
+      const voiceSettings = settingsRpc("voice");
+      const selected = await client.invokePluginRpc("codex-live", voiceSettings.write.name, {
+        revision: "missing",
+        values: { voice: "maple" },
+      });
+      expect(selected).toMatchObject({ status: "saved", values: { voice: "maple" } });
+      const agent = await client.createAgent({
+        provider: "codex",
+        cwd: root,
+        modeId: "full-access",
+        thinkingOptionId: "low",
+      });
+      await client.setVoiceMode(true, agent.id);
+      for (let index = 0; index < pcm.length; index += 3200) {
+        await client.sendVoiceAudioChunk(
+          pcm.subarray(index, index + 3200).toString("base64"),
+          "audio/pcm;rate=16000;bits=16",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await expect
+        .poll(
+          () => {
+            if (failures.length) throw new Error(failures.join("; "));
+            return spoken.join(" ").toLowerCase();
+          },
+          { timeout: 120_000 },
+        )
+        .toContain(phrase);
+      expect(energy).toBeGreaterThan(0);
+      const timeline = await client.fetchAgentTimeline(agent.id, { limit: 200 });
+      expect(timeline.entries.some((entry) => entry.item.type === "user_message")).toBe(true);
+      expect(
+        timeline.entries.some(
+          (entry) => entry.item.type === "assistant_message" && entry.item.text.includes(phrase),
+        ),
+      ).toBe(true);
+      await client.setVoiceMode(false);
+      // Evidence contains no keys, SDP or full provider payloads.
+      process.stdout.write(
+        JSON.stringify({
+          liveVoiceEvidence: {
+            voice: "maple",
+            inputPcmBytes: pcm.length,
+            outputEnergy: energy,
+            phrase,
+            spoken,
+            selectedAgentId: agent.id,
+            failures,
+          },
+        }) + "\n",
+      );
+    } finally {
+      await client.close();
+      await daemon.close();
+    }
+  },
+  180_000,
+);
