@@ -4,6 +4,16 @@ import path from "node:path";
 import { HostInventoryFence, HostFenceError } from "./host-inventory-fence.js";
 import type { HostInventoryDomain, HostWatermark } from "@getpaseo/plugin/server";
 
+export const HOST_FENCE_WAIT_MS = 30_000;
+const MAX_FENCE_WAITERS = 1024;
+
+interface FenceWaiter {
+  domain: HostInventoryDomain;
+  since: number;
+  resolve: (finish: () => void) => void;
+  reject: (error: unknown) => void;
+}
+
 export const HOST_INVENTORY_COVERED: HostInventoryDomain[] = [
   "agent-records",
   "admissions",
@@ -33,9 +43,72 @@ export class HostInventoryClock {
   private expiresAt = 0;
   private failed = false;
   private readonly fenceLock: HostInventoryFence | null;
-  constructor(private readonly directory?: string) {
+  private readonly waiters: FenceWaiter[] = [];
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private warnedAt = -Infinity;
+  constructor(
+    private readonly directory?: string,
+    private readonly warn: (message: string) => void = console.warn,
+  ) {
     const supported = process.platform === "linux" || process.platform === "darwin";
     this.fenceLock = directory && supported ? new HostInventoryFence(directory) : null;
+  }
+
+  /** Queue only lock acquisition: a failed mutation must never be replayed. */
+  beginAsync(domain: HostInventoryDomain): Promise<() => void> {
+    try {
+      // Nested writers must be able to complete while holding SH. Otherwise
+      // new independent writers join the existing FIFO acquisition queue.
+      if (this.waiters.length === 0 || this.active > 0) return Promise.resolve(this.begin(domain));
+    } catch (error) {
+      if (!(error instanceof HostFenceError && error.code === "HOST_FENCE_BUSY"))
+        return Promise.reject(error);
+    }
+    if (this.waiters.length >= MAX_FENCE_WAITERS)
+      return Promise.reject(
+        new HostFenceError("HOST_FENCE_SATURATED", "Host publication writer queue is full"),
+      );
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ domain, since: Date.now(), resolve, reject });
+      this.scheduleRetry();
+    });
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      while (this.waiters.length) {
+        const waiter = this.waiters[0];
+        const elapsed = Date.now() - waiter.since;
+        if (elapsed >= 5_000 && Date.now() - this.warnedAt >= 60_000) {
+          this.warnedAt = Date.now();
+          this.warn(
+            "Host publication is blocking inventory writers; bounded retry queue is waiting",
+          );
+        }
+        try {
+          const finish = this.begin(waiter.domain);
+          this.waiters.shift();
+          waiter.resolve(finish);
+        } catch (error) {
+          if (error instanceof HostFenceError && error.code === "HOST_FENCE_BUSY") {
+            if (elapsed < HOST_FENCE_WAIT_MS) break;
+            this.waiters.shift();
+            waiter.reject(
+              new HostFenceError(
+                "HOST_FENCE_SATURATED",
+                "Host publication blocked writes for 30 seconds",
+              ),
+            );
+          } else {
+            this.waiters.shift();
+            waiter.reject(error);
+          }
+        }
+      }
+      if (this.waiters.length) this.scheduleRetry();
+    }, 25);
   }
 
   private acquireFence(): () => void {
@@ -100,7 +173,7 @@ export class HostInventoryClock {
   }
 
   async track<T>(domain: HostInventoryDomain, action: () => Promise<T>): Promise<T> {
-    const finish = this.begin(domain);
+    const finish = await this.beginAsync(domain);
     try {
       return await action();
     } finally {

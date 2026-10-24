@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { HostFenceError } from "../plugins/host-inventory-fence.js";
 
 import type { AgentProvider, AgentStreamEvent } from "./agent-sdk-types.js";
 import {
   AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
+  AGENT_FENCE_QUEUE_BYTES,
+  GLOBAL_FENCE_QUEUE_BYTES,
   AgentStreamCoalescer,
   type AgentStreamCoalescerFlush,
   type AgentStreamCoalescerTimers,
@@ -120,6 +123,89 @@ describe("AgentStreamCoalescer", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  test("a blocked timer warns once, interrupts at 30 seconds and can resume", () => {
+    const errors = vi.fn();
+    const saturated = vi.fn();
+    const flushes: AgentStreamCoalescerFlush[] = [];
+    let blocked = true;
+    const coalescer = new AgentStreamCoalescer({
+      timers: { setTimeout, clearTimeout },
+      onError: errors,
+      onSaturated: saturated,
+      onFlush: (payload) => {
+        if (blocked && payload.agentId === "blocked")
+          throw new HostFenceError("HOST_FENCE_BUSY", "publication");
+        flushes.push(payload);
+      },
+    });
+    coalescer.handle("blocked", assistant("queued"));
+    coalescer.handle("other", assistant("unaffected"));
+    vi.advanceTimersByTime(29_999);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(saturated).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(61);
+    expect(saturated).toHaveBeenCalledExactlyOnceWith(
+      "blocked",
+      expect.objectContaining({ code: "HOST_FENCE_SATURATED" }),
+    );
+    expect(flushes.map((row) => row.agentId)).toEqual(["other"]);
+    blocked = false;
+    coalescer.handle("blocked", assistant("resumed"));
+    expect(flushes.map((row) => row.item)).toEqual([
+      assistant("unaffected").item,
+      assistant("resumed").item,
+    ]);
+    coalescer.flushAll();
+  });
+
+  test("per-agent and global byte ceilings report saturation without growing the backlog", () => {
+    const saturated = vi.fn();
+    const coalescer = new AgentStreamCoalescer({
+      timers: { setTimeout, clearTimeout },
+      onSaturated: saturated,
+      onFlush: () => {
+        throw new HostFenceError("HOST_FENCE_BUSY", "publication");
+      },
+    });
+    coalescer.handle("oversized", assistant("x".repeat(AGENT_FENCE_QUEUE_BYTES)));
+    expect(saturated).toHaveBeenCalledExactlyOnceWith(
+      "oversized",
+      expect.objectContaining({ code: "HOST_FENCE_SATURATED" }),
+    );
+    saturated.mockClear();
+    const count = GLOBAL_FENCE_QUEUE_BYTES / AGENT_FENCE_QUEUE_BYTES;
+    for (let i = 0; i <= count; i++)
+      coalescer.handle(`agent-${i}`, assistant("x".repeat(AGENT_FENCE_QUEUE_BYTES / 2 - 1024)));
+    expect(saturated).toHaveBeenCalledExactlyOnceWith(
+      `agent-${count}`,
+      expect.objectContaining({ code: "HOST_FENCE_SATURATED" }),
+    );
+    for (let i = 0; i <= count; i++) coalescer.discard(`agent-${i}`);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("timer callback errors are reported without replaying already committed rows", () => {
+    const onError = vi.fn();
+    const rows: string[] = [];
+    const coalescer = new AgentStreamCoalescer({
+      timers: { setTimeout, clearTimeout },
+      onError,
+      onFlush: ({ item }) => {
+        rows.push(item.type);
+        if (rows.length === 2) throw new Error("subscriber failed after commit");
+      },
+    });
+    coalescer.handle("agent", assistant("first"));
+    coalescer.handle("agent", assistant("second"));
+    expect(() => vi.advanceTimersByTime(60)).not.toThrow();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "subscriber failed after commit" }),
+      "agent",
+    );
+    coalescer.flushFor("agent");
+    expect(rows).toEqual(["assistant_message", "assistant_message"]);
   });
 
   test("flushes the first chunk of a burst on the leading edge", () => {

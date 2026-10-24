@@ -9,11 +9,78 @@ import { AdmissionJournal } from "./admission-journal.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { HostInventoryClock } from "./host-inventory-clock.js";
 import { HostInventory } from "./host-inventory.js";
+import { AgentStreamCoalescer } from "../agent/agent-stream-coalescer.js";
+import { InMemoryAgentTimelineStore } from "../agent/agent-timeline-store.js";
 
 const nativeFenceTest = test.skipIf(process.platform !== "linux" && process.platform !== "darwin");
 
+nativeFenceTest(
+  "coalescer timer retains ordered timeline through a short native publication",
+  async () => {
+    const { directory, clock, inventory } = await fixture();
+    vi.stubEnv("PASEO_HOME", directory);
+    vi.stubEnv("FLEET_TOWN_STATE_DIR", path.join(directory, "town"));
+    onTestFinished(() => vi.unstubAllEnvs());
+    const store = new InMemoryAgentTimelineStore(clock);
+    store.initialize("agent");
+    let tick: (() => void) | undefined;
+    const delivered: string[] = [];
+    const coalescer = new AgentStreamCoalescer({
+      timers: {
+        setTimeout: (callback) => {
+          tick = callback;
+          return setTimeout(() => {}, 60_000);
+        },
+        clearTimeout,
+      },
+      onFlush: ({ item }) => {
+        store.append("agent", item);
+        delivered.push(item.type === "assistant_message" ? item.text : item.type);
+      },
+    });
+    const emit = (text: string) =>
+      coalescer.handle("agent", {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text, messageId: text },
+      });
+    emit("first");
+    emit("second");
+    const before = clock.snapshot();
+    const { child, exited } = await nativeWriter(
+      path.join(directory, "watermark"),
+      `
+const fd = openSync(clock.fence().lock.path, "r+");
+flockSync(fd, "exnb");
+process.stdout.write("locked\\n");
+process.stdin.resume();
+process.stdin.on("end", () => closeSync(fd));
+`,
+    );
+    try {
+      expect(() => tick!()).not.toThrow();
+      emit("third");
+      expect(delivered).toEqual(["first"]);
+      expect(clock.snapshot()).toEqual(before);
+    } finally {
+      child.stdin.end();
+      await exited;
+    }
+    tick!();
+    coalescer.flushAndDiscard("agent");
+    expect(delivered).toEqual(["first", "second", "third"]);
+    expect(store.fetch("agent").window).toEqual({ minSeq: 1, maxSeq: 3, nextSeq: 4 });
+    expect(clock.snapshot().activeWriters).toBe(0);
+    expect(clock.snapshot().sequence).toBe(before.sequence + 4);
+    expect((await inventory.read("gc")).agents.map((row) => row.agentId)).toEqual(["agent"]);
+  },
+);
+
 async function fixture() {
   const directory = await mkdtemp(path.join(tmpdir(), "host-inventory-"));
+  vi.stubEnv("PASEO_HOME", directory);
+  vi.stubEnv("FLEET_TOWN_STATE_DIR", path.join(directory, "town"));
+  onTestFinished(() => vi.unstubAllEnvs());
   onTestFinished(() => rm(directory, { recursive: true, force: true }));
   const clock = new HostInventoryClock(path.join(directory, "watermark"));
   const storage = new AgentStorage(path.join(directory, "agents"), createTestLogger(), clock);
@@ -37,6 +104,86 @@ async function fixture() {
     inventory: new HostInventory(storage, journal, clock),
   };
 }
+
+nativeFenceTest(
+  "async host writers wait before mutation and do not retry a failed action",
+  async () => {
+    const { directory, clock } = await fixture();
+    const { child, exited } = await nativeWriter(
+      path.join(directory, "watermark"),
+      `
+const fd = openSync(clock.fence().lock.path, "r+");
+flockSync(fd, "exnb");
+process.stdout.write("locked\\n");
+process.stdin.resume();
+process.stdin.on("end", () => closeSync(fd));
+`,
+    );
+    const before = clock.snapshot();
+    const writes: number[] = [];
+    const first = clock.track("agent-records", async () => {
+      writes.push(1);
+    });
+    const second = clock.track("admissions", async () => {
+      writes.push(2);
+      throw new Error("mutation failure");
+    });
+    const failed = expect(second).rejects.toThrow("mutation failure");
+    const third = clock.track("plugin-lifecycle", async () => {
+      writes.push(3);
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(writes).toEqual([]);
+      expect(clock.snapshot()).toEqual(before);
+    } finally {
+      child.stdin.end();
+      await exited;
+    }
+    await Promise.all([first, failed, third]);
+    expect(writes).toEqual([1, 2, 3]);
+    expect(clock.snapshot().sequence).toBe(before.sequence + 6);
+    expect(clock.snapshot().activeWriters).toBe(0);
+  },
+);
+
+nativeFenceTest("async host queue warns once and rejects after its bounded wait", async () => {
+  const { directory } = await fixture();
+  const warn = vi.fn();
+  const clock = new HostInventoryClock(path.join(directory, "retry"), warn);
+  clock.fence();
+  const { child, exited } = await nativeWriter(
+    path.join(directory, "retry"),
+    `
+const fd = openSync(clock.fence().lock.path, "r+");
+flockSync(fd, "exnb");
+process.stdout.write("locked\\n");
+process.stdin.resume();
+process.stdin.on("end", () => closeSync(fd));
+`,
+  );
+  const mutation = vi.fn(async () => {});
+  vi.useFakeTimers();
+  try {
+    const waiting = expect(clock.track("agent-records", mutation)).rejects.toMatchObject({
+      code: "HOST_FENCE_SATURATED",
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(25_000);
+    await waiting;
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(mutation).not.toHaveBeenCalled();
+    expect(clock.snapshot().activeWriters).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+    child.stdin.end();
+    await exited;
+  }
+  await clock.track("agent-records", mutation);
+  expect(mutation).toHaveBeenCalledTimes(1);
+});
 
 test("a binding change between native reads cannot be reported as a coherent old binding", async () => {
   const { storage, journal, inventory } = await fixture();
@@ -240,7 +387,6 @@ test("oversized rows fail explicitly instead of silently completing a partial in
 
 test("watermarks change on live history updates, bound their suffix and rotate epoch on restart", async () => {
   const { directory, inventory, clock } = await fixture();
-  const { InMemoryAgentTimelineStore } = await import("../agent/agent-timeline-store.js");
   const history = new InMemoryAgentTimelineStore(clock);
   const before = clock.snapshot();
   history.initialize("agent", { epoch: "original" });
@@ -340,6 +486,7 @@ process.stdin.on("end", () => fds.forEach(closeSync));
       lockPath,
     ]);
     const exited = once(publisher, "exit");
+    let racing: ReturnType<AgentStorage["setBinding"]> | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
         publisher.stdout.once("data", () => resolve());
@@ -347,17 +494,18 @@ process.stdin.on("end", () => fds.forEach(closeSync));
         publisher.once("exit", () => reject(new Error("Publisher exited before acquiring locks")));
       });
       // This is the publication window after the last local generation check.
-      await expect(
-        storage.setBinding("agent", "gc", { identity: "racing" }, 1),
-      ).rejects.toMatchObject({ code: "HOST_FENCE_BUSY" });
+      racing = storage.setBinding("agent", "gc", { identity: "racing" }, 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
       expect(clock.snapshot()).toEqual(before.watermark);
       expect((await storage.getBinding("agent", "gc"))?.revision).toBe(1);
     } finally {
       publisher.stdin.end();
       await exited;
     }
-    await storage.setBinding("agent", "gc", { identity: "after-publication" }, 1);
+    await racing;
     expect((await storage.getBinding("agent", "gc"))?.revision).toBe(2);
+    await storage.setBinding("agent", "gc", { identity: "after-publication" }, 2);
+    expect((await storage.getBinding("agent", "gc"))?.revision).toBe(3);
   },
 );
 
