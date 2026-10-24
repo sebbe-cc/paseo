@@ -1,3 +1,4 @@
+import { requestOrigin } from "../plugins/request-origin.js";
 import { isAbsolute } from "node:path";
 import type {
   HubExecutionAgentCreateError,
@@ -144,7 +145,9 @@ export class HubExecutionController {
 
   async createAgent(message: HubExecutionAgentCreateRequest): Promise<void> {
     if (this.closed) return;
-    const create = this.createAgentWithResponse(message);
+    const create = requestOrigin.run({ kind: "daemon", source: "hub" }, () =>
+      this.createAgentWithResponse(message),
+    );
     this.pendingCreates.add(create);
     try {
       await create;

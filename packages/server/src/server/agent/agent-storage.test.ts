@@ -148,6 +148,57 @@ describe("AgentStorage", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  test("binding CAS serializes competing writers and survives snapshots, title, archive and disk reload", async () => {
+    const agent = createManagedAgent({ id: "bound" });
+    await storage.applySnapshot(agent);
+    const binding = await storage.setBinding(agent.id, "owner-plugin", { pin: "first" }, null);
+    expect(binding.revision).toBe(1);
+    const competing = await Promise.allSettled([
+      storage.setBinding(agent.id, "owner-plugin", { pin: "winner" }, 1),
+      storage.setBinding(agent.id, "owner-plugin", { pin: "loser" }, 1),
+    ]);
+    expect(competing.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+    await storage.applySnapshot(agent);
+    await storage.setTitle(agent.id, "New title");
+    const record = (await storage.get(agent.id))!;
+    await storage.upsert({ ...record, archivedAt: "2026-10-23T00:00:00.000Z" });
+    await storage.applySnapshot(agent);
+    const reloaded = new AgentStorage(storagePath, logger);
+    expect(await reloaded.getBinding(agent.id, "owner-plugin")).toMatchObject({
+      revision: 2,
+      data: { pin: "winner" },
+      boundBy: { kind: "plugin", pluginId: "owner-plugin" },
+    });
+    expect(await reloaded.getBinding(agent.id, "another-plugin")).toBeNull();
+    await expect(reloaded.clearBinding(agent.id, "owner-plugin", 1)).rejects.toMatchObject({
+      code: "PLUGIN_BINDING_CONFLICT",
+    });
+    await reloaded.clearBinding(agent.id, "owner-plugin", 2);
+    const rebound = await reloaded.setBinding(agent.id, "owner-plugin", { pin: "new" }, null);
+    expect(rebound.revision).toBe(4);
+    await expect(reloaded.setBinding(agent.id, "owner-plugin", {}, 2)).rejects.toMatchObject({
+      code: "PLUGIN_BINDING_CONFLICT",
+    });
+  });
+
+  test("binding data is bounded JSON and stale snapshot upserts cannot remove it", async () => {
+    const agent = createManagedAgent({ id: "bounded" });
+    await storage.applySnapshot(agent);
+    const stale = (await storage.get(agent.id))!;
+    await expect(storage.setBinding(agent.id, "plugin", "x".repeat(16384), null)).rejects.toThrow(
+      "16 KiB",
+    );
+    await expect(
+      storage.setBinding(agent.id, "plugin", { invalid: undefined }, null),
+    ).rejects.toThrow();
+    await storage.setBinding(agent.id, "plugin", { pin: true }, null);
+    await storage.upsert({ ...stale, title: "stale title write" });
+    expect(await storage.getBinding(agent.id, "plugin")).toMatchObject({
+      revision: 1,
+      data: { pin: true },
+    });
+  });
+
   test("applySnapshot persists configs and snapshot metadata", async () => {
     await storage.applySnapshot(
       createManagedAgent({

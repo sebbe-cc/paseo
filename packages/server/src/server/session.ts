@@ -1,3 +1,6 @@
+import { PluginAdmissionError } from "./plugins/lifecycle/index.js";
+import { requestOrigin } from "./plugins/request-origin.js";
+import type { PluginRequestOrigin } from "@getpaseo/plugin/server";
 import { AgentDirectory } from "./agent/directory.js";
 import { searchTimeline } from "./agent/chat-search/index.js";
 import type { BrowserToolsBroker } from "./browser-tools/broker.js";
@@ -446,6 +449,7 @@ const nodeSessionFileSystem: SessionFileSystem = {
 type AgentMcpTransportFactory = () => Promise<unknown>;
 
 export interface SessionOptions {
+  origin?: PluginRequestOrigin;
   browserToolsBroker?: BrowserToolsBroker | null;
   clientId: string;
   permissions: readonly DaemonPermission[];
@@ -706,6 +710,7 @@ export class Session {
   );
   private readonly browserToolsBroker: SessionOptions["browserToolsBroker"];
   private readonly clientId: string;
+  private readonly origin: PluginRequestOrigin | undefined;
   private readonly authorization: SessionAuthorization;
   private appVersion: string | null;
   private clientCapabilities: ReadonlySet<ClientCapability>;
@@ -872,6 +877,7 @@ export class Session {
     } = options;
     this.browserToolsBroker = options.browserToolsBroker;
     this.clientId = clientId;
+    this.origin = options.origin;
     this.authorization = new SessionAuthorization(permissions);
     this.appVersion = appVersion ?? null;
     this.clientCapabilities = parseClientCapabilities(clientCapabilities);
@@ -1214,7 +1220,9 @@ export class Session {
               logger: this.sessionLogger,
             }),
           reloadAgentSession: (agentId, overrides) =>
-            this.agentManager.reloadAgentSession(agentId, overrides),
+            requestOrigin.run({ kind: "daemon", source: "voice" }, () =>
+              this.agentManager.reloadAgentSession(agentId, overrides),
+            ),
           sendSpokenInput: async (agentId, text) => {
             await this.handleSendAgentMessage(
               agentId,
@@ -2148,7 +2156,15 @@ export class Session {
    * Main entry point for processing session messages
    */
   public async handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
-    return this.delivery.request(source, msg, () => this.handleRequest(msg, source));
+    return requestOrigin.run(
+      this.origin ?? {
+        kind: "client",
+        principalId: "owner",
+        clientId: this.clientId,
+        clientType: "cli",
+      },
+      () => this.delivery.request(source, msg, () => this.handleRequest(msg, source)),
+    );
   }
 
   private async handleRequest(msg: SessionInboundMessage, source?: object): Promise<void> {
@@ -4698,7 +4714,10 @@ export class Session {
             requestId,
             requestType: msg.type,
             error: message,
-            code: error instanceof WorktreeRequestError ? error.code : "agent_refresh_failed",
+            code:
+              error instanceof WorktreeRequestError || error instanceof PluginAdmissionError
+                ? error.code
+                : "agent_refresh_failed",
           },
         });
       }
