@@ -1,3 +1,4 @@
+import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
 import { randomUUID } from "node:crypto";
 import {
   TimelineProjection,
@@ -31,6 +32,7 @@ function cloneRow<T extends AgentTimelineRow>(row: T): T {
 }
 
 export class InMemoryAgentTimelineStore {
+  constructor(private readonly inventoryClock?: HostInventoryClock) {}
   private readonly states = new Map<string, AgentTimelineState>();
 
   has(agentId: string): boolean {
@@ -38,23 +40,36 @@ export class InMemoryAgentTimelineStore {
   }
 
   initialize(agentId: string, options?: SeedAgentTimelineOptions): void {
-    const timestamp = options?.timestamp ?? new Date().toISOString();
-    const rows = options?.rows?.length
-      ? options.rows.map(cloneRow)
-      : this.buildRowsFromItems(options?.items ?? [], options?.nextSeq ?? 1, timestamp);
-    const nextSeq = rows.reduce((next, row) => Math.max(next, row.seq + 1), options?.nextSeq ?? 1);
-    const projection = new TimelineProjection();
-    for (const row of rows) projection.append(row);
-    this.states.set(agentId, {
-      epoch: options?.epoch ?? randomUUID(),
-      projection,
-      minSeq: projection.getRows()[0]?.seqStart ?? 0,
-      nextSeq,
-    });
+    const finish = this.inventoryClock?.begin("live-history");
+    try {
+      const timestamp = options?.timestamp ?? new Date().toISOString();
+      const rows = options?.rows?.length
+        ? options.rows.map(cloneRow)
+        : this.buildRowsFromItems(options?.items ?? [], options?.nextSeq ?? 1, timestamp);
+      const nextSeq = rows.reduce(
+        (next, row) => Math.max(next, row.seq + 1),
+        options?.nextSeq ?? 1,
+      );
+      const projection = new TimelineProjection();
+      for (const row of rows) projection.append(row);
+      this.states.set(agentId, {
+        epoch: options?.epoch ?? randomUUID(),
+        projection,
+        minSeq: projection.getRows()[0]?.seqStart ?? 0,
+        nextSeq,
+      });
+    } finally {
+      finish?.();
+    }
   }
 
   delete(agentId: string): void {
-    this.states.delete(agentId);
+    const finish = this.inventoryClock?.begin("live-history");
+    try {
+      this.states.delete(agentId);
+    } finally {
+      finish?.();
+    }
   }
 
   getItems(agentId: string): AgentTimelineItem[] {
@@ -83,10 +98,15 @@ export class InMemoryAgentTimelineStore {
     clientMessageId: string,
     providerMessageId: string,
   ): AgentTimelineRow | null {
-    return this.requireState(agentId).projection.enrichSubmittedUserMessage(
-      clientMessageId,
-      providerMessageId,
-    );
+    const finish = this.inventoryClock?.begin("live-history");
+    try {
+      return this.requireState(agentId).projection.enrichSubmittedUserMessage(
+        clientMessageId,
+        providerMessageId,
+      );
+    } finally {
+      finish?.();
+    }
   }
 
   getEpoch(agentId: string): string {
@@ -132,20 +152,29 @@ export class InMemoryAgentTimelineStore {
   append(
     agentId: string,
     item: AgentTimelineItem,
-    options?: { timestamp?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      timestamp?: string;
+      providerMessageId?: string;
+      turnId?: string;
+    },
   ): AgentTimelineRow {
-    const state = this.requireState(agentId);
-    const row: AgentTimelineRow = {
-      seq: state.nextSeq,
-      timestamp: options?.timestamp ?? new Date().toISOString(),
-      item,
-      ...(options?.turnId ? { turnId: options.turnId } : {}),
-      ...(options?.providerMessageId ? { providerMessageId: options.providerMessageId } : {}),
-    };
-    state.nextSeq += 1;
-    if (state.minSeq === 0) state.minSeq = row.seq;
-    state.projection.append(row);
-    return cloneRow(row);
+    const finish = this.inventoryClock?.begin("live-history");
+    try {
+      const state = this.requireState(agentId);
+      const row: AgentTimelineRow = {
+        seq: state.nextSeq,
+        timestamp: options?.timestamp ?? new Date().toISOString(),
+        item,
+        ...(options?.turnId ? { turnId: options.turnId } : {}),
+        ...(options?.providerMessageId ? { providerMessageId: options.providerMessageId } : {}),
+      };
+      state.nextSeq += 1;
+      if (state.minSeq === 0) state.minSeq = row.seq;
+      state.projection.append(row);
+      return cloneRow(row);
+    } finally {
+      finish?.();
+    }
   }
 
   getLastItem(agentId: string): AgentTimelineItem | null {

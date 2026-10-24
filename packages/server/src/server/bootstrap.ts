@@ -1,3 +1,5 @@
+import { HostInventoryClock } from "./plugins/host-inventory-clock.js";
+import { HostInventory } from "./plugins/host-inventory.js";
 import { AdmissionJournal } from "./plugins/admission-journal.js";
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
@@ -672,9 +674,19 @@ export async function createPaseoDaemon(
   });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
-  const admissionJournal = new AdmissionJournal(path.join(config.paseoHome, "admissions"));
+  const inventoryClock = new HostInventoryClock(path.join(config.paseoHome, "runtime-inventory"));
+  const admissionJournal = new AdmissionJournal(
+    path.join(config.paseoHome, "admissions"),
+    14,
+    inventoryClock,
+  );
   const pluginRuntime: PluginService = new PluginService(logger, daemonConfigStore, daemonVersion, {
-    admission: { storage: () => agentStorage, journal: admissionJournal },
+    admission: {
+      storage: () => agentStorage,
+      journal: admissionJournal,
+      clock: inventoryClock,
+      inventory: () => hostInventory,
+    },
     usageAgents: {
       hasAgent: (id) => agentManager.getAgent(id) !== null,
       usageSession: (id) => agentManager.usageSession(id),
@@ -931,7 +943,8 @@ export async function createPaseoDaemon(
     serviceProxyListenTarget = parseListenString(config.serviceProxy.standaloneListen);
   }
 
-  const agentStorage = new AgentStorage(config.agentStoragePath, logger);
+  const agentStorage = new AgentStorage(config.agentStoragePath, logger, inventoryClock);
+  const hostInventory = new HostInventory(agentStorage, admissionJournal, inventoryClock);
   const projectRegistry = new FileBackedProjectRegistry(
     path.join(config.paseoHome, "projects", "projects.json"),
     logger,
@@ -1010,6 +1023,7 @@ export async function createPaseoDaemon(
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
     admissionJournal,
+    inventoryClock,
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
