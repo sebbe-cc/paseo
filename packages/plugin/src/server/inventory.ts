@@ -37,6 +37,24 @@ export const HostWatermarkResultSchema = z
     local: z.object({ path: z.string(), expiresAt: z.number().int().positive() }).nullable(),
   })
   .strict();
+export const HostFenceLockSchema = z
+  .object({
+    path: z.string(),
+    device: z.string().regex(/^\d+$/),
+    inode: z.string().regex(/^\d+$/),
+  })
+  .strict();
+export type HostFenceLock = z.infer<typeof HostFenceLockSchema>;
+export const HostFenceTokenSchema = z
+  .object({
+    version: z.literal(1),
+    scope: z.literal("paseo-host"),
+    watermark: HostWatermarkSchema,
+    local: z.object({ path: z.string(), expiresAt: z.number().int().positive() }),
+    lock: HostFenceLockSchema,
+  })
+  .strict();
+export type HostFenceToken = z.infer<typeof HostFenceTokenSchema>;
 export const HostInventoryRequestSchema = z
   .object({
     cursor: z.string().uuid().optional(),
@@ -76,5 +94,6 @@ export const HostInventoryPageSchema = z
 export type HostInventoryPage = z.infer<typeof HostInventoryPageSchema>;
 export interface PluginHostInventory {
   read(request?: z.infer<typeof HostInventoryRequestSchema>): Promise<HostInventoryPage>;
+  fence(): Promise<HostFenceToken>;
   watermark(): Promise<z.infer<typeof HostWatermarkResultSchema>>;
 }

@@ -61,7 +61,7 @@ buildNpmPackage {
   inherit (paseo) npmDeps;
 
   # Prevent onnxruntime-node's install script from running during automatic
-  # npm rebuild. We manually rebuild only node-pty in buildPhase.
+  # npm rebuild. We manually rebuild node-pty and fs-ext in buildPhase.
   npmRebuildFlags = ["--ignore-scripts"];
 
   nativeBuildInputs =
@@ -97,8 +97,8 @@ buildNpmPackage {
   buildPhase = ''
     runHook preBuild
 
-    # Native deps (terminal emulation; libuv-linked on Linux)
-    npm rebuild node-pty
+    # Native deps (terminal emulation and host fencing)
+    npm rebuild node-pty fs-ext
 
     # Server workspaces (highlight + relay + protocol + client + server + cli)
     npm run build:server
