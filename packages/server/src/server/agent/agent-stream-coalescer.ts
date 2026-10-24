@@ -1,7 +1,11 @@
 import type { AgentProvider, AgentStreamEvent, AgentTimelineItem } from "./agent-sdk-types.js";
 import { mergeToolCallItems } from "./timeline-projection.js";
+import { HostFenceError } from "../plugins/host-inventory-fence.js";
 
 export const AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS = 60;
+export const AGENT_FENCE_QUEUE_BYTES = 2 * 1024 * 1024;
+export const GLOBAL_FENCE_QUEUE_BYTES = 32 * 1024 * 1024;
+export const AGENT_FENCE_QUEUE_WAIT_MS = 30_000;
 
 type CoalescableTextKind = "assistant_message" | "reasoning";
 type CoalescableTimelineKind = CoalescableTextKind | "tool_call";
@@ -28,9 +32,12 @@ export interface AgentStreamCoalescerOptions {
   timers: AgentStreamCoalescerTimers;
   now?: () => number;
   onFlush: (payload: AgentStreamCoalescerFlush) => void;
+  onError?: (error: unknown, agentId: string) => void;
+  onSaturated?: (agentId: string, error: HostFenceError) => void;
 }
 
 interface PendingTextEntry {
+  bytes: number;
   kind: "text";
   item: CoalescableTextItem;
   text: string;
@@ -39,6 +46,7 @@ interface PendingTextEntry {
 }
 
 interface PendingToolCallEntry {
+  bytes: number;
   kind: "tool_call";
   item: Extract<AgentTimelineItem, { type: "tool_call" }>;
   provider: AgentProvider;
@@ -54,6 +62,10 @@ interface PendingAgentStreamBuffer {
   timer: ReturnType<typeof setTimeout> | null;
   flushing: boolean;
   lastFlushAt: number | null;
+  blockedSince: number | null;
+  warnedAt: number | null;
+  discardWhenFlushed: boolean;
+  bytes: number;
 }
 
 function isCoalescableTimelineEvent(event: AgentStreamEvent): event is CoalescableTimelineEvent {
@@ -92,12 +104,17 @@ export class AgentStreamCoalescer {
   private readonly timers: AgentStreamCoalescerTimers;
   private readonly windowMs: number;
   private readonly now: () => number;
+  private readonly onError: (error: unknown, agentId: string) => void;
+  private readonly onSaturated: (agentId: string, error: HostFenceError) => void;
+  private pendingBytes = 0;
 
   constructor(options: AgentStreamCoalescerOptions) {
     this.windowMs = options.windowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS;
     this.timers = options.timers;
     this.now = options.now ?? Date.now;
     this.onFlush = options.onFlush;
+    this.onError = options.onError ?? ((error) => console.error(error));
+    this.onSaturated = options.onSaturated ?? ((agentId, error) => this.onError(error, agentId));
   }
 
   handle(agentId: string, event: AgentStreamEvent): boolean {
@@ -110,6 +127,14 @@ export class AgentStreamCoalescer {
     }
 
     const buffer = this.getOrCreateBuffer(agentId);
+    const bytes = JSON.stringify(event).length * 2 + 256;
+    if (
+      buffer.bytes + bytes > AGENT_FENCE_QUEUE_BYTES ||
+      this.pendingBytes + bytes > GLOBAL_FENCE_QUEUE_BYTES
+    ) {
+      this.saturate(buffer);
+      return true;
+    }
     this.appendToBuffer(buffer, event);
 
     if (isTerminalToolCall(event.item)) {
@@ -148,9 +173,32 @@ export class AgentStreamCoalescer {
     this.flushBuffer(agentId);
     const buffer = this.buffers.get(agentId);
     if (buffer) {
+      if (buffer.entries.length > 0) {
+        buffer.discardWhenFlushed = true;
+        return;
+      }
       this.clearTimer(buffer);
       this.buffers.delete(agentId);
     }
+  }
+
+  discard(agentId: string): void {
+    const buffer = this.buffers.get(agentId);
+    if (!buffer) return;
+    this.pendingBytes -= buffer.bytes;
+    this.clearTimer(buffer);
+    this.buffers.delete(agentId);
+  }
+
+  private saturate(buffer: PendingAgentStreamBuffer): void {
+    this.discard(buffer.agentId);
+    this.onSaturated(
+      buffer.agentId,
+      new HostFenceError(
+        "HOST_FENCE_SATURATED",
+        "Host publication exceeded the timeline queue time or memory limit; turn interrupted",
+      ),
+    );
   }
 
   private getOrCreateBuffer(agentId: string): PendingAgentStreamBuffer {
@@ -166,14 +214,22 @@ export class AgentStreamCoalescer {
       timer: null,
       flushing: false,
       lastFlushAt: null,
+      blockedSince: null,
+      warnedAt: null,
+      discardWhenFlushed: false,
+      bytes: 0,
     };
     this.buffers.set(agentId, buffer);
     return buffer;
   }
 
   private appendToBuffer(buffer: PendingAgentStreamBuffer, event: CoalescableTimelineEvent): void {
+    const bytes = JSON.stringify(event).length * 2 + 256;
+    buffer.bytes += bytes;
+    this.pendingBytes += bytes;
     if (isTextTimelineItem(event.item)) {
       buffer.entries.push({
+        bytes,
         kind: "text",
         item: event.item,
         text: event.item.text,
@@ -192,6 +248,7 @@ export class AgentStreamCoalescer {
       item = mergeToolCallItems(existing.item, event.item);
     }
     const entry: PendingToolCallEntry = {
+      bytes: bytes + (existing?.bytes ?? 0),
       kind: "tool_call",
       item,
       provider: event.provider,
@@ -235,32 +292,77 @@ export class AgentStreamCoalescer {
       return;
     }
 
+    if (
+      buffer.blockedSince !== null &&
+      this.now() - buffer.blockedSince >= AGENT_FENCE_QUEUE_WAIT_MS
+    ) {
+      this.saturate(buffer);
+      return;
+    }
+
     this.clearTimer(buffer);
     if (buffer.entries.length === 0) {
       return;
     }
 
-    const entries = buffer.entries;
+    const entries = this.collapseEntries(buffer.entries);
+    this.pendingBytes -= buffer.bytes;
+    buffer.bytes = 0;
     buffer.entries = [];
     buffer.toolCallEntryIndexes.clear();
     buffer.flushing = true;
     buffer.lastFlushAt = this.now();
 
     try {
-      for (const entry of this.collapseEntries(entries)) {
-        this.onFlush({
-          agentId,
-          item:
-            entry.kind === "text"
-              ? {
-                  ...entry.item,
-                  text: entry.text,
-                }
-              : entry.item,
-          provider: entry.provider,
-          ...(entry.turnId !== undefined ? { turnId: entry.turnId } : {}),
-        });
+      for (let index = 0; index < entries.length; index++) {
+        const entry = entries[index];
+        try {
+          this.onFlush({
+            agentId,
+            item:
+              entry.kind === "text"
+                ? {
+                    ...entry.item,
+                    text: entry.text,
+                  }
+                : entry.item,
+            provider: entry.provider,
+            ...(entry.turnId !== undefined ? { turnId: entry.turnId } : {}),
+          });
+        } catch (error) {
+          if (!(error instanceof HostFenceError && error.code === "HOST_FENCE_BUSY")) {
+            // An arbitrary callback can fail after committing. Replaying it
+            // would duplicate a row; only pre-mutation fence rejection is safe.
+            this.onError(error, agentId);
+            continue;
+          }
+          buffer.entries = [...entries.slice(index), ...buffer.entries];
+          const retainedBytes = entries
+            .slice(index)
+            .reduce((total, pending) => total + pending.bytes, 0);
+          buffer.bytes += retainedBytes;
+          this.pendingBytes += retainedBytes;
+          buffer.toolCallEntryIndexes.clear();
+          buffer.entries.forEach((pending, pendingIndex) => {
+            if (pending.kind === "tool_call")
+              buffer.toolCallEntryIndexes.set(pending.item.callId, pendingIndex);
+          });
+          const now = this.now();
+          buffer.blockedSince ??= now;
+          if (
+            now - buffer.blockedSince >= 5_000 &&
+            (buffer.warnedAt === null || now - buffer.warnedAt >= 60_000)
+          ) {
+            buffer.warnedAt = now;
+            this.onError(error, agentId);
+          }
+          this.scheduleFlush(buffer);
+          return;
+        }
       }
+      buffer.blockedSince = null;
+      buffer.warnedAt = null;
+      if (buffer.discardWhenFlushed && buffer.entries.length === 0) this.buffers.delete(agentId);
     } finally {
       buffer.flushing = false;
     }
@@ -280,6 +382,7 @@ export class AgentStreamCoalescer {
         previous.turnId === entry.turnId
       ) {
         previous.text += entry.text;
+        previous.bytes += entry.bytes;
         continue;
       }
 

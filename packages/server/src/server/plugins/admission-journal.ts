@@ -212,19 +212,23 @@ export class AdmissionJournal {
   }
 
   private mutate<T>(action: () => Promise<T>, pendingId?: string): Promise<T> {
-    const finish = this.inventoryClock?.begin("admissions");
     if (pendingId)
       this.pendingMutations.set(pendingId, (this.pendingMutations.get(pendingId) ?? 0) + 1);
     const result = this.queue
       .then(async () => {
-        await this.initialize();
-        if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
-          const files = (await fs.readdir(this.directory)).filter((file) =>
-            /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
-          );
-          await this.prune(files);
+        const finish = await this.inventoryClock?.beginAsync("admissions");
+        try {
+          await this.initialize();
+          if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
+            const files = (await fs.readdir(this.directory)).filter((file) =>
+              /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file),
+            );
+            await this.prune(files);
+          }
+          return await action();
+        } finally {
+          finish?.();
         }
-        return action();
       })
       .finally(() => {
         if (pendingId) {
@@ -232,7 +236,6 @@ export class AdmissionJournal {
           if (remaining) this.pendingMutations.set(pendingId, remaining);
           else this.pendingMutations.delete(pendingId);
         }
-        finish?.();
       });
     this.queue = result.catch(() => undefined);
     return result;

@@ -362,7 +362,7 @@ export class PluginRuntime {
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
-    this.inventoryChange(() => {
+    await this.inventoryChange(() => {
       this.plugins.set(pluginId, loaded);
     });
     this.replayAdmissions(loaded);
@@ -389,7 +389,7 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
-    this.inventoryChange(() => {
+    await this.inventoryChange(() => {
       this.plugins.set(input.id, loaded);
     });
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
@@ -406,7 +406,7 @@ export class PluginRuntime {
   async stopPluginById(pluginId: string): Promise<boolean> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) return false;
-    this.inventoryChange(() => {
+    await this.inventoryChange(() => {
       this.plugins.delete(pluginId);
     });
     this.rejectPending(loaded, `Plugin stopped: ${pluginId}`);
@@ -843,7 +843,7 @@ export class PluginRuntime {
 
   async stopAll(): Promise<void> {
     const loaded = [...this.plugins.values()];
-    this.inventoryChange(() => {
+    await this.inventoryChange(() => {
       this.plugins.clear();
     });
     for (const plugin of loaded) {
@@ -993,7 +993,9 @@ export class PluginRuntime {
             } else if (message.type === "fatal") {
               fail(new Error(message.error));
             } else if (loaded) {
-              this.handleChildMessage(loaded, message);
+              void this.handleChildMessage(loaded, message).catch((err) =>
+                this.logger.error({ err, pluginId }, "Failed to process plugin message"),
+              );
             }
           });
           child.on("close", () => {
@@ -1002,7 +1004,9 @@ export class PluginRuntime {
               fail(new Error(`Plugin ${pluginId} exited during initialization`));
               return;
             }
-            void this.handleChildClose(loaded);
+            void this.handleChildClose(loaded).catch((err) =>
+              this.logger.error({ err, pluginId }, "Failed to process plugin close"),
+            );
           });
           void send(child, {
             type: "initialize",
@@ -1108,7 +1112,10 @@ export class PluginRuntime {
     );
   }
 
-  private handleChildMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {
+  private async handleChildMessage(
+    loaded: LoadedPlugin,
+    message: PluginProcessMessage,
+  ): Promise<void> {
     if (message.type === "voice.event") {
       const emit = loaded.voiceSessions.get(message.sessionId);
       if (message.event.type === "closed") loaded.voiceSessions.delete(message.sessionId);
@@ -1116,7 +1123,7 @@ export class PluginRuntime {
       return;
     }
     if (message.type === "hooks.changed") {
-      this.inventoryChange(() => {
+      await this.inventoryChange(() => {
         loaded.hooks = message.hooks;
       });
       return;
@@ -1432,7 +1439,7 @@ export class PluginRuntime {
     loaded.sessionSocket?.peerClosed();
     const wasPublished = this.plugins.get(loaded.id) === loaded;
     if (wasPublished) {
-      this.inventoryChange(() => {
+      await this.inventoryChange(() => {
         this.plugins.delete(loaded.id);
       });
     }
@@ -1521,10 +1528,13 @@ export class PluginRuntime {
     this.logger.info({ pluginId, ...entry }, "Plugin output");
   }
 
-  private inventoryChange(action: () => void): void {
-    const clock = this.dependencies.admission?.clock;
-    if (clock) clock.run("plugin-lifecycle", action);
-    else action();
+  private async inventoryChange(action: () => void): Promise<void> {
+    const finish = await this.dependencies.admission?.clock?.beginAsync("plugin-lifecycle");
+    try {
+      action();
+    } finally {
+      finish?.();
+    }
   }
 
   private notify(pluginId: string, error?: string): void {
