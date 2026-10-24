@@ -18,6 +18,13 @@ const bifrost = process.env.PASEO_TEST_BIFROST_PLUGIN;
 const gascity = process.env.PASEO_TEST_GASCITY_PLUGIN;
 const snapshot = process.env.PASEO_TEST_AGENT_SNAPSHOT;
 
+function parseJournalRows(raw: string) {
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 // Opt-in release gate. Uses the app's actual deduplication and projected
 // tail/catch-up planners over WebSocket. The live incident showed a peak of
 // 12 failing timeline requests/second; this drives 20/second, including cold
@@ -210,10 +217,36 @@ export default function contribute(server) {
         await delay(Math.max(0, 1000 - (Date.now() - roundStart)));
       }
       stats.elapsed_ms = Date.now() - start;
-      stats.acks = (await readFile(path.join(root, "acks.log"), "utf8")).trim().split("\n").length;
+      // The native journal is the ACK receipt. An RPC reply or the callback's
+      // subsequent diagnostic append can be lost after a durable ACK; neither
+      // can establish whether the journal mutation actually committed.
+      await expect
+        .poll(
+          async () => {
+            const rows = (
+              await Promise.all(
+                (
+                  await readdir(path.join(daemon.paseoHome, "admissions"))
+                )
+                  .filter((name) => name.endsWith(".jsonl"))
+                  .map((name) => readFile(path.join(daemon.paseoHome, "admissions", name), "utf8")),
+              )
+            ).flatMap(parseJournalRows);
+            const latest = new Map(rows.map((row) => [row.id, row]));
+            const expected = rows.filter((row) => row.status === "pending");
+            expect(expected.every((row) => row.undeliveredTo.includes("gascity"))).toBe(true);
+            stats.acks = expected.filter((row) => {
+              const receipt = latest.get(row.id)!;
+              return receipt.status === "opened" && !receipt.undeliveredTo.includes("gascity");
+            }).length;
+            return expected.length - stats.acks;
+          },
+          { timeout: 10000 },
+        )
+        .toBe(0);
       expect(stats.elapsed_ms).toBeGreaterThanOrEqual(duration);
-      expect(stats.polls).toBeGreaterThanOrEqual(20);
-      expect(stats.acks).toBeGreaterThanOrEqual(stats.cold_opens + stats.creates + stats.resumes);
+      expect(stats.polls).toBeGreaterThanOrEqual(Math.max(20, (duration / 1000) * 12));
+      expect(stats.acks).toBe(stats.cold_opens + stats.creates + stats.resumes + 2);
       expect(errors).toEqual([]);
       success = true;
     } finally {
