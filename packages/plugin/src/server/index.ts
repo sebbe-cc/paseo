@@ -23,6 +23,9 @@ export type {
   PluginLifecycleRegistration,
 } from "./lifecycle.js";
 
+export * from "./admission.js";
+export type { PluginBeforeResult } from "./lifecycle.js";
+
 export { spawnProcess, execCommand, terminateProcess } from "./process.js";
 
 export { VoiceProviderEventSchema, VoiceProviderCommandSchema } from "./voice.js";

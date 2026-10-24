@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { PluginHookHandlers } from "./index.js";
+import { PluginHookHandlers, validateBeforeResult } from "./index.js";
 
 const paseo = createPaseoApi(
   new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "lifecycle-unit" }),
@@ -86,6 +86,7 @@ test("session-open hooks reject changes to session identity instead of silently 
       "before",
       "agent.session_open",
       {
+        ...admissionFields,
         agentId: "agent",
         workspaceId: "workspace",
         provider: "claude",
@@ -97,4 +98,89 @@ test("session-open hooks reject changes to session identity instead of silently 
       paseo,
     ),
   ).rejects.toThrow("agent.session_open hooks can only change env");
+});
+
+const admissionFields = {
+  origin: { kind: "plugin" as const, pluginId: "owner" },
+  operation: {
+    id: "op",
+    agentId: "agent",
+    reason: "resume" as const,
+    attempt: 1,
+    supersedes: null,
+    startedAt: "2026-10-23T00:00:00Z",
+  },
+  binding: null,
+  history: { epoch: null, nextSeq: 1, persistence: null },
+};
+const opening = {
+  ...admissionFields,
+  agentId: "agent",
+  workspaceId: "workspace",
+  provider: "claude",
+  cwd: "/project",
+  reason: "resume" as const,
+  purpose: "interactive" as const,
+  env: {},
+};
+
+test.each([
+  ["origin", { kind: "daemon", source: "restore" }],
+  ["operation", { ...admissionFields.operation, id: "forged" }],
+  [
+    "binding",
+    { revision: 1, data: {}, boundAt: "2026-10-23T00:00:00Z", boundBy: admissionFields.origin },
+  ],
+  ["history", { ...admissionFields.history, nextSeq: 99 }],
+])("session-open rejects valid but changed read-only %s", (field, value) => {
+  expect(() =>
+    validateBeforeResult(
+      "agent.session_open",
+      opening,
+      { ...opening, [String(field)]: value },
+      "owner",
+    ),
+  ).toThrow("can only change env");
+});
+
+test("denials preserve their code and stop the before chain", async () => {
+  const hooks = new PluginHookHandlers(() => {}, "owner");
+  hooks.before("agent.session_open", () => ({
+    deny: { code: "RESERVATION_REJECTED", message: "No reservation" },
+  }));
+  hooks.before("agent.session_open", () => {
+    throw new Error("must not run");
+  });
+  const output = await hooks.invoke("op", "before", "agent.session_open", opening, paseo);
+  expect(() => validateBeforeResult("agent.session_open", opening, output, "owner")).toThrow(
+    expect.objectContaining({ code: "RESERVATION_REJECTED", stage: "hook" }),
+  );
+});
+
+test("only the originating plugin can set bindingIntent", () => {
+  const creating = {
+    config: { provider: "claude", cwd: "/project" },
+    origin: admissionFields.origin,
+  };
+  expect(
+    validateBeforeResult(
+      "agent.create",
+      creating,
+      { ...creating, bindingIntent: { pin: true } },
+      "owner",
+    ),
+  ).toMatchObject({ bindingIntent: { pin: true } });
+  expect(() =>
+    validateBeforeResult("agent.create", creating, { ...creating, bindingIntent: {} }, "foreign"),
+  ).toThrow("originating plugin");
+  const client = {
+    ...creating,
+    origin: { kind: "client" as const, principalId: "owner", clientId: "cli", clientType: "cli" },
+  };
+  expect(() =>
+    validateBeforeResult("agent.create", client, { ...client, bindingIntent: {} }, "owner"),
+  ).toThrow("originating plugin");
+  expect(() =>
+    validateBeforeResult("agent.create", client, { ...client, origin: creating.origin }, "owner"),
+  ).toThrow("read-only");
 });

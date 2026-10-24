@@ -1,3 +1,10 @@
+import { isDeepStrictEqual } from "node:util";
+import {
+  PluginRequestOriginSchema,
+  PluginAgentBindingSchema,
+  PluginAdmissionOperationSchema,
+  PluginAdmissionHistorySchema,
+} from "@getpaseo/plugin/server";
 import type { AgentStreamEvent, AgentTimelineItem } from "../../agent/agent-sdk-types.js";
 import { z } from "zod";
 import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
@@ -17,6 +24,8 @@ import type { PersistedWorkspaceRecord } from "../../workspace-registry.js";
 
 export const lifecycleEventNames = [
   "agent.created",
+  "agent.session_opened",
+  "agent.session_open_failed",
   "agent.closed",
   "agent.turn_started",
   "agent.turn_ended",
@@ -29,9 +38,15 @@ export const lifecycleEventNames = [
 export const beforeHookNames = ["agent.create", "agent.session_open", "workspace.create"] as const;
 
 const beforeSchemas = {
-  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true }).strict(),
+  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true })
+    .extend({ origin: PluginRequestOriginSchema, bindingIntent: z.unknown().optional() })
+    .strict(),
   "agent.session_open": z
     .object({
+      origin: PluginRequestOriginSchema,
+      operation: PluginAdmissionOperationSchema,
+      binding: PluginAgentBindingSchema.nullable(),
+      history: PluginAdmissionHistorySchema,
       agentId: z.string(),
       workspaceId: z.string().nullable(),
       provider: z.string(),
@@ -45,6 +60,7 @@ const beforeSchemas = {
 };
 
 export interface PluginLifecycle {
+  admissionRecipients?(): string[];
   emit<Name extends keyof PluginLifecycleEvents>(
     name: Name,
     event: PluginLifecycleEvents[Name],
@@ -134,7 +150,14 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
   name: Name,
   input: PluginBeforeRequests[Name],
   output: unknown,
+  pluginId?: string,
 ): PluginBeforeRequests[Name] {
+  const denial = z
+    .object({ deny: z.object({ code: z.string(), message: z.string() }) })
+    .strict()
+    .safeParse(output);
+  if (denial.success)
+    throw new PluginAdmissionError(denial.data.deny.code, denial.data.deny.message, "hook");
   const result = validateBeforeRequest(name, output);
   if (name === "agent.session_open") {
     const previous = beforeSchemas["agent.session_open"].parse(input);
@@ -145,7 +168,11 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
       previous.provider !== next.provider ||
       previous.cwd !== next.cwd ||
       previous.reason !== next.reason ||
-      previous.purpose !== next.purpose
+      previous.purpose !== next.purpose ||
+      !isDeepStrictEqual(previous.origin, next.origin) ||
+      !isDeepStrictEqual(previous.operation, next.operation) ||
+      !isDeepStrictEqual(previous.binding, next.binding) ||
+      !isDeepStrictEqual(previous.history, next.history)
     ) {
       throw new Error("agent.session_open hooks can only change env");
     }
@@ -153,6 +180,15 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
   if (name === "agent.create") {
     const previous = beforeSchemas["agent.create"].parse(input);
     const next = beforeSchemas["agent.create"].parse(result);
+    if (!isDeepStrictEqual(previous.origin, next.origin))
+      throw new Error("agent.create origin is read-only");
+    if (
+      !isDeepStrictEqual(previous.bindingIntent, next.bindingIntent) &&
+      (next.origin.kind !== "plugin" ||
+        (pluginId !== undefined && next.origin.pluginId !== pluginId))
+    ) {
+      throw new Error("Only the originating plugin can set bindingIntent");
+    }
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create hooks cannot change the workspace directory");
     }
@@ -169,8 +205,15 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
 
   private readonly changed: () => void;
 
-  constructor(changed: () => void) {
+  private pluginId: string | undefined;
+
+  constructor(changed: () => void, pluginId?: string) {
+    this.pluginId = pluginId;
     this.changed = changed;
+  }
+
+  setPluginId(pluginId: string): void {
+    this.pluginId = pluginId;
   }
 
   readonly on: PluginLifecycleRegistration["on"] = (name, handler) => {
@@ -217,9 +260,13 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
             { request: structuredClone(request) },
             { paseo, signal: controller.signal },
           );
-          if (result !== undefined) {
-            request = validateBeforeResult(hookName, request, result);
-          }
+          if (result === undefined) continue;
+          const denial = z
+            .object({ deny: z.object({ code: z.string(), message: z.string() }) })
+            .strict()
+            .safeParse(result);
+          if (denial.success) return denial.data;
+          request = validateBeforeResult(hookName, request, result, this.pluginId);
         }
         return request;
       }
@@ -270,5 +317,15 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       }
       this.changed();
     };
+  }
+}
+
+export class PluginAdmissionError extends Error {
+  readonly code: string;
+  readonly stage: "hook" | "fence" | "provider";
+  constructor(code: string, message: string, stage: "hook" | "fence" | "provider" = "hook") {
+    super(message);
+    this.code = code;
+    this.stage = stage;
   }
 }

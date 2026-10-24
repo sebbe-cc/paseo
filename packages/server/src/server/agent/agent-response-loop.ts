@@ -357,6 +357,7 @@ export async function generateStructuredAgentResponse<T>(
   const { manager, agentConfig, agentId, persistSession, prompt, schema, maxRetries, schemaName } =
     options;
   const agent = await manager.createAgent(agentConfig, agentId, {
+    origin: { kind: "daemon", source: "loop" },
     persistSession,
     workspaceId: undefined,
   });

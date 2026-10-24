@@ -37,6 +37,10 @@ import { PluginProcessMessageSchema } from "./plugin-process-protocol.js";
 import { PluginSessionSocket } from "./session-socket.js";
 import { InternalPluginChild } from "./internal-child.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
+import { PluginAdmissionError } from "./lifecycle/index.js";
+import { admissionApiRequest } from "./admission-api.js";
+import type { AgentStorage } from "../agent/agent-storage.js";
+import { admissionOutcome, type AdmissionJournal } from "./admission-journal.js";
 
 const CLIENT_ENTRY_FILENAMES = ["index.client.ts", "index.client.tsx"] as const;
 const SERVER_ENTRY_FILENAMES = ["index.server.ts", "index.server.tsx"] as const;
@@ -133,6 +137,7 @@ interface RemoteProviderConnection {
 }
 
 interface PluginRuntimeDependencies {
+  admission?: { storage: () => AgentStorage; journal: AdmissionJournal };
   settingsDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
@@ -351,6 +356,7 @@ export class PluginRuntime {
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
     this.plugins.set(pluginId, loaded);
+    this.replayAdmissions(loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
   }
 
@@ -642,8 +648,19 @@ export class PluginRuntime {
   async before<Name extends keyof PluginBeforeRequests>(
     name: Name,
     input: PluginBeforeRequests[Name],
+    fences: readonly { pluginId: string; waitMs: number }[] = [],
   ): Promise<PluginBeforeRequests[Name]> {
     let request = validateBeforeRequest(name, input);
+    for (const fence of fences) await this.waitForAdmission(fence.pluginId, fence.waitMs);
+    // Read the required set and the hook generation together, after all waits.
+    for (const fence of fences) {
+      if (!this.plugins.get(fence.pluginId)?.hooks.before.includes(name))
+        throw new PluginAdmissionError(
+          "PLUGIN_ADMISSION_UNAVAILABLE",
+          `Admission plugin ${fence.pluginId} is unavailable`,
+          "fence",
+        );
+    }
     const plugins = [...this.plugins.values()].sort((left, right) => {
       return left.id.localeCompare(right.id);
     });
@@ -651,22 +668,117 @@ export class PluginRuntime {
       if (!loaded.hooks.before.includes(name)) {
         continue;
       }
+      const scoped = await this.beforeRequestForPlugin(name, request, loaded.id);
       try {
+        if (this.plugins.get(loaded.id) !== loaded)
+          throw new PluginAdmissionError(
+            "PLUGIN_ADMISSION_UNAVAILABLE",
+            `Plugin ${loaded.id} was unloaded`,
+            "fence",
+          );
         const output = await this.request(loaded, {
           type: "hook",
           requestId: randomUUID(),
           kind: "before",
           name,
-          input: request,
+          input: scoped,
         });
-        request = validateBeforeResult(name, request, output);
+        const transformed = validateBeforeResult(name, scoped, output, loaded.id);
+        if (this.plugins.get(loaded.id) !== loaded)
+          throw new PluginAdmissionError(
+            "PLUGIN_ADMISSION_UNAVAILABLE",
+            `Plugin ${loaded.id} was unloaded`,
+            "fence",
+          );
+        if (name === "agent.session_open") {
+          request = validateBeforeRequest(name, {
+            ...request,
+            env: validateBeforeRequest("agent.session_open", transformed).env,
+          });
+        } else if (name === "agent.create") {
+          const creating = validateBeforeRequest("agent.create", request);
+          const next = validateBeforeRequest("agent.create", transformed);
+          const own = creating.origin.kind === "plugin" && creating.origin.pluginId === loaded.id;
+          request = validateBeforeRequest(name, {
+            ...next,
+            bindingIntent: own ? next.bindingIntent : creating.bindingIntent,
+          });
+        } else request = transformed;
       } catch (error) {
-        throw new Error(`Plugin ${loaded.id} before ${name} failed: ${describeError(error)}`, {
-          cause: error,
-        });
+        if (error instanceof PluginAdmissionError) throw error;
+        throw new PluginAdmissionError(
+          "PLUGIN_ADMISSION_HOOK_FAILED",
+          `Plugin ${loaded.id} before ${name} failed: ${describeError(error)}`,
+        );
       }
     }
     return request;
+  }
+
+  private async beforeRequestForPlugin<Name extends keyof PluginBeforeRequests>(
+    name: Name,
+    request: PluginBeforeRequests[Name],
+    pluginId: string,
+  ): Promise<PluginBeforeRequests[Name]> {
+    let scoped = request;
+    if (name === "agent.session_open") {
+      const opening = validateBeforeRequest("agent.session_open", request);
+      const intentBinding =
+        opening.origin.kind === "plugin" && opening.origin.pluginId === pluginId
+          ? opening.binding
+          : null;
+      const binding =
+        (await this.dependencies.admission?.storage().getBinding(opening.agentId, pluginId)) ??
+        intentBinding;
+      scoped = validateBeforeRequest(name, { ...opening, binding });
+    } else if (name === "agent.create") {
+      const creating = validateBeforeRequest("agent.create", request);
+      if (creating.origin.kind !== "plugin" || creating.origin.pluginId !== pluginId) {
+        scoped = validateBeforeRequest(name, { ...creating, bindingIntent: undefined });
+      }
+    }
+    return scoped;
+  }
+
+  async waitForAdmission(pluginId: string, waitMs: number): Promise<void> {
+    const deadline = Date.now() + waitMs;
+    while (!this.plugins.get(pluginId)?.hooks.before.includes("agent.session_open")) {
+      if (Date.now() >= deadline)
+        throw new PluginAdmissionError(
+          "PLUGIN_ADMISSION_UNAVAILABLE",
+          `Admission plugin ${pluginId} is unavailable`,
+          "fence",
+        );
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    }
+  }
+
+  private replayAdmissions(loaded: LoadedPlugin): void {
+    const journal = this.dependencies.admission?.journal;
+    if (!journal) return;
+    const replay = journal
+      .undelivered(loaded.id)
+      .then(async (records) => {
+        for (const record of records) {
+          if (this.plugins.get(loaded.id) !== loaded) return undefined;
+          if (!record.undeliveredTo.includes(loaded.id)) continue;
+          const outcome = admissionOutcome(record);
+          if (loaded.hooks.events.includes(outcome.name))
+            await this.request(loaded, {
+              type: "hook",
+              requestId: randomUUID(),
+              kind: "event",
+              name: outcome.name,
+              input: outcome.event,
+            });
+        }
+        return undefined;
+      })
+      .catch((error) =>
+        this.appendLog(loaded.id, "stderr", `Admission replay failed: ${describeError(error)}`),
+      );
+    this.pendingEvents.add(replay);
+    void replay.finally(() => this.pendingEvents.delete(replay));
   }
 
   async getProviderCatalogCacheKey(
@@ -817,7 +929,32 @@ export class PluginRuntime {
               return;
             }
             const message = parsed.data;
-            if (message.type === "paseo_frame") {
+            if (message.type === "admission.request") {
+              const admission = this.dependencies.admission;
+              const response = admission
+                ? admissionApiRequest(
+                    pluginId,
+                    message.request,
+                    admission.storage(),
+                    admission.journal,
+                  )
+                : Promise.reject(new Error("Admission storage is unavailable"));
+              void response
+                .then(
+                  (output) =>
+                    send(child, { type: "admission.result", requestId: message.requestId, output }),
+                  (error) =>
+                    send(child, {
+                      type: "admission.result",
+                      requestId: message.requestId,
+                      error: {
+                        code: typeof error.code === "string" ? error.code : "ADMISSION_API_ERROR",
+                        message: describeError(error),
+                      },
+                    }),
+                )
+                .catch((error) => this.appendLog(pluginId, "stderr", describeError(error)));
+            } else if (message.type === "paseo_frame") {
               this.routePluginFrame({
                 session,
                 pluginId,

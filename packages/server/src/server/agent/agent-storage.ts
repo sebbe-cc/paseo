@@ -1,3 +1,4 @@
+import { PluginAgentBindingSchema, type PluginAgentBinding } from "@getpaseo/plugin/server";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -75,6 +76,8 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  pluginBindings: z.record(z.string(), PluginAgentBindingSchema).optional(),
+  pluginBindingRevisions: z.record(z.string(), z.number().int()).optional(),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -156,7 +159,11 @@ export class AgentStorage {
   }
 
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    return this.queueRecordMutation(record.id, () => record);
+    return this.queueRecordMutation(record.id, (existing) => ({
+      ...record,
+      pluginBindings: existing?.pluginBindings ?? record.pluginBindings,
+      pluginBindingRevisions: existing?.pluginBindingRevisions ?? record.pluginBindingRevisions,
+    }));
   }
 
   private queueRecordMutation(
@@ -164,15 +171,17 @@ export class AgentStorage {
     mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
-    const next = prev.then(async () => {
-      if (this.deleting.has(agentId)) {
-        return undefined;
-      }
+    const next = prev
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.deleting.has(agentId)) {
+          return undefined;
+        }
 
-      const record = mutate(this.cache.get(agentId) ?? null);
-      await this.writeRecord(record);
-      return undefined;
-    });
+        const record = mutate(this.cache.get(agentId) ?? null);
+        await this.writeRecord(record);
+        return undefined;
+      });
 
     const tracked = next.finally(() => {
       if (this.pendingWrites.get(agentId) === tracked) {
@@ -239,7 +248,11 @@ export class AgentStorage {
 
   async applySnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean },
+    options?: {
+      title?: string | null;
+      internal?: boolean;
+      initialBindings?: Record<string, PluginAgentBinding>;
+    },
   ): Promise<void> {
     await this.load();
     const hasTitleOverride =
@@ -259,18 +272,81 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
+      record.pluginBindings = existing?.pluginBindings ?? options?.initialBindings;
+      record.pluginBindingRevisions = existing?.pluginBindingRevisions;
       return record;
     });
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {
     await this.load();
-    await this.waitForPendingWrite(agentId);
+    await this.queueRecordMutation(agentId, (record) => {
+      if (!record) throw new Error(`Agent ${agentId} not found`);
+      return { ...record, title };
+    });
+  }
+
+  async getBinding(agentId: string, pluginId: string): Promise<PluginAgentBinding | null> {
     const record = await this.get(agentId);
-    if (!record) {
-      throw new Error(`Agent ${agentId} not found`);
-    }
-    await this.upsert({ ...record, title });
+    return structuredClone(record?.pluginBindings?.[pluginId] ?? null);
+  }
+
+  async listBindings(pluginId: string, since?: string) {
+    const records = await this.list();
+    return records.flatMap((record) => {
+      const binding = record.pluginBindings?.[pluginId];
+      return binding && (!since || binding.boundAt >= since)
+        ? [{ agentId: record.id, binding: structuredClone(binding) }]
+        : [];
+    });
+  }
+
+  async setBinding(
+    agentId: string,
+    pluginId: string,
+    data: unknown,
+    expectRevision: number | null,
+  ): Promise<PluginAgentBinding> {
+    const payload = validateBindingData(data);
+    await this.load();
+    let binding!: PluginAgentBinding;
+    await this.queueRecordMutation(agentId, (record) => {
+      if (!record) throw new Error(`Agent ${agentId} not found`);
+      const previous = record.pluginBindings?.[pluginId];
+      if ((previous?.revision ?? null) !== expectRevision) throw new BindingConflictError();
+      binding = {
+        revision: (record.pluginBindingRevisions?.[pluginId] ?? previous?.revision ?? 0) + 1,
+        data: payload,
+        boundAt: new Date().toISOString(),
+        boundBy: { kind: "plugin", pluginId },
+      };
+      return {
+        ...record,
+        pluginBindings: { ...record.pluginBindings, [pluginId]: binding },
+        pluginBindingRevisions: { ...record.pluginBindingRevisions, [pluginId]: binding.revision },
+      };
+    });
+    if (!binding) throw new Error(`Agent ${agentId} is being deleted`);
+    return structuredClone(binding);
+  }
+
+  async clearBinding(agentId: string, pluginId: string, expectRevision: number): Promise<void> {
+    await this.load();
+    await this.queueRecordMutation(agentId, (record) => {
+      if (!record) throw new Error(`Agent ${agentId} not found`);
+      const previous = record.pluginBindings?.[pluginId];
+      if (!previous || previous.revision !== expectRevision) throw new BindingConflictError();
+      const bindings = { ...record.pluginBindings };
+      delete bindings[pluginId];
+      return {
+        ...record,
+        pluginBindings: bindings,
+        pluginBindingRevisions: {
+          ...record.pluginBindingRevisions,
+          [pluginId]: previous.revision + 1,
+        },
+      };
+    });
   }
 
   async flush(): Promise<void> {
@@ -421,10 +497,6 @@ export class AgentStorage {
     }
     this.daemonExecutionKeysByAgentId.delete(agentId);
   }
-
-  private async waitForPendingWrite(agentId: string): Promise<void> {
-    await (this.pendingWrites.get(agentId) ?? Promise.resolve()).catch(() => undefined);
-  }
 }
 
 function projectDirNameFromCwd(cwd: string): string {
@@ -438,4 +510,17 @@ function projectDirNameFromCwd(cwd: string): string {
     return sanitizedRoot || "root";
   }
   return prefix + withoutRoot.replace(/[\\/]+/g, "-");
+}
+
+export class BindingConflictError extends Error {
+  readonly code = "PLUGIN_BINDING_CONFLICT";
+  constructor() {
+    super("Plugin binding revision conflict");
+  }
+}
+export function validateBindingData(data: unknown): unknown {
+  const parsed = z.json().parse(data);
+  if (Buffer.byteLength(JSON.stringify(parsed)) > 16 * 1024)
+    throw new Error("Plugin binding exceeds 16 KiB");
+  return structuredClone(parsed);
 }

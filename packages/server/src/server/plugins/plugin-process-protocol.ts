@@ -18,6 +18,7 @@ import {
   ProviderLaunchSchema,
 } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
+import { AdmissionApiRequestSchema, type AdmissionApiRequest } from "./admission-api.js";
 
 export interface PluginProviderMetadata {
   requiresConfiguration?: boolean;
@@ -59,6 +60,12 @@ export type PluginProcessRequest =
       options: ProviderCatalogOptions;
     }
   | { type: "hook"; requestId: string; kind: "event" | "before"; name: string; input: unknown }
+  | {
+      type: "admission.result";
+      requestId: string;
+      output?: unknown;
+      error?: { code: string; message: string };
+    }
   | { type: "hook.cancel"; requestId: string }
   | { type: "usage.fetch"; requestId: string; sourceId: string; input: unknown }
   | { type: "usage.discover"; requestId: string; sourceId: string; scope: UsageScope }
@@ -95,6 +102,7 @@ export type PluginProcessMessage =
     }
   | { type: "result"; requestId: string; output: unknown }
   | { type: "error"; requestId: string; error: string }
+  | { type: "admission.request"; requestId: string; request: AdmissionApiRequest }
   | { type: "fatal"; error: string }
   | {
       type: "provider.connected";
@@ -210,6 +218,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
         input: z.unknown(),
       })
       .strict(),
+    z
+      .object({
+        type: z.literal("admission.result"),
+        requestId: z.string(),
+        output: z.unknown().optional(),
+        error: z.object({ code: z.string(), message: z.string() }).optional(),
+      })
+      .strict(),
     z.object({ type: z.literal("hook.cancel"), requestId: z.string() }).strict(),
     z
       .object({
@@ -288,6 +304,13 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
       .strict(),
     z
       .object({ type: z.literal("error"), requestId: z.string().min(1), error: z.string() })
+      .strict(),
+    z
+      .object({
+        type: z.literal("admission.request"),
+        requestId: z.string(),
+        request: AdmissionApiRequestSchema,
+      })
       .strict(),
     z.object({ type: z.literal("fatal"), error: z.string() }).strict(),
     z
