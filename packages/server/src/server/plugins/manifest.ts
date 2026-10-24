@@ -36,6 +36,7 @@ const PluginManifestSchema = z.object({
       fence: z.literal("bound-agents").optional(),
       fenceWaitMs: z.number().int().min(0).max(30000).default(20000),
       durableEvents: z.boolean().default(false),
+      recipients: z.enum(["global", "bound-agents"]).default("global"),
     })
     .strict()
     .optional(),

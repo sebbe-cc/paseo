@@ -1,8 +1,13 @@
+import { currentRequestOrigin } from "./request-origin.js";
 import type { HostInventoryClock } from "./host-inventory-clock.js";
 import type { HostInventory } from "./host-inventory.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AdmissionJournal } from "./admission-journal.js";
-import { validateBeforeRequest, type PluginLifecycle } from "./lifecycle/index.js";
+import {
+  PluginAdmissionError,
+  validateBeforeRequest,
+  type PluginLifecycle,
+} from "./lifecycle/index.js";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
 import type pino from "pino";
@@ -159,9 +164,16 @@ export class PluginService {
     await this.dependencies.admission?.journal.initialize();
     await this.dependencies.admission?.storage().initialize();
     const config = this.configStore.get();
-    if (!config.pluginsEnabled) return;
+    const journal = this.dependencies.admission?.journal;
+    for (const [id, policy] of Object.entries(journal?.boundPolicies() ?? {})) {
+      this.admissionPolicies.set(id, {
+        recipients: "bound-agents",
+        durableEvents: true,
+        fenceWaitMs: policy.fenceWaitMs ?? 20000,
+        ...(policy.fenceWaitMs === undefined ? {} : { fence: "bound-agents" as const }),
+      });
+    }
     for (const [id, source] of Object.entries(config.plugins ?? {})) {
-      if (source.enabled === false) continue;
       try {
         const manifest = await readPluginManifest(expandTilde(source.path));
         if (manifest.admission) this.admissionPolicies.set(id, manifest.admission);
@@ -173,22 +185,35 @@ export class PluginService {
             fence: "bound-agents",
             fenceWaitMs: 20000,
             durableEvents: true,
+            recipients: "global",
           });
       }
+      const policy = this.admissionPolicies.get(id);
+      if (policy?.recipients === "bound-agents")
+        await journal?.rememberBoundPolicy(id, policy.fence ? policy.fenceWaitMs : undefined);
     }
   }
 
-  readonly admissionRecipients = (): string[] => {
+  readonly admissionRecipients: NonNullable<PluginLifecycle["admissionRecipients"]> = (subject) => {
     const config = this.configStore.get();
-    if (!config.pluginsEnabled) return [];
-    return [...this.admissionPolicies]
-      .filter(
-        ([id, policy]) =>
-          config.plugins?.[id]?.enabled !== false &&
-          config.plugins?.[id] &&
-          (policy.durableEvents || policy.fence),
+    const recipients: string[] = [];
+    const boundRecipients: ReturnType<
+      NonNullable<PluginLifecycle["admissionRecipients"]>
+    >["boundRecipients"] = {};
+    for (const [id, policy] of this.admissionPolicies) {
+      if (!(policy.durableEvents || policy.fence)) continue;
+      if (policy.recipients === "bound-agents") {
+        if (!Object.hasOwn(subject.bindings, id)) continue;
+        boundRecipients[id] = structuredClone(subject.bindings[id]!);
+      } else if (
+        !config.pluginsEnabled ||
+        !config.plugins?.[id] ||
+        config.plugins[id].enabled === false
       )
-      .map(([id]) => id);
+        continue;
+      recipients.push(id);
+    }
+    return { recipients, boundRecipients };
   };
 
   readonly before: PluginLifecycle["before"] = async (name, request) => {
@@ -201,8 +226,20 @@ export class PluginService {
         bindings[opening.origin.pluginId] = opening.binding;
       const config = this.configStore.get();
       for (const id of Object.keys(bindings)) {
-        if (!config.pluginsEnabled || !config.plugins?.[id] || config.plugins[id].enabled === false)
+        const retained = this.dependencies.admission?.journal.boundPolicies()[id];
+        const enabled =
+          config.pluginsEnabled && !!config.plugins?.[id] && config.plugins[id].enabled !== false;
+        if (retained?.fenceWaitMs !== undefined) {
+          if (!enabled)
+            throw new PluginAdmissionError(
+              "PLUGIN_ADMISSION_UNAVAILABLE",
+              `Admission plugin ${id} is disabled or removed`,
+              "fence",
+            );
+          fences.push({ pluginId: id, waitMs: retained.fenceWaitMs });
           continue;
+        }
+        if (!enabled) continue;
         const policy = this.admissionPolicies.get(id);
         if (policy?.fence === "bound-agents")
           fences.push({ pluginId: id, waitMs: policy.fenceWaitMs });
@@ -211,6 +248,12 @@ export class PluginService {
     if (this.runtime.before) {
       return this.runtime.before(name, request, fences);
     }
+    if (fences.length)
+      throw new PluginAdmissionError(
+        "PLUGIN_ADMISSION_UNAVAILABLE",
+        "Admission runtime is unavailable",
+        "fence",
+      );
     return request;
   };
 
@@ -534,7 +577,28 @@ export class PluginService {
     });
   }
 
-  async removePlugin(pluginId: string): Promise<void> {
+  async removePlugin(pluginId: string, releaseAdmissions?: string): Promise<void> {
+    const origin = currentRequestOrigin();
+    if (releaseAdmissions !== undefined) {
+      if (origin.kind !== "client")
+        throw new Error("Only an operator client can release admissions");
+      if (!releaseAdmissions.trim() || releaseAdmissions.length > 2000)
+        throw new Error("A bounded release reason is required");
+      if (!Object.hasOwn(this.dependencies.admission?.journal.boundPolicies() ?? {}, pluginId))
+        throw new Error("Only a bound-recipient plugin can be released");
+    }
+    if (!this.configStore.get().plugins?.[pluginId] && releaseAdmissions !== undefined) {
+      const stopping = this.stopPlugin(pluginId);
+      await this.enqueue(async () => {
+        await stopping;
+        await this.dependencies.admission!.journal.releaseBoundRecipient(
+          pluginId,
+          origin,
+          releaseAdmissions,
+        );
+      });
+      return;
+    }
     this.requireSource(pluginId);
     const stopping = this.stopPlugin(pluginId);
     const sources = { ...this.configStore.get().plugins };
@@ -542,6 +606,12 @@ export class PluginService {
     this.configStore.patch({ plugins: sources });
     await this.enqueue(async () => {
       await stopping;
+      if (releaseAdmissions !== undefined)
+        await this.dependencies.admission!.journal.releaseBoundRecipient(
+          pluginId,
+          origin,
+          releaseAdmissions,
+        );
       this.runtime.clearLogs(pluginId);
       this.errors.delete(pluginId);
       this.notify(pluginId);

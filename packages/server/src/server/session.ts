@@ -522,7 +522,7 @@ export interface SessionOptions {
     reloadPlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
     enablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
     disablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    removePlugin(pluginId: string): Promise<void>;
+    removePlugin(pluginId: string, releaseAdmissions?: string): Promise<void>;
     subscribe(listener: (pluginId: string) => void): () => void;
     subscribeSettings?(listener: (pluginId: string, settingsId: string) => void): () => void;
     catalog(): Array<{ id: string; clientBundle: string }>;
@@ -2511,7 +2511,7 @@ export class Session {
     }
     if (msg.type === "plugin.remove.request") {
       if (!this.pluginRuntime) throw new Error("Plugin service is unavailable");
-      return this.pluginRuntime.removePlugin(msg.pluginId).then(() => {
+      return this.pluginRuntime.removePlugin(msg.pluginId, msg.releaseAdmissions).then(() => {
         this.emit({ type: "plugin.remove.response", payload: { requestId: msg.requestId } });
         return undefined;
       });

@@ -5,6 +5,8 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
   PluginAdmissionRecordSchema,
+  PluginAgentBindingSchema,
+  PluginRequestOriginSchema,
   PluginAdmissionOperationSchema,
   type PluginAdmissionRecord,
   type PluginHookAgent,
@@ -21,7 +23,23 @@ const JournalRecordSchema = PluginAdmissionRecordSchema.extend({
     title: z.string().nullable(),
   }),
   previousEpoch: z.string().nullable(),
+  boundRecipients: z.record(z.string(), PluginAgentBindingSchema).optional(),
+  recipientReleases: z
+    .array(
+      z.object({
+        pluginId: z.string(),
+        at: z.string(),
+        reason: z.string(),
+        origin: PluginRequestOriginSchema,
+        binding: PluginAgentBindingSchema,
+      }),
+    )
+    .optional(),
 });
+const BoundPoliciesSchema = z.record(
+  z.string(),
+  z.object({ fenceWaitMs: z.number().int().min(0).max(30000).optional() }),
+);
 export type AdmissionJournalRecord = z.infer<typeof JournalRecordSchema>;
 
 function operationId(): string {
@@ -36,6 +54,7 @@ function operationId(): string {
 }
 
 export class AdmissionJournal {
+  private policies: z.infer<typeof BoundPoliciesSchema> = {};
   private records = new Map<string, AdmissionJournalRecord>();
   private attempts = new Map<string, number>();
   private outcomes = new Set<string>();
@@ -60,6 +79,13 @@ export class AdmissionJournal {
 
   private async load(): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true });
+    try {
+      this.policies = BoundPoliciesSchema.parse(
+        JSON.parse(await fs.readFile(path.join(this.directory, "bound-policies.json"), "utf8")),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const files = (await fs.readdir(this.directory))
       .filter((file) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(file))
       .sort();
@@ -122,7 +148,12 @@ export class AdmissionJournal {
   private async prune(files: string[]): Promise<void> {
     const cutoff = new Date(Date.now() - this.retentionDays * 86_400_000).toISOString();
     for (const [id, record] of this.records) {
-      if (record.finishedAt && record.finishedAt < cutoff && !record.undeliveredTo.length) {
+      if (
+        record.finishedAt &&
+        record.finishedAt < cutoff &&
+        !record.undeliveredTo.length &&
+        !record.recipientReleases?.length
+      ) {
         this.checkpointAnchor = record;
         this.records.delete(id);
         this.outcomes.delete(id);
@@ -140,7 +171,12 @@ export class AdmissionJournal {
   private async boundFailures(): Promise<void> {
     const counts = new Map<string, number>();
     for (const record of [...this.records.values()].toReversed()) {
-      if (record.status !== "failed" || record.undeliveredTo.length) continue;
+      if (
+        record.status !== "failed" ||
+        record.undeliveredTo.length ||
+        record.recipientReleases?.length
+      )
+        continue;
       const count = (counts.get(record.agentId) ?? 0) + 1;
       counts.set(record.agentId, count);
       if (count <= 64) continue;
@@ -241,12 +277,99 @@ export class AdmissionJournal {
     return result;
   }
 
+  boundPolicies(): z.infer<typeof BoundPoliciesSchema> {
+    if (!this.loaded) throw new Error("Admission journal has not initialized");
+    return structuredClone(this.policies);
+  }
+
+  rememberBoundPolicy(pluginId: string, fenceWaitMs?: number): Promise<void> {
+    return this.mutate(async () => {
+      // A removed/disabled manifest cannot revoke a fence on durable bindings.
+      const prior = Object.hasOwn(this.policies, pluginId) ? this.policies[pluginId] : undefined;
+      const policy = { fenceWaitMs: fenceWaitMs ?? prior?.fenceWaitMs };
+      if (prior && prior.fenceWaitMs === policy.fenceWaitMs) return;
+      const next = { ...this.policies, [pluginId]: policy };
+      const filename = path.join(this.directory, "bound-policies.json");
+      const file = await fs.open(filename + ".tmp", "w", 0o600);
+      try {
+        await file.writeFile(JSON.stringify(next));
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await fs.rename(filename + ".tmp", filename);
+      if (process.platform !== "win32") {
+        const directory = await fs.open(this.directory, "r");
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
+      }
+      this.policies = next;
+    });
+  }
+
+  addBoundRecipients(
+    id: string,
+    bindings: NonNullable<AdmissionJournalRecord["boundRecipients"]>,
+  ): Promise<AdmissionJournalRecord> {
+    return this.mutate(async () => {
+      const record = this.records.get(id);
+      if (!record || record.status !== "pending") throw new Error("Admission is not pending");
+      const next = {
+        ...record,
+        boundRecipients: { ...record.boundRecipients, ...bindings },
+        undeliveredTo: [...new Set([...record.undeliveredTo, ...Object.keys(bindings)])],
+      };
+      await this.append(next);
+      return structuredClone(next);
+    }, id);
+  }
+
+  releaseBoundRecipient(
+    pluginId: string,
+    origin: PluginRequestOrigin,
+    reason: string,
+  ): Promise<void> {
+    return this.mutate(async () => {
+      if (origin.kind !== "client" || !reason.trim() || reason.length > 2000)
+        throw new Error("An operator and bounded release reason are required");
+      if (!Object.hasOwn(this.policies, pluginId))
+        throw new Error("Plugin has no bound recipient policy");
+      const records = [...this.records.values()].filter(
+        (record) =>
+          record.undeliveredTo.includes(pluginId) &&
+          Object.hasOwn(record.boundRecipients ?? {}, pluginId),
+      );
+      if (records.some((record) => record.status === "pending"))
+        throw new Error("Bound admission is still pending; retry after it finishes");
+      for (const record of records) {
+        await this.append({
+          ...record,
+          undeliveredTo: record.undeliveredTo.filter((id) => id !== pluginId),
+          recipientReleases: [
+            ...(record.recipientReleases ?? []),
+            {
+              pluginId,
+              at: new Date().toISOString(),
+              origin,
+              reason,
+              binding: record.boundRecipients![pluginId]!,
+            },
+          ],
+        });
+      }
+    });
+  }
+
   begin(input: {
     agent: PluginHookAgent;
     reason: PluginAdmissionRecord["reason"];
     origin: PluginRequestOrigin;
     previousEpoch: string | null;
     recipients: string[];
+    boundRecipients?: AdmissionJournalRecord["boundRecipients"];
   }): Promise<AdmissionJournalRecord> {
     return this.mutate(async () => {
       const earlier = [...this.records.values()].filter(
@@ -270,6 +393,7 @@ export class AdmissionJournal {
         error: null,
         origin: input.origin,
         undeliveredTo: input.recipients,
+        ...(input.boundRecipients ? { boundRecipients: input.boundRecipients } : {}),
         agent: input.agent,
         previousEpoch: input.previousEpoch,
       };

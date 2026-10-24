@@ -1559,7 +1559,9 @@ function pluginIdRequest<const Type extends string>(type: Type) {
 export const PluginReloadRequestSchema = pluginIdRequest("plugin.reload.request");
 export const PluginEnableRequestSchema = pluginIdRequest("plugin.enable.request");
 export const PluginDisableRequestSchema = pluginIdRequest("plugin.disable.request");
-export const PluginRemoveRequestSchema = pluginIdRequest("plugin.remove.request");
+export const PluginRemoveRequestSchema = pluginIdRequest("plugin.remove.request").extend({
+  releaseAdmissions: z.string().trim().min(1).max(2000).optional(),
+});
 
 export const PluginRpcInvokeRequestSchema = z.object({
   type: z.literal("plugin.rpc.invoke.request"),
