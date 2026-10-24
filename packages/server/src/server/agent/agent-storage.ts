@@ -178,30 +178,30 @@ export class AgentStorage {
     mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
-    const finish = this.inventoryClock?.begin("agent-records");
     const next = prev
       .catch(() => undefined)
       .then(async () => {
-        if (this.deleting.has(agentId)) {
-          return undefined;
-        }
-
-        const record = mutate(this.cache.get(agentId) ?? null);
+        const finish = await this.inventoryClock?.beginAsync("agent-records");
         try {
-          await this.writeRecord(record);
-        } catch (error) {
-          this.inventoryComplete = false;
-          throw error;
+          if (this.deleting.has(agentId)) {
+            return undefined;
+          }
+
+          const record = mutate(this.cache.get(agentId) ?? null);
+          try {
+            await this.writeRecord(record);
+          } catch (error) {
+            this.inventoryComplete = false;
+            throw error;
+          }
+          return undefined;
+        } finally {
+          finish?.();
         }
-        return undefined;
       });
 
     const tracked = next.finally(() => {
-      try {
-        finish?.();
-      } finally {
-        if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
-      }
+      if (this.pendingWrites.get(agentId) === tracked) this.pendingWrites.delete(agentId);
     });
 
     this.pendingWrites.set(agentId, tracked);
@@ -238,7 +238,7 @@ export class AgentStorage {
 
   async remove(agentId: string): Promise<void> {
     await this.load();
-    const finish = this.inventoryClock?.begin("agent-records");
+    const finish = await this.inventoryClock?.beginAsync("agent-records");
     try {
       this.beginDelete(agentId);
       await (this.pendingWrites.get(agentId) ?? Promise.resolve());

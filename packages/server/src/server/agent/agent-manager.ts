@@ -1,3 +1,5 @@
+import { HostFenceError } from "../plugins/host-inventory-fence.js";
+import { AGENT_FENCE_QUEUE_BYTES, GLOBAL_FENCE_QUEUE_BYTES } from "./agent-stream-coalescer.js";
 import type { HostInventoryClock } from "../plugins/host-inventory-clock.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PluginAgentBinding, PluginAdmissionRecord } from "@getpaseo/plugin/server";
@@ -763,6 +765,9 @@ export class AgentManager {
   private readonly providerSubagents = new ProviderSubagentStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
+  private readonly sessionEventBytes = new Map<string, number>();
+  private pendingSessionEventBytes = 0;
+  private readonly fenceSaturatedAgents = new Set<string>();
   private readonly steerEventBarriers = new Map<string, SteerEventBarrier>();
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
   private readonly runs = new AgentRunState();
@@ -820,9 +825,16 @@ export class AgentManager {
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
       timers: { setTimeout, clearTimeout },
+      onError: (err, agentId) => this.logger.warn({ err, agentId }, "Agent timeline flush failed"),
+      onSaturated: (agentId, error) => this.failFenceTurn(agentId, error),
       onFlush: ({ agentId, item, provider, turnId }) => {
-        const event = this.recordAndDispatchTimelineItem(agentId, item, provider, turnId);
-        this.notifyForegroundTurnWaiters(agentId, event);
+        const finish = this.inventoryClock?.begin("live-history");
+        try {
+          const event = this.recordAndDispatchTimelineItem(agentId, item, provider, turnId);
+          this.notifyForegroundTurnWaiters(agentId, event);
+        } finally {
+          finish?.();
+        }
       },
     });
     this.updateProviderRegistry({
@@ -2595,25 +2607,30 @@ export class AgentManager {
     agentId: string,
     item: AgentTimelineItem,
   ): Promise<{ seq: number; epoch: string }> {
-    const agent = this.requireAgent(agentId);
-    item = limitAgentTimelineItemContent(item);
-    this.touchUpdatedAt(agent);
-    const row = this.recordTimeline(agentId, item);
-    this.dispatchStream(
-      agentId,
-      {
-        type: "timeline",
-        item,
-        provider: agent.provider,
-      },
-      {
-        seq: row.seq,
-        epoch: this.timelineStore.getEpoch(agentId),
-        timestamp: row.timestamp,
-      },
-    );
-    await this.persistSnapshot(agent);
-    return { seq: row.seq, epoch: this.timelineStore.getEpoch(agentId) };
+    const finish = await this.inventoryClock?.beginAsync("live-history");
+    try {
+      const agent = this.requireAgent(agentId);
+      item = limitAgentTimelineItemContent(item);
+      this.touchUpdatedAt(agent);
+      const row = this.recordTimeline(agentId, item);
+      this.dispatchStream(
+        agentId,
+        {
+          type: "timeline",
+          item,
+          provider: agent.provider,
+        },
+        {
+          seq: row.seq,
+          epoch: this.timelineStore.getEpoch(agentId),
+          timestamp: row.timestamp,
+        },
+      );
+      await this.persistSnapshot(agent);
+      return { seq: row.seq, epoch: this.timelineStore.getEpoch(agentId) };
+    } finally {
+      finish?.();
+    }
   }
 
   async emitLiveTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
@@ -3981,10 +3998,30 @@ export class AgentManager {
       pendingRun.stagedEvents.push(event);
       return;
     }
+    if (this.fenceSaturatedAgents.has(agentId)) return;
+    event = limitAgentStreamEventContent(event);
+    const bytes = JSON.stringify(event).length * 2 + 256;
+    const agentBytes = this.sessionEventBytes.get(agentId) ?? 0;
+    if (
+      agentBytes + bytes > AGENT_FENCE_QUEUE_BYTES ||
+      this.pendingSessionEventBytes + bytes > GLOBAL_FENCE_QUEUE_BYTES
+    ) {
+      this.failFenceTurn(
+        agentId,
+        new HostFenceError(
+          "HOST_FENCE_SATURATED",
+          "Session event queue exceeded its memory limit; turn interrupted",
+        ),
+      );
+      return;
+    }
+    this.sessionEventBytes.set(agentId, agentBytes + bytes);
+    this.pendingSessionEventBytes += bytes;
     const previous = this.sessionEventTails.get(agentId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(async () => {
+        if (this.fenceSaturatedAgents.has(agentId)) return;
         const current = this.agents.get(agentId);
         if (!current) {
           return;
@@ -4006,6 +4043,8 @@ export class AgentManager {
         return;
       })
       .catch((err) => {
+        if (err instanceof HostFenceError && err.code === "HOST_FENCE_SATURATED")
+          this.failFenceTurn(agentId, err);
         this.logger.error(
           { err, agentId, eventType: event.type },
           "Failed to process session event",
@@ -4014,11 +4053,79 @@ export class AgentManager {
 
     this.sessionEventTails.set(agentId, next);
     this.trackBackgroundTask(next);
-    void next.finally(() => {
+    void next.then(() => {
+      this.pendingSessionEventBytes -= bytes;
+      const remaining = (this.sessionEventBytes.get(agentId) ?? bytes) - bytes;
+      if (remaining === 0) this.sessionEventBytes.delete(agentId);
+      else this.sessionEventBytes.set(agentId, remaining);
       if (this.sessionEventTails.get(agentId) === next) {
         this.sessionEventTails.delete(agentId);
       }
+      return undefined;
     });
+  }
+
+  private failFenceTurn(agentId: string, error: HostFenceError): void {
+    if (this.fenceSaturatedAgents.has(agentId)) return;
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.session === null) return;
+    this.fenceSaturatedAgents.add(agentId);
+    this.agentStreamCoalescer.discard(agentId);
+    const turnId = agent.activeForegroundTurnId ?? undefined;
+    this.logger.error(
+      { err: error, agentId, code: error.code },
+      "Host publication saturated agent queue; interrupting turn",
+    );
+    void this.interruptSession(agent.session, agentId).catch((err) => {
+      this.logger.error({ err, agentId }, "Failed to interrupt saturated turn");
+    });
+    // One small failure marker survives saturation. Ordinary queued events are
+    // released by their existing tails; no new provider payloads are retained.
+    const previous = this.sessionEventTails.get(agentId) ?? Promise.resolve();
+    const failure = previous
+      .then(() => this.recordFenceFailure(agent, error, turnId))
+      .catch((err) => {
+        this.logger.error({ err, agentId }, "Failed to record saturated turn failure");
+      })
+      .finally(() => {
+        this.fenceSaturatedAgents.delete(agentId);
+        if (this.sessionEventTails.get(agentId) === failure) this.sessionEventTails.delete(agentId);
+      });
+    this.sessionEventTails.set(agentId, failure);
+    this.trackBackgroundTask(failure);
+  }
+
+  private async recordFenceFailure(
+    agent: ActiveManagedAgent,
+    error: HostFenceError,
+    turnId: string | undefined,
+  ): Promise<void> {
+    const agentId = agent.id;
+    while (this.agents.get(agentId) === agent) {
+      let finish: (() => void) | undefined;
+      try {
+        finish = await this.inventoryClock?.beginAsync("live-history");
+      } catch (err) {
+        if (err instanceof HostFenceError && err.code === "HOST_FENCE_SATURATED") {
+          await new Promise((resume) => setTimeout(resume, 250));
+          continue;
+        }
+        throw err;
+      }
+      try {
+        await this.dispatchSessionEvent(agent, {
+          type: "turn_failed",
+          provider: agent.provider,
+          turnId,
+          code: error.code,
+          error: error.message,
+        });
+      } finally {
+        finish?.();
+      }
+      return undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -4043,46 +4150,51 @@ export class AgentManager {
     agent: ActiveManagedAgent,
     event: AgentStreamEvent,
   ): Promise<void> {
-    if (event.type === "provider_subagent") {
-      const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
-      this.dispatch({ type: "provider_subagent", event: update });
-      return;
-    }
-    const turnId = getAgentStreamEventTurnId(event);
-    const matchingWaiters = this.runs.getMatchingWaiters(agent, turnId);
-    this.logger.trace(
-      {
-        agentId: agent.id,
-        provider: event.provider,
-        sessionId: agent.persistence?.sessionId ?? undefined,
-        turnId,
-        matchingWaiterCount: matchingWaiters.length,
-        event,
-      },
-      "agent.manager.dispatch_session_event",
-    );
+    const finish = await this.inventoryClock?.beginAsync("live-history");
+    try {
+      if (event.type === "provider_subagent") {
+        const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
+        this.dispatch({ type: "provider_subagent", event: update });
+        return;
+      }
+      const turnId = getAgentStreamEventTurnId(event);
+      const matchingWaiters = this.runs.getMatchingWaiters(agent, turnId);
+      this.logger.trace(
+        {
+          agentId: agent.id,
+          provider: event.provider,
+          sessionId: agent.persistence?.sessionId ?? undefined,
+          turnId,
+          matchingWaiterCount: matchingWaiters.length,
+          event,
+        },
+        "agent.manager.dispatch_session_event",
+      );
 
-    const shouldNotifyWaiters = await this.handleStreamEvent(agent, event);
+      const shouldNotifyWaiters = await this.handleStreamEvent(agent, event);
 
-    if (!shouldNotifyWaiters) {
-      return;
-    }
+      if (!shouldNotifyWaiters) {
+        return;
+      }
 
-    this.runs.notifyWaiters(matchingWaiters, event, {
-      terminal: isTurnTerminalEvent(event),
-    });
-    this.logger.trace(
-      {
-        agentId: agent.id,
-        provider: event.provider,
-        sessionId: agent.persistence?.sessionId ?? undefined,
-        turnId,
-        notifiedWaiterCount: matchingWaiters.length,
+      this.runs.notifyWaiters(matchingWaiters, event, {
         terminal: isTurnTerminalEvent(event),
-        event,
-      },
-      "agent.manager.notify_waiters",
-    );
+      });
+      this.logger.trace(
+        {
+          agentId: agent.id,
+          provider: event.provider,
+          sessionId: agent.persistence?.sessionId ?? undefined,
+          turnId,
+          notifiedWaiterCount: matchingWaiters.length,
+          terminal: isTurnTerminalEvent(event),
+          event,
+        },
+        "agent.manager.notify_waiters",
+      );
+    } finally {
+      finish?.();
+    }
   }
 
   private async resolveInitialPersistedTitle(
@@ -5164,9 +5276,16 @@ export class AgentManager {
 
   private trackBackgroundTask(task: Promise<void>): void {
     this.backgroundTasks.add(task);
-    void task.finally(() => {
-      this.backgroundTasks.delete(task);
-    });
+    void task.then(
+      () => {
+        this.backgroundTasks.delete(task);
+        return undefined;
+      },
+      (err) => {
+        this.backgroundTasks.delete(task);
+        this.logger.error({ err }, "Agent background task failed");
+      },
+    );
   }
 
   private trackAgentRegistrationOperation<T>(result: Promise<T>): Promise<T> {

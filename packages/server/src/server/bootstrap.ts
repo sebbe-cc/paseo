@@ -622,7 +622,10 @@ export async function createPaseoDaemon(
   });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
-  const inventoryClock = new HostInventoryClock(path.join(config.paseoHome, "runtime-inventory"));
+  const inventoryClock = new HostInventoryClock(
+    path.join(config.paseoHome, "runtime-inventory"),
+    (message) => logger.warn(message),
+  );
   const admissionJournal = new AdmissionJournal(
     path.join(config.paseoHome, "admissions"),
     14,

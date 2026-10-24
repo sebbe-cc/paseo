@@ -143,9 +143,9 @@ export class AdmissionJournal {
   }
 
   private mutate<T>(action: () => Promise<T>): Promise<T> {
-    const finish = this.inventoryClock?.begin("admissions");
-    const result = this.queue
-      .then(async () => {
+    const result = this.queue.then(async () => {
+      const finish = await this.inventoryClock?.beginAsync("admissions");
+      try {
         await this.initialize();
         if (this.prunedOn !== new Date().toISOString().slice(0, 10)) {
           const files = (await fs.readdir(this.directory)).filter((file) =>
@@ -153,9 +153,11 @@ export class AdmissionJournal {
           );
           await this.prune(files);
         }
-        return action();
-      })
-      .finally(() => finish?.());
+        return await action();
+      } finally {
+        finish?.();
+      }
+    });
     this.queue = result.catch(() => undefined);
     return result;
   }

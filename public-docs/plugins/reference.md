@@ -2629,11 +2629,26 @@ inside this critical section. An expired observation or changed inode is a rejec
 token, never a reason to recreate a lock. Token renewal requires leaving the locks.
 
 All covered host writers hold SH over their complete mutation, including awaited
-provider opening, nested storage/journal writes and watermark publication. A writer
-that encounters EX returns `HOST_FENCE_BUSY` before mutation. Callers retry outside
-publication locks. Kernel descriptor cleanup releases SH when a writer process
-crashes; restart changes the epoch. Filesystem replacement, direct out-of-process
-host edits and simultaneous daemons sharing one home are outside this contract.
+provider opening, nested storage/journal writes and watermark publication. Async
+host writes wait before mutation for up to 30 seconds (at most 1,024 pending lock
+acquisitions). Live timeline flushes retain their uncommitted suffix in order.
+Only acquisition is retried; an action that already started is never replayed.
+Synchronous low-level writers and observation exports still return
+`HOST_FENCE_BUSY`; their callers must retry outside publication locks.
+
+The session-event and coalescer queues each admit at most 2 MiB per agent and
+32 MiB globally, accounting for serialized UTF-16 payloads plus entry overhead.
+After five seconds of contention the host warns at most once per minute. At the
+30-second or memory limit, the affected turn is interrupted and reports
+`HOST_FENCE_SATURATED` in its timeline after publication releases the fence.
+Pending payloads for that failed turn are discarded explicitly; one small error
+marker remains until it can be recorded. Other agents are not interrupted and a
+new turn can run after the fence clears. This is bounded buffering, not a durable
+queue: process death before delivery does not persist queued provider events.
+
+Kernel descriptor cleanup releases SH when a writer process crashes; restart
+changes the epoch. Filesystem replacement, direct out-of-process host edits and
+simultaneous daemons sharing one home are outside this contract.
 
 `productionFence` remains **false**: GC ownership/incarnation, Git identity,
 external capability/revocation, old publishers and provider-native histories still
