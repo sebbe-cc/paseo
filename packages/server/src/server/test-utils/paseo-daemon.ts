@@ -20,6 +20,7 @@ interface TestPaseoDaemonOptions {
   desktopManaged?: boolean;
   downloadTokenTtlMs?: number;
   corsAllowedOrigins?: string[];
+  hostnames?: PaseoDaemonConfig["hostnames"];
   listen?: string;
   listenPort?: number;
   logger?: Parameters<typeof createPaseoDaemon>[1];
@@ -188,7 +189,7 @@ async function prepareTestDaemonConfig(
     daemonVersion: options.daemonVersion,
     desktopManaged: options.desktopManaged,
     corsAllowedOrigins: options.corsAllowedOrigins ?? [],
-    hostnames: true,
+    hostnames: options.hostnames ?? true,
     mcpEnabled: options.mcpEnabled ?? true,
     staticDir,
     mcpDebug: options.mcpDebug ?? false,
