@@ -980,6 +980,53 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
   await client.close();
 });
 
+test("agent handles cancel the running turn through cancelAgent", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_sdk");
+
+  const cancelPromise = agent.cancel();
+  const cancelRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(cancelRequest).toMatchObject({
+    type: "cancel_agent_request",
+    agentId: "agent_sdk",
+  });
+  ws.message(
+    sessionMessage({
+      type: "cancel_agent_response",
+      payload: {
+        requestId: cancelRequest.requestId,
+        agentId: "agent_sdk",
+        agent: null,
+        error: null,
+      },
+    }),
+  );
+  await expect(cancelPromise).resolves.toBeUndefined();
+
+  const failingPromise = agent.cancel();
+  const failingRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(failingRequest).toMatchObject({
+    type: "cancel_agent_request",
+    agentId: "agent_sdk",
+  });
+  ws.message(
+    sessionMessage({
+      type: "cancel_agent_response",
+      payload: {
+        requestId: failingRequest.requestId,
+        agentId: "agent_sdk",
+        agent: null,
+        error: "Cannot stop agent agent_sdk because it is archived",
+      },
+    }),
+  );
+  await expect(failingPromise).rejects.toThrow(
+    "Cannot stop agent agent_sdk because it is archived",
+  );
+
+  await client.close();
+});
+
 test("agent handles list the session's own commands through the existing daemon RPC", async () => {
   const { client, ws } = await connectClient();
   const agent = client.agents.ref("agent_sdk");
