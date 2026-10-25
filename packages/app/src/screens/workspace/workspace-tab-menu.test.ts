@@ -366,3 +366,47 @@ describe("buildWorkspaceTabMenuEntries", () => {
     expect(terminalSeparator?.key).toBe("rename-separator");
   });
 });
+
+it.each(["desktop", "mobile"] as const)(
+  "offers Make voice-target independently of agent run state on %s",
+  (surface) => {
+    const onMakeVoiceTarget = vi.fn();
+    const base = {
+      surface,
+      index: 0,
+      tabCount: 1,
+      menuTestIDBase: "test",
+      onMakeVoiceTarget,
+      onCopyResumeCommand: vi.fn(),
+      onCopyAgentId: vi.fn(),
+      onCopyTerminalId: vi.fn(),
+      onCopyFilePath: vi.fn(),
+      onReloadAgent: vi.fn(),
+      onRenameTab: vi.fn(),
+      onCloseTab: vi.fn(),
+      onCloseTabsBefore: vi.fn(),
+      onCloseTabsAfter: vi.fn(),
+      onCloseOtherTabs: vi.fn(),
+    };
+    const voiceEntry = buildWorkspaceTabMenuEntries({ ...base, tab: createAgentTab() }).find(
+      (entry) => entry.key === "make-voice-target",
+    );
+    expect(voiceEntry?.kind).toBe("item");
+    if (voiceEntry?.kind !== "item") throw new Error("Missing voice target item");
+    expect(voiceEntry.label).toBe("Make voice-target");
+    expect(voiceEntry.disabled).not.toBe(true);
+    voiceEntry.onSelect();
+    expect(onMakeVoiceTarget).toHaveBeenCalledWith("agent-123");
+    const draft: WorkspaceTabDescriptor = {
+      key: "draft",
+      tabId: "draft",
+      kind: "draft",
+      target: { kind: "draft", draftId: "draft" },
+    };
+    expect(
+      buildWorkspaceTabMenuEntries({ ...base, tab: draft }).some(
+        (entry) => entry.key === "make-voice-target",
+      ),
+    ).toBe(false);
+  },
+);

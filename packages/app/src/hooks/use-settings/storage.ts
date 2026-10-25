@@ -33,7 +33,7 @@ import { migrateAppSettings } from "./migrations";
 export { APP_SETTINGS_KEY } from "./keys";
 export const APP_SETTINGS_QUERY_KEY = ["app-settings"];
 
-export type SendBehavior = ActiveTurnBehavior | "queue";
+export type SendBehavior = Exclude<ActiveTurnBehavior, "steer_only"> | "queue";
 export type ReleaseChannel = "stable" | "beta";
 export type ServiceUrlBehavior = "ask" | "in-app" | "external";
 export type WorkspaceTitleSource = "title" | "branch";

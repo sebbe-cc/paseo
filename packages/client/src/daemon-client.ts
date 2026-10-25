@@ -3727,6 +3727,15 @@ export class DaemonClient {
   // Agent Interaction
   // ============================================================================
 
+  private validateSendAgentCapabilities(options?: SendMessageOptions): void {
+    if (
+      options?.activeTurnBehavior === "steer_only" &&
+      this.lastServerInfoMessage?.features?.pluginVoiceProviders !== true
+    ) {
+      throw new Error("Update the Paseo host to guide an agent without interrupting its job.");
+    }
+  }
+
   async sendAgentMessage(
     agentId: string,
     text: string,
@@ -3738,6 +3747,7 @@ export class DaemonClient {
     ) {
       throw new Error("Update the Paseo host to send messages with agent provenance.");
     }
+    this.validateSendAgentCapabilities(options);
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({

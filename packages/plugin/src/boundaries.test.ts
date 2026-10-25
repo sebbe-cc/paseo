@@ -66,7 +66,13 @@ function boundaryViolations(entry: string, runtime: "shared" | "server" | "clien
 
 describe("plugin SDK import boundaries", () => {
   it("publishes process capabilities without their Windows implementation helpers", () => {
-    expect(Object.keys(server).sort()).toEqual(["execCommand", "spawnProcess", "terminateProcess"]);
+    expect(Object.keys(server).sort()).toEqual([
+      "VoiceProviderCommandSchema",
+      "VoiceProviderEventSchema",
+      "execCommand",
+      "spawnProcess",
+      "terminateProcess",
+    ]);
   });
 
   it("classifies every published entry", () => {
@@ -89,8 +95,8 @@ describe("plugin SDK import boundaries", () => {
 
 describe("plugin example import boundaries", () => {
   const examples = path.resolve(sourceDirectory, "../../../plugin-examples");
-  const files = readdirSync(examples, { recursive: true }).filter((file) =>
-    /(?<!\.test)\.tsx?$/.test(file),
+  const files = readdirSync(examples, { recursive: true }).filter(
+    (file) => /(?<!\.test)\.tsx?$/.test(file) && !file.split(path.sep).includes("node_modules"),
   );
   const owner = (file: string) => {
     const [, directory] = path.relative(examples, file).split(path.sep);
