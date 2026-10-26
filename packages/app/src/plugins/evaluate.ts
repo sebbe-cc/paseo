@@ -138,6 +138,7 @@ export function runPluginClientBundle(
     themes: [],
     timelineTransformers: [],
     timelineRenderers: [],
+    timelineSelectionActions: [],
   };
   const surfaceIds = new Set<string>();
   const settingsScreenIds = new Set<string>();
@@ -153,6 +154,7 @@ export function runPluginClientBundle(
   const themeIds = new Set<string>();
   const timelineTransformerIds = new Set<string>();
   const timelineRendererIds = new Set<string>();
+  const timelineSelectionActionIds = new Set<string>();
   const removals = new Set<PluginCleanup>();
   let setupComplete = false;
   let stopped = false;
@@ -453,6 +455,34 @@ export function runPluginClientBundle(
       themeIds.add(normalizedId);
       return register(collector.themes, theme, () => themeIds.delete(normalizedId));
     },
+    addTimelineSelectionAction(contribution) {
+      if (stopped) throw new Error("Plugin has stopped");
+      const actionId = requireId(contribution.id, "timeline selection action actionId");
+      if (timelineSelectionActionIds.has(actionId))
+        throw new Error("Duplicate timeline selection action: " + actionId);
+      const title = contribution.title.trim();
+      const icon = contribution.icon.trim();
+      if (!title) throw new Error("Timeline selection action has no title: " + actionId);
+      if (
+        typeof contribution.Content !== "function" &&
+        !(
+          typeof contribution.Content === "object" &&
+          contribution.Content !== null &&
+          "$$typeof" in contribution.Content
+        )
+      )
+        throw new Error("Timeline selection action has no content: " + actionId);
+      // 0.13.0 port: icons.ts dropped resolvePluginIcon; parsePluginIcon
+      // validates once at registration the same way (throws on unknown
+      // Lucide icon) and is already imported by the 0.13.0 side of the merge.
+      parsePluginIcon(`Timeline selection action ${actionId}`, icon);
+      timelineSelectionActionIds.add(actionId);
+      return register(
+        collector.timelineSelectionActions,
+        { ...contribution, id: actionId, title, icon },
+        () => timelineSelectionActionIds.delete(actionId),
+      );
+    },
     addTimelineTransformer(contribution: PluginTimelineTransformerContribution) {
       const normalizedId = requireId(contribution.id, "timeline transformer id");
       if (timelineTransformerIds.has(normalizedId)) {
@@ -592,5 +622,6 @@ export function runPluginClientBundle(
     themes: collector.themes,
     timelineTransformers: collector.timelineTransformers,
     timelineRenderers: collector.timelineRenderers,
+    timelineSelectionActions: collector.timelineSelectionActions,
   };
 }
