@@ -1189,6 +1189,7 @@ export const es: TranslationResources = {
       description: "Comprueba tu conexión e inténtalo de nuevo.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "Grupo {{label}}",
     statusBucket: {
@@ -2540,6 +2541,7 @@ export const es: TranslationResources = {
         cycleTheme: "Tema del ciclo",
         focusMessageInput: "Entrada de mensaje de enfoque",
         cycleAgentMode: "Alternar modo del agente",
+        toggleGlobalVoice: "Activar o desactivar la voz global",
         toggleVoiceMode: "Alternar modo de voz",
         startStopDictation: "Iniciar dictado/stop",
         interruptAgent: "agente de interrupción",
