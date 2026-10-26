@@ -18,6 +18,8 @@ import {
   type VoiceRuntimeTelemetrySnapshot,
 } from "@/voice/voice-runtime";
 
+import { useVoiceTargetStore } from "@/voice/voice-target-store";
+
 interface VoiceContextValue extends VoiceRuntimeSnapshot {
   startVoice: (serverId: string, agentId: string) => Promise<void>;
   stopVoice: () => Promise<void>;
@@ -137,6 +139,18 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
 
     runtime = createVoiceRuntime({
       engine,
+      onTargetChanged(serverId, agentId) {
+        const session = useSessionStore.getState().getSession(serverId);
+        const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+        const previous = useVoiceTargetStore.getState().target;
+        const previousTitle =
+          previous?.serverId === serverId && previous.agentId === agentId
+            ? previous.title
+            : agentId;
+        useVoiceTargetStore
+          .getState()
+          .setTarget({ serverId, agentId, title: agent?.title || previousTitle });
+      },
       getServerInfo: (serverId) =>
         useSessionStore.getState().getSession(serverId)?.serverInfo ?? null,
       activateKeepAwake: async (tag) => {

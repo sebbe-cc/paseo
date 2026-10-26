@@ -7818,6 +7818,37 @@ test.each([false, true])(
   },
 );
 
+test.each([false, true])("strict voice steering requires host support=%s", async (supported) => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "voice-steering",
+    transportFactory: () => mock.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: { pluginVoiceProviders: supported } });
+  await connecting;
+  const sending = client.sendAgentMessage("recipient", "keep working", {
+    activeTurnBehavior: "steer_only",
+  });
+  if (!supported) {
+    await expect(sending).rejects.toThrow("Update the Paseo host");
+    expect(mock.sent).toEqual([]);
+    return;
+  }
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request.activeTurnBehavior).toBe("steer_only");
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: { requestId: request.requestId, agentId: "recipient", accepted: true, error: null },
+    }),
+  );
+  await sending;
+});
+
 test("measures an outbound message in UTF-8 bytes against the daemon's message limit", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
