@@ -10,8 +10,13 @@ if (process.argv.includes("--version")) {
     process.stderr.write(process.env.MUSE_TEST_VERSION_ERROR + "\n");
     process.exit(17);
   }
-  process.stdout.write(`Muse Code ${process.env.MUSE_TEST_VERSION || "1.4.1"}\n`);
-  process.exit(0);
+  const versionDelayMs = Number(process.env.MUSE_TEST_VERSION_DELAY_MS || 0);
+  const reportVersion = () => {
+    process.stdout.write(`Muse Code ${process.env.MUSE_TEST_VERSION || "1.4.1"}\n`);
+    process.exit(0);
+  };
+  if (versionDelayMs > 0) setTimeout(reportVersion, versionDelayMs);
+  else reportVersion();
 }
 if (process.env.MUSE_TEST_STUBBORN) {
   setInterval(() => {}, 1000);
