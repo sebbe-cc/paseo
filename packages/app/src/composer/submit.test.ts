@@ -251,3 +251,81 @@ describe("submitAgentInput", () => {
     expect(clearDraft).toHaveBeenCalledWith("sent");
   });
 });
+
+describe("local resource attachment submission", () => {
+  const attachment = {
+    kind: "plugin_resource" as const,
+    pluginId: "notes",
+    sourceId: "selection",
+    sourceTitle: "Note",
+    sourceIcon: "Quote",
+    item: {
+      id: "note",
+      identifier: "",
+      title: "Comment",
+      text: "Exact quote and full comment",
+      resourceType: "note",
+    },
+  };
+
+  it.each([false, true])("submits attachment-only drafts, running=%s", async (running) => {
+    const sent: unknown[] = [];
+    const queued: unknown[] = [];
+    const clears: string[] = [];
+    const result = await submitAgentInput({
+      message: "",
+      attachments: [attachment],
+      isAgentRunning: running,
+      canSubmit: true,
+      queueMessage: (input) => {
+        queued.push(input);
+      },
+      submitMessage: async (input) => {
+        sent.push(input);
+      },
+      clearDraft: (lifecycle) => {
+        clears.push(lifecycle);
+      },
+      setUserInput: () => {},
+      setAttachments: () => {},
+      setSendError: () => {},
+      setIsProcessing: () => {},
+    });
+    const payload = { message: "", attachments: [attachment] };
+    expect(result).toBe(running ? "queued" : "submitted");
+    expect(queued).toEqual(running ? [payload] : []);
+    expect(sent).toEqual(running ? [] : [payload]);
+    expect(clears).toEqual(running ? [] : ["sent"]);
+  });
+
+  it("restores the complete local snapshot when attachment-only sending fails", async () => {
+    const updates: (typeof attachment)[][] = [];
+    const errors: (string | null)[] = [];
+    const result = await submitAgentInput({
+      message: "",
+      attachments: [attachment],
+      isAgentRunning: false,
+      canSubmit: true,
+      queueMessage: () => {
+        throw new Error("unexpected queue");
+      },
+      submitMessage: async () => {
+        throw new Error("Connection lost");
+      },
+      clearDraft: () => {
+        throw new Error("must retain draft");
+      },
+      setUserInput: () => {},
+      setAttachments: (items) => {
+        updates.push(items);
+      },
+      setSendError: (error) => {
+        errors.push(error);
+      },
+      setIsProcessing: () => {},
+    });
+    expect(result).toBe("failed");
+    expect(updates).toEqual([[], [attachment]]);
+    expect(errors).toEqual([null, "Connection lost"]);
+  });
+});

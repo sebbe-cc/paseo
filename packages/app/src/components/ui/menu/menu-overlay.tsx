@@ -28,6 +28,7 @@ import {
   OverlayLayerProvider,
   useOverlayLayer,
   useWebOverlayRegistration,
+  focusFirstElement,
 } from "@/lib/overlay-root";
 import {
   computePosition,
@@ -209,6 +210,7 @@ export function useAnchoredPosition({
 }
 
 export interface AnchoredSurfaceProps {
+  autoFocus?: boolean;
   open: boolean;
   onClose: () => void;
   onExited?: () => void;
@@ -265,6 +267,7 @@ export function AnchoredSurface({
   onPointerLeave,
   testID,
   keyboardFocusScope,
+  autoFocus,
   children,
 }: AnchoredSurfaceProps): ReactElement | null {
   const { t } = useTranslation();
@@ -297,15 +300,14 @@ export function AnchoredSurface({
   const placed = position !== null;
 
   useEffect(() => {
-    if (!isWeb || !open || !placed || typeof document === "undefined") return undefined;
+    if (autoFocus === false || !isWeb || !open || !placed || typeof document === "undefined")
+      return undefined;
     const frame = requestAnimationFrame(() => {
-      document
-        .getElementById(surfaceNativeID)
-        ?.querySelector<HTMLElement>('[data-menu-item="true"]:not([data-menu-disabled="true"])')
-        ?.focus();
+      const surface = document.getElementById(surfaceNativeID);
+      if (surface && !surface.contains(document.activeElement)) focusFirstElement(surface);
     });
     return () => cancelAnimationFrame(frame);
-  }, [open, placed, surfaceNativeID]);
+  }, [autoFocus, open, placed, surfaceNativeID]);
 
   const frameStyle = useMemo<StyleProp<ViewStyle>>(() => {
     const { width: screenWidth } = Dimensions.get("window");
@@ -418,12 +420,14 @@ export function AnchoredSurface({
  * than opening another one, so there is exactly one Modal per menu no matter how deep it goes.
  */
 export function MenuOverlay({
+  manageFocus,
   visible,
   onClose,
   restoreFocusRef,
   children,
 }: {
   visible: boolean;
+  manageFocus?: boolean;
   onClose: () => void;
   restoreFocusRef?: RefObject<View | null>;
   children: ReactElement | null;
@@ -478,6 +482,7 @@ export function MenuOverlay({
     layer: floatingLayer,
     onKeyDown: handleWebOverlayKeyDown,
     restoreFocusRef,
+    manageFocus,
   });
 
   if (!visible) return null;
