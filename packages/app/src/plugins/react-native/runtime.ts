@@ -1,4 +1,3 @@
-import { SelectableText } from "@/components/selectable-text";
 import { Icon } from "../icons";
 import { Modal } from "./modal";
 import { ScrollView, FlatList } from "./scroll-view";
@@ -9,7 +8,6 @@ import { useRevealedText } from "@/hooks/use-revealed-text";
 
 export const pluginReactNativeRuntime = {
   Icon,
-  SelectableText,
   Modal,
   ScrollView,
   FlatList,

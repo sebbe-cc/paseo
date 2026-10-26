@@ -1,4 +1,3 @@
-import { SelectableText } from "@/components/selectable-text";
 import React from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -22,18 +21,15 @@ interface HighlightedLinesProps {
 
 function ContentLine({ line }: { line: KeyedLine }) {
   return (
-    <SelectableText style={styles.lineText}>
+    <Text selectable style={styles.lineText}>
       {line.tokens.length === 0
         ? ZERO_WIDTH
         : line.tokens.map(({ key, token }: KeyedToken) => (
-            <SelectableText
-              key={key}
-              style={token.style ? syntaxTokenStyleFor(token.style) : undefined}
-            >
+            <Text key={key} style={token.style ? syntaxTokenStyleFor(token.style) : undefined}>
               {token.text}
-            </SelectableText>
+            </Text>
           ))}
-    </SelectableText>
+    </Text>
   );
 }
 

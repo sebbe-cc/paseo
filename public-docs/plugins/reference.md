@@ -1431,10 +1431,8 @@ text view; selection across independent native text views is not supported. The 
 bridge requires a rebuilt app; iOS selection actions require iOS 16 or later. The app still supports
 its existing iOS minimum, but older iOS versions do not expose these actions.
 
-Plugin timeline renderers should import `SelectableText` from `@getpaseo/plugin/client/react-native`
-for text that supports these actions on iOS. It enables native substring selection within the
-timeline when actions are registered. Plain React Native `Text` on iOS retains its whole-text Copy
-menu and does not expose selection actions; Android `Text selectable` participates automatically.
+Plain React Native `Text` on iOS retains its whole-text Copy menu and does not expose selection
+actions; Android `Text selectable` participates automatically.
 
 ## Theme and layout
 
