@@ -465,7 +465,11 @@ for (const source of ["live", "history", "backfill"]) {
     expect(
       h.events.filter((event) => event.type === "session.opened").map((event) => event.sessionId),
     ).toEqual(["paseo-session"]);
-    expect((await h.recorded()).filter((frame) => frame.method === "session/read")).toEqual([]);
+    expect(
+      (await h.recorded()).filter(
+        (frame) => frame.method === "session/read" && reminderIds.has(frame.params.sessionId),
+      ),
+    ).toEqual([]);
   });
 }
 for (const [scenario, code, guidance] of [
@@ -982,7 +986,16 @@ test("status bounds a stalled account read and closes the host", async () => {
     diagnostic: "Muse account/read timed out",
   });
   expect(await h.recorded()).toContainEqual({ event: "hostClosed" });
-});
+}, 30000);
+
+test("status tolerates a slow version probe when the daemon starts under load", async () => {
+  // pa-4ua43: a cold daemon under load can stall spawn past the old 3 s
+  // probe timeout and stick the snapshot at unavailable. The raised probe
+  // timeout must still report the provider as available.
+  const h = await harness("catalog-controls", { MUSE_TEST_VERSION_DELAY_MS: "5000" });
+  expect(await h.provider.status!({ launch: h.launch })).toEqual({ available: true });
+  expect(await h.recorded()).toContainEqual({ event: "hostClosed" });
+}, 30000);
 
 test("interrupt targets the running turn when another prompt is queued", async () => {
   const h = await harness("interrupt", { MUSE_TEST_QUEUE: "1" });
@@ -1024,6 +1037,89 @@ for (const terminal of ["completed", "failed"]) {
     expect(h.events.filter((event) => event.type === "request.failed")).toEqual([]);
   });
 }
+test("a backfilled failed terminal for a natively active turn is ignored and interrupt still reaches the run", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_SILENT: "1",
+    MUSE_TEST_GAP: "1",
+    MUSE_TEST_ACTIVE_TURN: "1",
+    MUSE_TEST_PHANTOM: "1",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "started");
+  await expect
+    .poll(
+      async () =>
+        (await h.recorded()).filter(
+          (frame) =>
+            frame.method === "session/read" &&
+            frame.params.sessionId === "01a0ee4c-c501-7d50-9020-effa9f9956e1",
+        ),
+      { timeout: 10000 },
+    )
+    .toHaveLength(1);
+  await delay(500);
+  expect(
+    h.events.filter((event) => event.type === "session.turn" && event.state === "failed"),
+  ).toEqual([]);
+  const from = await h.send({
+    type: "session.interrupt",
+    sessionId: "paseo-session",
+    requestId: "phantom-interrupt",
+  });
+  await h.wait(
+    (event) => event.type === "request.completed" && event.requestId === "phantom-interrupt",
+    from,
+  );
+  const requests = await h.recorded();
+  const started = requests.find((frame) => frame.method === "turn/start");
+  expect(requests.find((frame) => frame.method === "turn/interrupt")?.params.turnId).toBe(
+    started.params.commandId,
+  );
+}, 15000);
+test("a backfilled failed terminal is accepted when the native run already ended", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_SILENT: "1",
+    MUSE_TEST_GAP: "1",
+    MUSE_TEST_PHANTOM: "1",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "started");
+  const failed = await h.wait((event) => event.type === "session.turn" && event.state === "failed");
+  expect(failed).toMatchObject({ state: "failed", error: { message: "Muse turn failed" } });
+  expect(
+    (await h.recorded()).filter(
+      (frame) =>
+        frame.method === "session/read" &&
+        frame.params.sessionId === "01a0ee4c-c501-7d50-9020-effa9f9956e1",
+    ),
+  ).toHaveLength(1);
+  expect(h.events.filter((event) => event.type === "session.runtime_failed")).toEqual([]);
+});
+test("interrupt timeout fails the session and closes the host without an unhandled rejection", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_SILENT: "1",
+    MUSE_TEST_HANG: "turn/interrupt",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "started");
+  await h.send({
+    type: "session.interrupt",
+    sessionId: "paseo-session",
+    requestId: "slow-interrupt",
+  });
+  await expect
+    .poll(() => h.events.find((event) => event.type === "session.runtime_failed"), {
+      timeout: 20000,
+    })
+    .toBeDefined();
+  await h.connection.close();
+  const requests = await h.recorded();
+  expect(requests.filter((frame) => frame.method === "turn/interrupt")).toHaveLength(1);
+  expect(requests.find((frame) => frame.event === "hostClosed")).toBeDefined();
+}, 30000);
 for (const [behavior, choiceId] of [
   ["allow", "allow_once"],
   ["deny", "abort"],
