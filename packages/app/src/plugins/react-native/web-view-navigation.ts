@@ -1,4 +1,5 @@
-import { htmlPreviewNavigationKind } from "@/file-pane/html-preview-navigation";
+// 0.13.0 port: upstream renamed file-pane/ to file-panels/.
+import { htmlPreviewNavigationKind } from "@/file-panels/html-preview-navigation";
 
 export interface WebViewNavigationRequest {
   url: string;
