@@ -75,6 +75,9 @@ describe("project container commands", () => {
       "add",
       "remove",
       "order",
+      "note",
+      "todo",
+      "context",
     ]);
   });
 
