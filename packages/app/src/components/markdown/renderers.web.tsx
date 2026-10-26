@@ -40,7 +40,10 @@ function WebCodeBlock({ code, language }: CodeBlockRendererProps) {
 // The library styles links inline, so a stylesheet :hover rule cannot underline them.
 const LINK_HOVER_STYLE = { textDecoration: "underline" } as const;
 
-type ChipPalette = Record<PluginInlineDecorationTone, string> & { background: string };
+type ChipPalette = Record<PluginInlineDecorationTone, string> & {
+  background: string;
+  fontSize: string;
+};
 
 interface DecorationChipProps {
   anchorProps: LinkRendererProps["anchorProps"];
@@ -63,9 +66,10 @@ const DecorationChip = forwardRef<HTMLAnchorElement, DecorationChipProps>(functi
       ...CHIP_STYLE,
       color,
       backgroundColor: palette?.background,
+      fontSize: palette?.fontSize,
       ...(hovered ? LINK_HOVER_STYLE : null),
     }),
-    [anchorProps.style, color, hovered, palette?.background],
+    [anchorProps.style, color, hovered, palette?.background, palette?.fontSize],
   );
   return (
     <a
@@ -87,12 +91,13 @@ const DecorationChip = forwardRef<HTMLAnchorElement, DecorationChipProps>(functi
 const ThemedDecorationChip = withUnistyles(DecorationChip);
 const chipPalette = (theme: Theme) => ({
   palette: {
-    neutral: theme.colors.accentBright,
+    neutral: theme.colors.foreground,
     success: theme.colors.statusSuccess,
     warning: theme.colors.statusWarning,
     danger: theme.colors.statusDanger,
     muted: theme.colors.foregroundMuted,
     background: theme.colors.surface2,
+    fontSize: `${theme.fontSize.base}px`,
   },
 });
 
@@ -168,7 +173,14 @@ const InlineLinkTrigger = forwardRef<HTMLSpanElement, ComponentProps<"span">>(
     );
   },
 );
-const CHIP_STYLE = { borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap" } as const;
+// A chip looks the same in bold, italics, headings and lists: it does not inherit their font.
+const CHIP_STYLE = {
+  borderRadius: 4,
+  padding: "0 4px",
+  whiteSpace: "nowrap",
+  fontWeight: 400,
+  fontStyle: "normal",
+} as const;
 const CHIP_ICON_STYLE = { display: "inline-flex", verticalAlign: "-1px", marginRight: 3 } as const;
 const styles = StyleSheet.create((theme) => ({
   tooltipPath: {
