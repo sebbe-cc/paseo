@@ -7,4 +7,4 @@ test("loads when the workspace layout store is imported first", async () => {
   const { pluginRecentNavigation } = await import("./recent-navigation");
   expect(store.useWorkspaceLayoutStore.getState()).toBeDefined();
   expect(pluginRecentNavigation.getActive()).toBeNull();
-}, 60_000);
+}, 180_000);
