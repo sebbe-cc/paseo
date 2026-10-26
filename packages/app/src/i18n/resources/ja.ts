@@ -2325,6 +2325,8 @@ export const ja: TranslationResources = {
     diagnostics: {
       title: "診断",
       testAudio: "音声をテスト",
+      thinkingTone: "音声モードの待機音",
+      thinkingToneHint: "エージェントが音声の返答を準備している間に鳴らす",
       playTest: "テスト再生",
       playing: "再生中...",
       playbackFailed: "再生に失敗しました: {{message}}",

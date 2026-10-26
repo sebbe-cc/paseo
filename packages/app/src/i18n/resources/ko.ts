@@ -2316,6 +2316,8 @@ export const ko: TranslationResources = {
     diagnostics: {
       title: "진단",
       testAudio: "오디오 테스트",
+      thinkingTone: "음성 모드 대기음",
+      thinkingToneHint: "에이전트가 음성 답변을 준비하는 동안 신호음 재생",
       playTest: "테스트 재생",
       playing: "재생 중...",
       playbackFailed: "재생 실패: {{message}}",

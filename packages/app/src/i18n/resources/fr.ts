@@ -2355,6 +2355,8 @@ export const fr: TranslationResources = {
     diagnostics: {
       title: "Diagnostic",
       testAudio: "Tester le son",
+      thinkingTone: "Tonalité d'attente en mode vocal",
+      thinkingToneHint: "Bip pendant que l'agent prépare une réponse vocale",
       playTest: "Lancer le test",
       playing: "Lecture…",
       playbackFailed: "Échec de la lecture : {{message}}",

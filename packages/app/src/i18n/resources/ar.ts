@@ -2341,6 +2341,8 @@ export const ar: TranslationResources = {
     diagnostics: {
       title: "التشخيص",
       testAudio: "اختبار الصوت",
+      thinkingTone: "نغمة الانتظار في وضع الصوت",
+      thinkingToneHint: "إصدار صفير أثناء تحضير الوكيل لرد صوتي",
       playTest: "لعب الاختبار",
       playing: "جارٍ اللعب...",
       playbackFailed: "فشل التشغيل:{{message}}",

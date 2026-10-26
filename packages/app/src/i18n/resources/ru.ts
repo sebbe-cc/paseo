@@ -2342,6 +2342,8 @@ export const ru: TranslationResources = {
     diagnostics: {
       title: "Диагностика",
       testAudio: "Проверка звука",
+      thinkingTone: "Сигнал ожидания в голосовом режиме",
+      thinkingToneHint: "Звуковой сигнал, пока агент готовит голосовой ответ",
       playTest: "Воспроизвести тестовый звук",
       playing: "Воспроизведение...",
       playbackFailed: "Ошибка воспроизведения: {{message}}",

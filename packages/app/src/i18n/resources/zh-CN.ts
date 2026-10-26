@@ -2280,6 +2280,8 @@ export const zhCN: TranslationResources = {
     diagnostics: {
       title: "诊断",
       testAudio: "测试音频",
+      thinkingTone: "语音模式等待提示音",
+      thinkingToneHint: "代理准备语音回复时播放提示音",
       playTest: "播放测试",
       playing: "正在播放...",
       playbackFailed: "播放失败：{{message}}",

@@ -2437,6 +2437,8 @@ export const en = {
     diagnostics: {
       title: "Diagnostics",
       testAudio: "Test audio",
+      thinkingTone: "Thinking tone in voice mode",
+      thinkingToneHint: "Beep while the agent works on a voice reply",
       playTest: "Play test",
       playing: "Playing...",
       playbackFailed: "Playback failed: {{message}}",

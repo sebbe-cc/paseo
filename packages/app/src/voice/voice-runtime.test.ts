@@ -70,11 +70,13 @@ function createServerInfo(): DaemonServerInfo {
 function createRuntime(options?: {
   engine?: AudioEngine;
   getServerInfo?: (serverId: string) => DaemonServerInfo | null;
+  isThinkingToneEnabled?: () => boolean;
 }) {
   const engine = options?.engine ?? createAudioEngineMock();
   const runtime = createVoiceRuntime({
     engine,
     getServerInfo: options?.getServerInfo ?? (() => createServerInfo()),
+    isThinkingToneEnabled: options?.isThinkingToneEnabled,
     activateKeepAwake: vi.fn().mockResolvedValue(undefined),
     deactivateKeepAwake: vi.fn().mockResolvedValue(undefined),
   });
@@ -275,6 +277,19 @@ describe("voice runtime", () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(engine.play).toHaveBeenCalled();
+  });
+
+  it("stays silent while waiting when the thinking tone setting is off", async () => {
+    const adapter = createSessionAdapter();
+    const { runtime, engine } = createRuntime({ isThinkingToneEnabled: () => false });
+    runtime.registerSession(adapter);
+
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.onTurnEvent("server-1", "agent-1", "turn_started");
+
+    expect(runtime.getSnapshot().phase).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS * 4);
+    expect(engine.play).not.toHaveBeenCalled();
   });
 
   it("does not restart the thinking tone from local detection jitter while waiting", async () => {

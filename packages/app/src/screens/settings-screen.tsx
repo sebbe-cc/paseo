@@ -81,6 +81,7 @@ import { KeyboardShortcutsSection } from "@/screens/settings/keyboard-shortcuts-
 import { EditorSection } from "@/screens/settings/editor-section";
 import { FilesSection } from "@/screens/settings/files-section";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { CommunityLinks } from "@/components/community-links";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -396,6 +397,11 @@ function DiagnosticsSection({
 }: DiagnosticsSectionProps) {
   const { t } = useTranslation();
   const openAppDiagnostic = useAppDiagnosticStore((state) => state.open);
+  const { settings, updateSettings } = useAppSettings();
+  const handleThinkingToneChange = useCallback(
+    (voiceThinkingTone: boolean) => void updateSettings({ voiceThinkingTone }),
+    [updateSettings],
+  );
   const handlePlayPress = useCallback(() => {
     void handlePlaybackTest();
   }, [handlePlaybackTest]);
@@ -428,6 +434,18 @@ function DiagnosticsSection({
               ? t("settings.diagnostics.playing")
               : t("settings.diagnostics.playTest")}
           </Button>
+        </View>
+        <View style={settingsStyles.row}>
+          <View style={settingsStyles.rowContent}>
+            <Text style={settingsStyles.rowTitle}>{t("settings.diagnostics.thinkingTone")}</Text>
+            <Text style={settingsStyles.rowHint}>{t("settings.diagnostics.thinkingToneHint")}</Text>
+          </View>
+          <Switch
+            value={settings.voiceThinkingTone}
+            onValueChange={handleThinkingToneChange}
+            accessibilityLabel={t("settings.diagnostics.thinkingTone")}
+            testID="voice-thinking-tone-toggle"
+          />
         </View>
       </View>
     </SettingsSection>

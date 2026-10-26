@@ -9,6 +9,7 @@ import {
 } from "react";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { useSessionStore } from "@/stores/session-store";
+import { useSettings } from "@/hooks/use-settings";
 import { createAudioEngine } from "@/audio";
 import type { AudioEngine } from "@/audio";
 import {
@@ -117,6 +118,8 @@ interface VoiceProviderProps {
 export function VoiceProvider({ children }: VoiceProviderProps) {
   const engineRef = useRef<AudioEngine | null>(null);
   const runtimeRef = useRef<VoiceRuntime | null>(null);
+  const thinkingToneRef = useRef(false);
+  thinkingToneRef.current = useSettings((settings) => settings.voiceThinkingTone);
 
   if (!engineRef.current) {
     let runtime: VoiceRuntime | null = null;
@@ -153,6 +156,7 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
       },
       getServerInfo: (serverId) =>
         useSessionStore.getState().getSession(serverId)?.serverInfo ?? null,
+      isThinkingToneEnabled: () => thinkingToneRef.current,
       activateKeepAwake: async (tag) => {
         await activateKeepAwakeAsync(tag);
       },

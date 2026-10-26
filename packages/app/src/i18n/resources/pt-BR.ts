@@ -2340,6 +2340,8 @@ export const ptBR: TranslationResources = {
     diagnostics: {
       title: "Diagnósticos",
       testAudio: "Testar áudio",
+      thinkingTone: "Tom de espera no modo de voz",
+      thinkingToneHint: "Bipar enquanto o agente prepara uma resposta de voz",
       playTest: "Reproduzir teste",
       playing: "Reproduzindo...",
       playbackFailed: "Falha na reprodução: {{message}}",

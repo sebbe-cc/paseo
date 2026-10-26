@@ -66,6 +66,7 @@ export interface VoiceRuntimeDeps {
   onTargetChanged?(serverId: string, agentId: string): void;
   engine: AudioEngine;
   getServerInfo(serverId: string): DaemonServerInfo | null;
+  isThinkingToneEnabled?(): boolean;
   activateKeepAwake(tag: string): Promise<void>;
   deactivateKeepAwake(tag: string): Promise<void>;
 }
@@ -500,6 +501,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
   function canPlayCue(): boolean {
     return (
+      (deps.isThinkingToneEnabled?.() ?? true) &&
       state.snapshot.isVoiceMode &&
       state.snapshot.phase === "waiting" &&
       !state.telemetry.isSpeaking
