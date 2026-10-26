@@ -12,6 +12,7 @@ import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navig
 let activeWorkspace: { serverId: string; workspaceId: string } | null = null;
 let previousKey = "";
 const listeners = new Set<(location: PluginNavigationLocation | null) => void>();
+let watchingLayout = false;
 
 function resolveWorkspace(serverId: string, workspaceId: string): string | null {
   return resolveWorkspaceMapKeyByIdentity({
@@ -37,8 +38,6 @@ function publish() {
   for (const listener of listeners) listener(active);
 }
 
-useWorkspaceLayoutStore.subscribe(publish);
-
 export function setPluginActiveWorkspace(selection: typeof activeWorkspace) {
   activeWorkspace = selection;
   publish();
@@ -47,6 +46,11 @@ export function setPluginActiveWorkspace(selection: typeof activeWorkspace) {
 export const pluginRecentNavigation: PluginRecentNavigation = {
   getActive,
   subscribe(listener) {
+    // Subscribe on first use: the layout store imports this module through plugins/registry.
+    if (!watchingLayout) {
+      watchingLayout = true;
+      useWorkspaceLayoutStore.subscribe(publish);
+    }
     listeners.add(listener);
     return () => {
       listeners.delete(listener);
