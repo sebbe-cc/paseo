@@ -178,6 +178,8 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
+  readonly navigation: PluginRecentNavigation;
+  addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarHeaderItem(contribution: PluginSidebarItemContribution<PluginText>): PluginCleanup;
@@ -207,6 +209,29 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
     contribution: PluginTimelineRendererContribution<Schema>,
   ): PluginCleanup;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
+}
+
+export interface PluginNavigationLocation {
+  readonly serverId: string;
+  readonly workspaceId: string;
+  readonly tabId: string | null;
+}
+
+export interface PluginRecentNavigation {
+  getActive(): PluginNavigationLocation | null;
+  subscribe(listener: (location: PluginNavigationLocation | null) => void): PluginCleanup;
+  activateWorkspace(input: Pick<PluginNavigationLocation, "serverId" | "workspaceId">): boolean;
+  activateTab(input: PluginNavigationLocation & { tabId: string }): boolean;
+}
+
+export interface PluginKeyboardShortcutContribution {
+  /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
+  combo: string;
+  /** Stable within this plugin. Together with label, exposes the shortcut in Settings. */
+  id?: string;
+  label?: string;
+  onPress(): boolean | undefined;
+  onRelease?(): void;
 }
 
 export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;
