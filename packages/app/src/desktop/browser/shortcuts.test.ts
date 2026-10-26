@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBrowserKeyboardPolicy,
+  isForwardedPluginInput,
   parseBrowserShortcutInput,
   shouldPublishBrowserShortcutPolicy,
 } from "./shortcuts";
@@ -238,6 +239,45 @@ describe("buildBrowserKeyboardPolicy", () => {
       meta: true,
       shift: false,
     });
+  });
+});
+
+describe("forwarded plugin combos", () => {
+  const optionP = { alt: true, code: "KeyP", control: false, key: "p", meta: false, shift: false };
+  const input = {
+    key: "π",
+    code: "KeyP",
+    altKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    repeat: false,
+  };
+
+  it("forwards ⌥P out of a browser page, but not in the middle of a chord", () => {
+    const bindings = buildEffectiveBindings({
+      "workspace-terminal-new-ctrl-shift-t-non-mac": "Ctrl+F12 Ctrl+F11",
+    });
+    const chordIndex = bindings.findIndex(
+      (binding) => binding.id === "workspace-terminal-new-ctrl-shift-t-non-mac",
+    );
+
+    const idle = buildBrowserKeyboardPolicy({ bindings, isMac: true, isDesktop: true });
+    expect(idle.prefixes).toContainEqual(optionP);
+
+    const chord = buildBrowserKeyboardPolicy({
+      bindings,
+      chordState: { candidateIndices: [chordIndex], step: 1, timeoutId: null },
+      isMac: false,
+      isDesktop: true,
+    });
+    expect(chord.prefixes).not.toContainEqual(optionP);
+  });
+
+  it("matches ⌥P by its physical key, whatever character the layout types", () => {
+    expect(isForwardedPluginInput(input, true)).toBe(true);
+    expect(isForwardedPluginInput({ ...input, shiftKey: true }, true)).toBe(false);
+    expect(isForwardedPluginInput({ ...input, code: "KeyO" }, true)).toBe(false);
   });
 });
 
