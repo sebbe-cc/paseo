@@ -30,6 +30,7 @@ const catalogRows = readFixture("catalog-controls");
 const replacements = new Map();
 const counts = new Map();
 const receipts = new Set();
+let liveTurnId;
 const lines = createInterface({ input: process.stdin });
 lines.on("line", receive);
 function receive(line) {
@@ -131,46 +132,45 @@ function controlResponse(frame) {
   }
   return false;
 }
+function gapPageResult(frame) {
+  if (process.env.MUSE_TEST_GAP || process.env.MUSE_TEST_SILENT) {
+    const result = {
+      events: replace(
+        rows
+          .filter(
+            (row) =>
+              row.dir === "in" &&
+              row.msg.method &&
+              row.msg.params?.viewCursor &&
+              !row.msg.id &&
+              row.msg.method !== "item/delta",
+          )
+          .map((row) => ({ method: row.msg.method, params: row.msg.params })),
+      ),
+      nextCursor: null,
+    };
+    if (process.env.MUSE_TEST_PHANTOM) applyPhantomTerminal(result.events);
+    return result;
+  }
+  const result = replace(
+    responseFor(
+      readFixture(
+        frame.params.sessionId === "fixture-child" ? "phase3-child-read" : "phase3-controls",
+      ),
+      "view/page",
+    ),
+  );
+  for (const event of result.events) event.params.sessionId = frame.params.sessionId;
+  return result;
+}
 function parityResponse(frame) {
   if (workflowResponse(frame)) return true;
   if (frame.method === "view/page") {
-    let result;
-    if (process.env.MUSE_TEST_GAP || process.env.MUSE_TEST_SILENT) {
-      result = {
-        events: replace(
-          rows
-            .filter(
-              (row) =>
-                row.dir === "in" &&
-                row.msg.method &&
-                row.msg.params?.viewCursor &&
-                !row.msg.id &&
-                row.msg.method !== "item/delta",
-            )
-            .map((row) => ({ method: row.msg.method, params: row.msg.params })),
-        ),
-        nextCursor: null,
-      };
-    } else {
-      result = replace(
-        responseFor(
-          readFixture(
-            frame.params.sessionId === "fixture-child" ? "phase3-child-read" : "phase3-controls",
-          ),
-          "view/page",
-        ),
-      );
-      for (const event of result.events) event.params.sessionId = frame.params.sessionId;
-    }
-    respond(frame, result);
+    respond(frame, gapPageResult(frame));
     return true;
   }
-  if (frame.method === "session/read") {
-    const result = responseFor(readFixture("phase3-child-read"), "session/read");
-    result.session.sessionId = frame.params.sessionId;
-    respond(frame, result);
-    return true;
-  }
+  if (frame.method === "session/read" && sessionReadResponse(frame)) return true;
+  if (frame.method === "turn/interrupt" && interruptCancelResponse(frame)) return true;
   if (frame.method === "usage/read") {
     const result = process.env.MUSE_TEST_USAGE
       ? JSON.parse(process.env.MUSE_TEST_USAGE)
@@ -222,6 +222,34 @@ function parityResponse(frame) {
   }
   if (skillResponse(frame)) return true;
   return false;
+}
+function applyPhantomTerminal(events) {
+  for (const event of events) {
+    if (event.method !== "turn/completed") continue;
+    event.params = { ...event.params, terminal: "failed" };
+    delete event.params.error;
+  }
+}
+function sessionReadResponse(frame) {
+  const result = responseFor(readFixture("phase3-child-read"), "session/read");
+  result.session.sessionId = frame.params.sessionId;
+  if (process.env.MUSE_TEST_ACTIVE_TURN && liveTurnId) result.session.activeTurnId = liveTurnId;
+  respond(frame, result);
+  return true;
+}
+function interruptCancelResponse(frame) {
+  if (!process.env.MUSE_TEST_ACTIVE_TURN) return false;
+  respond(frame, {});
+  send({
+    jsonrpc: "2.0",
+    method: "turn/completed",
+    params: {
+      sessionId: frame.params.sessionId,
+      turnId: frame.params.turnId,
+      terminal: "cancelled",
+    },
+  });
+  return true;
 }
 function skillResponse(frame) {
   if (frame.method === "skill/list") {
@@ -300,6 +328,7 @@ function validateCommand(frame, recorded) {
 }
 function emitFixtureMessage(recordedMessage, recorded, frame) {
   const message = replace(recordedMessage);
+  trackLiveTurn(message);
   if (!message.method && message.id === recorded.id) message.id = frame.id;
   if (
     message.method === "session/closed" ||
@@ -329,6 +358,11 @@ function emitFixtureMessage(recordedMessage, recorded, frame) {
     });
   }
 }
+function trackLiveTurn(message) {
+  if (!process.env.MUSE_TEST_ACTIVE_TURN) return;
+  if (message.method === "turn/started" && message.params?.turnId)
+    liveTurnId = message.params.turnId;
+}
 function applyWireVariants(message) {
   if (
     message.method === "item/delta" &&
@@ -349,12 +383,6 @@ function parityDelivery(message) {
       method: "view/gap",
       params: { sessionId: message.params.sessionId, after: "", next: message.params.viewCursor },
     });
-  if (
-    process.env.MUSE_TEST_SILENT &&
-    ["item/started", "item/delta", "item/completed", "turn/completed"].includes(message.method) &&
-    message.params.item?.kind !== "userMessage"
-  )
-    return true;
   if (
     process.env.MUSE_TEST_GAP &&
     message.method === "item/completed" &&
@@ -377,6 +405,12 @@ function parityDelivery(message) {
       method: "skill/changed",
       params: { sessionId: message.params.sessionId },
     });
+  if (
+    process.env.MUSE_TEST_SILENT &&
+    ["item/started", "item/delta", "item/completed", "turn/completed"].includes(message.method) &&
+    message.params.item?.kind !== "userMessage"
+  )
+    return true;
   return false;
 }
 function applyTestVariants(message) {
