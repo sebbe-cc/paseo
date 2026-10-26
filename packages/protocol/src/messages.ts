@@ -47,6 +47,21 @@ import { ProviderPaseoToolsPolicySchema } from "./provider-config.js";
 import { TOOL_CALL_ICON_NAMES } from "./agent-types.js";
 import { WORKSPACE_LABEL_COLORS } from "./workspace-labels.js";
 import {
+  ProjectContainerAssignRequestSchema,
+  ProjectContainerAssignResponseSchema,
+  ProjectContainerCreateRequestSchema,
+  ProjectContainerCreateResponseSchema,
+  ProjectContainerDeleteRequestSchema,
+  ProjectContainerDeleteResponseSchema,
+  ProjectContainerListRequestSchema,
+  ProjectContainerListResponseSchema,
+  ProjectContainerRenameRequestSchema,
+  ProjectContainerRenameResponseSchema,
+  ProjectContainerReorderRequestSchema,
+  ProjectContainerReorderResponseSchema,
+  ProjectContainerUpdateSchema,
+} from "./project-containers.js";
+import {
   ChatCreateRequestSchema,
   ChatListRequestSchema,
   ChatInspectRequestSchema,
@@ -3271,6 +3286,12 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceLabelUpdateRequestSchema,
   WorkspaceLabelDeleteRequestSchema,
   WorkspaceLabelDeleteInspectRequestSchema,
+  ProjectContainerListRequestSchema,
+  ProjectContainerCreateRequestSchema,
+  ProjectContainerRenameRequestSchema,
+  ProjectContainerDeleteRequestSchema,
+  ProjectContainerReorderRequestSchema,
+  ProjectContainerAssignRequestSchema,
   WorkspaceRecoveryInspectRequestSchema,
   WorkspaceRecoveryRestoreRequestSchema,
   SetVoiceModeMessageSchema,
@@ -3642,6 +3663,8 @@ export const ServerInfoStatusPayloadSchema = z
         directorySync: z.boolean().optional(),
         // COMPAT(workspaceLabels): added in v0.5.0, remove after 2027-08-14.
         workspaceLabels: z.boolean().optional(),
+        // COMPAT(projectContainers): fork-only (sebbe-cc/paseo), remove gate after 2027-09-25.
+        projectContainers: z.boolean().optional(),
         // COMPAT(workspaceSetupRun): added in v0.8.0, remove gate after 2027-09-02.
         workspaceSetupRun: z.boolean().optional(),
         // COMPAT(workspaceTerminals): added in v0.8.0, remove gate after 2027-09-05.
@@ -6988,6 +7011,13 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceLabelUpdateResponseSchema,
   WorkspaceLabelDeleteResponseSchema,
   WorkspaceLabelDeleteInspectResponseSchema,
+  ProjectContainerListResponseSchema,
+  ProjectContainerUpdateSchema,
+  ProjectContainerCreateResponseSchema,
+  ProjectContainerRenameResponseSchema,
+  ProjectContainerDeleteResponseSchema,
+  ProjectContainerReorderResponseSchema,
+  ProjectContainerAssignResponseSchema,
   ProjectUpdateMessageSchema,
   ProjectListResponseMessageSchema,
   ScriptStatusUpdateMessageSchema,
