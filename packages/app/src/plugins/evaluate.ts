@@ -402,7 +402,10 @@ export function runPluginClientBundle(
         )
       )
         throw new Error("Timeline selection action has no content: " + actionId);
-      resolvePluginIcon(icon);
+      // 0.13.0 port: icons.ts dropped resolvePluginIcon; parsePluginIcon
+      // validates once at registration the same way (throws on unknown
+      // Lucide icon) and is already imported by the 0.13.0 side of the merge.
+      parsePluginIcon(`Timeline selection action ${actionId}`, icon);
       timelineSelectionActionIds.add(actionId);
       return register(
         collector.timelineSelectionActions,
