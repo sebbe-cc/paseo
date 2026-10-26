@@ -16,10 +16,7 @@ import {
 import { resolveKeyboardFocusScope } from "@/keyboard/focus-scope";
 import {
   buildBrowserKeyboardPolicy,
-  isForwardedPluginInput,
-  isReplayedPluginInput,
   parseBrowserShortcutInput,
-  replayForwardedPluginInput,
   shouldPublishBrowserShortcutPolicy,
 } from "@/desktop/browser/shortcuts";
 import type { KeyboardFocusScope, KeyboardShortcutPayload } from "@/keyboard/actions";
@@ -252,7 +249,7 @@ export function useKeyboardShortcuts({
     focusScope: KeyboardFocusScope;
     domEvent: KeyboardEvent | null;
     browserFocusRestoreElement?: HTMLElement | null;
-  }): boolean => {
+  }) => {
     const store = useKeyboardShortcutsStore.getState();
     const previousChordState = chordStateRef.current;
     const result = resolveKeyboardShortcut({
@@ -291,7 +288,7 @@ export function useKeyboardShortcuts({
     }
 
     if (!result.match) {
-      return result.preventDefault;
+      return;
     }
 
     const handled = routeAndPerformShortcut({
@@ -301,7 +298,7 @@ export function useKeyboardShortcuts({
       browserFocusRestoreElement: input.browserFocusRestoreElement,
     });
     if (!handled || !input.domEvent) {
-      return handled;
+      return;
     }
 
     if (result.match.preventDefault) {
@@ -310,14 +307,13 @@ export function useKeyboardShortcuts({
     if (result.match.stopPropagation) {
       input.domEvent.stopPropagation();
     }
-    return true;
   };
 
   // The window listeners must outlive ordinary re-renders: removing them resets
   // any in-progress chord. Stable events let them read the latest render instead
   // of being re-registered whenever a route, callback, or selection changes.
   const handleKeyDown = useStableEvent((event: KeyboardEvent) => {
-    if (!shouldHandle() || isReplayedPluginInput(event)) {
+    if (!shouldHandle()) {
       return;
     }
 
@@ -382,15 +378,12 @@ export function useKeyboardShortcuts({
     if (!input) {
       return;
     }
-    const consumed = resolveAndPerformShortcut({
+    resolveAndPerformShortcut({
       event: input,
       focusScope: "browser",
       domEvent: null,
       browserFocusRestoreElement: getResidentBrowserWebview(input.browserId),
     });
-    if (!consumed && isForwardedPluginInput(input, isMac)) {
-      replayForwardedPluginInput(input);
-    }
   });
 
   useEffect(() => {
