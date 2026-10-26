@@ -986,7 +986,16 @@ test("status bounds a stalled account read and closes the host", async () => {
     diagnostic: "Muse account/read timed out",
   });
   expect(await h.recorded()).toContainEqual({ event: "hostClosed" });
-});
+}, 30000);
+
+test("status tolerates a slow version probe when the daemon starts under load", async () => {
+  // pa-4ua43: a cold daemon under load can stall spawn past the old 3 s
+  // probe timeout and stick the snapshot at unavailable. The raised probe
+  // timeout must still report the provider as available.
+  const h = await harness("catalog-controls", { MUSE_TEST_VERSION_DELAY_MS: "5000" });
+  expect(await h.provider.status!({ launch: h.launch })).toEqual({ available: true });
+  expect(await h.recorded()).toContainEqual({ event: "hostClosed" });
+}, 30000);
 
 test("interrupt targets the running turn when another prompt is queued", async () => {
   const h = await harness("interrupt", { MUSE_TEST_QUEUE: "1" });
