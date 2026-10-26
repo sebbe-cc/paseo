@@ -52,6 +52,7 @@ vi.mock("@/contexts/voice-context", () => ({
 vi.mock("@/contexts/toast-context", () => ({ useToast: () => ({ error: host.error }) }));
 vi.mock("@/hooks/use-shortcut-keys", () => ({ useShortcutKeys: () => [["Cmd", "Shift", "V"]] }));
 vi.mock("react-i18next", () => ({
+  initReactI18next: { type: "3rdParty", init: () => {} },
   useTranslation: () => ({
     t(key: string, values?: { name?: string }) {
       const messages: Record<string, string> = Object.fromEntries(
