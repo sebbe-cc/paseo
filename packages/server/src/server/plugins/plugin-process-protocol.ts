@@ -79,6 +79,7 @@ export type PluginProcessMessage =
   | {
       type: "ready";
       methods: string[];
+      inputSchemas?: Record<string, unknown>;
       providers: PluginProviderMetadata[];
       usageSources?: PluginUsageSourceMetadata[];
       hooks?: { events: string[]; before: string[] };
@@ -249,6 +250,7 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
       .object({
         type: z.literal("ready"),
         methods: z.array(z.string()),
+        inputSchemas: z.record(z.string(), z.unknown()).optional(),
         providers: z.array(providerMetadataSchema),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
         hooks: hooksSchema.optional(),

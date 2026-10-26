@@ -23,7 +23,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
-import { readPluginManifest } from "./manifest.js";
+import { readPluginManifest, type PluginAgentToolDeclaration } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
 import type {
@@ -67,11 +67,19 @@ interface PendingInvocation {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+export interface PluginAgentTool {
+  pluginId: string;
+  method: string;
+  description: string;
+  inputSchema: unknown;
+}
+
 interface LoadedPlugin {
   id: string;
   requirements: PluginRequirements | undefined;
   clientBundle: string;
   methods: ReadonlySet<string>;
+  agentTools: readonly PluginAgentTool[];
   hooks: { events: string[]; before: string[] };
   providers: readonly PluginProviderMetadata[];
   usageSources: readonly PluginUsageSourceMetadata[];
@@ -358,6 +366,7 @@ export class PluginRuntime {
       pluginId: input.id,
       pluginDirectory: directory,
       requirements: manifest.requirements,
+      agentTools: manifest.agentTools,
       child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
@@ -506,6 +515,22 @@ export class PluginRuntime {
     this.logTails.delete(pluginId);
   }
 
+  agentTools(): PluginAgentTool[] {
+    return [...this.plugins.values()]
+      .flatMap((plugin) => plugin.agentTools)
+      .sort((a, b) => a.pluginId.localeCompare(b.pluginId) || a.method.localeCompare(b.method));
+  }
+
+  /** Invokes only RPCs the plugin's manifest declared under agentTools. */
+  async invokeAgentTool(pluginId: string, method: string, input: unknown): Promise<unknown> {
+    const loaded = this.plugins.get(pluginId);
+    if (!loaded) throw new Error(`Plugin is not available: ${pluginId}`);
+    if (!loaded.agentTools.some((tool) => tool.method === method)) {
+      throw new Error(`Plugin ${pluginId} does not expose ${method} as an agent tool`);
+    }
+    return this.invoke(pluginId, method, input);
+  }
+
   async invoke(pluginId: string, method: string, input: unknown): Promise<unknown> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) throw new Error(`Plugin is not available: ${pluginId}`);
@@ -644,6 +669,7 @@ export class PluginRuntime {
         clientBundle: bundles.clientBundle ?? "",
         requirements: manifest.requirements,
         methods: new Set(),
+        agentTools: [],
         hooks: { events: [], before: [] },
         providers: [],
         usageSources: [],
@@ -660,6 +686,7 @@ export class PluginRuntime {
       pluginId,
       pluginDirectory: directory,
       requirements: manifest.requirements,
+      agentTools: manifest.agentTools,
       child: this.spawnChild(),
       bundle: serverBundle,
       clientBundle: bundles.clientBundle ?? "",
@@ -670,11 +697,12 @@ export class PluginRuntime {
     pluginId: string;
     pluginDirectory: string;
     requirements: PluginRequirements | undefined;
+    agentTools: readonly PluginAgentToolDeclaration[] | undefined;
     child: PluginChild;
     bundle: string;
     clientBundle: string;
   }): Promise<LoadedPlugin> {
-    const { pluginId, requirements, child, bundle, clientBundle } = input;
+    const { pluginId, requirements, agentTools, child, bundle, clientBundle } = input;
     const sessionHost = this.sessionHost;
     if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {
@@ -772,6 +800,7 @@ export class PluginRuntime {
       clientBundle,
       requirements,
       methods: new Set(ready.methods),
+      agentTools: resolveAgentTools(pluginId, agentTools, ready),
       hooks: ready.hooks ?? { events: [], before: [] },
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
@@ -1270,4 +1299,20 @@ function readConnectionId(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const connectionId = Reflect.get(value, "connectionId");
   return typeof connectionId === "string" ? connectionId : null;
+}
+
+export function resolveAgentTools(
+  pluginId: string,
+  declared: readonly PluginAgentToolDeclaration[] | undefined,
+  ready: { methods: string[]; inputSchemas?: Record<string, unknown> },
+): PluginAgentTool[] {
+  const methods = new Set(ready.methods);
+  return (declared ?? [])
+    .filter((tool) => methods.has(tool.method))
+    .map((tool) => ({
+      pluginId,
+      method: tool.method,
+      description: tool.description,
+      inputSchema: ready.inputSchemas?.[tool.method] ?? { type: "object" },
+    }));
 }
