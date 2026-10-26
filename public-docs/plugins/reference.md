@@ -1774,6 +1774,49 @@ for text that supports these actions on iOS. It enables native substring selecti
 timeline when actions are registered. Plain React Native `Text` on iOS retains its whole-text Copy
 menu and does not expose selection actions; Android `Text selectable` participates automatically.
 
+## Inline decorations
+
+`addInlineDecorator` turns matches of a pattern in assistant message text into chips. Use it for
+identifiers that point at plugin data, such as issue keys. Paseo draws the chip, so the plugin
+returns data instead of a component:
+
+```ts
+const beads = client.addInlineDecorator?.({
+  id: "bead",
+  pattern: /\b(?:pa|ft)-[a-z0-9]{2,}(?:\.\d+)*\b/,
+  resolve: ({ text }) => {
+    const bead = cache.get(text);
+    if (bead === null) return null;
+    return (
+      bead && { icon: "CircleDot", tone: bead.closed ? "muted" : "neutral", tooltip: bead.title }
+    );
+  },
+  onPress: ({ text, openPanel }) => openPanel("bead", { location: "explorer" }),
+});
+// After a background fetch fills the cache:
+beads?.invalidate(["pa-k1q"]);
+```
+
+| Field        | Type                                         | Behavior                                                                                        |
+| ------------ | -------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `id`         | `string`                                     | Unique within the plugin.                                                                       |
+| `pattern`    | `RegExp`                                     | Matched in prose. Only the `g` flag, no lookbehind, at most 200 characters, never empty.        |
+| `inlineCode` | `boolean`                                    | Also match a whole inline code span such as `` `pa-k1q` ``. Defaults to `true`.                 |
+| `resolve`    | `(match) => decoration \| null \| undefined` | Synchronous, from the plugin's cache. `null` leaves plain text; `undefined` draws a plain link. |
+| `onPress`    | `(context & { text }) => void`               | Runs with the agent command context of the message's agent, plus the matched text.              |
+
+A decoration has optional `label` (replaces the matched text), `icon` (Lucide name), `tone`
+(`neutral`, `success`, `warning`, `danger` or `muted`; colors come from the theme) and `tooltip`.
+
+- Decorations apply to assistant messages only, from plugins installed on that message's host.
+- Register the pattern once at setup. Changing it re-parses every mounted message. Send data
+  changes through `invalidate(texts)`, which re-runs `resolve` only for those texts, or for every
+  match when called without arguments.
+- A `resolve` miss is a good moment to start a batched fetch; only mounted messages call it.
+- Older hosts have no `addInlineDecorator`. Check for it, as above, and leave text undecorated.
+- On web and desktop the chip shows the icon, label and tooltip. On iOS and Android the match is
+  a tappable link for now.
+
 ## Theme and layout
 
 Plugin UI runs on desktop, browser, iOS, and Android, across every Paseo theme. `theme` is a typed `PluginTheme` mapped from the active host theme. Color and spacing must come from those props. Hardcoded colors and unstyled `Text` break when the host theme changes.
