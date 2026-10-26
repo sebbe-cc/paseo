@@ -1170,6 +1170,7 @@ export const ru: TranslationResources = {
       description: "Проверьте подключение и попробуйте снова.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "Группа «{{label}}»",
     statusBucket: {
@@ -2527,6 +2528,7 @@ export const ru: TranslationResources = {
         cycleTheme: "Переключить тему",
         focusMessageInput: "Перейти к полю ввода сообщения",
         cycleAgentMode: "Переключить режим агента",
+        toggleGlobalVoice: "Включить или выключить глобальный голосовой режим",
         toggleVoiceMode: "Переключить голосовой режим",
         startStopDictation: "Начать/остановить диктовку",
         interruptAgent: "Прервать агента",
