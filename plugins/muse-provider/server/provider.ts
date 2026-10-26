@@ -139,6 +139,7 @@ function connect(
           input.sessionId,
           { ...launch, env: { ...launch.env, ...input.config.env } },
           () => session.readUsage(),
+          () => session.awake,
         );
       } catch (error) {
         sessions.delete(input.sessionId);

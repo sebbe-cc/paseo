@@ -19,6 +19,7 @@ import {
 import type { UsageSourceRegistration } from "@getpaseo/plugin/server";
 import { execCommand } from "@getpaseo/plugin/server";
 import contribute from "../index.server.js";
+import { IDLE_MS } from "../server/idle-host.js";
 
 const connections: ProviderConnection[] = [];
 const roots: string[] = [];
@@ -1839,3 +1840,31 @@ test("Muse reports belong only to the session's account and remain available glo
   expect(await registry.listReports({ agentId: "muse-unknown" })).toEqual([]);
   expect((await registry.listReports()).map((report) => report.id)).toEqual(accountIds);
 });
+
+test("an opened closed session closes its idle Muse host and the next prompt resumes on a new one", async () => {
+  const original = await harness();
+  const history = path.join(original.root, "native-history.ndjson");
+  original.launch.env.MUSE_TEST_HISTORY = history;
+  await original.open();
+  await original.prompt();
+  await original.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const saved = original.events.findLast((event) => event.type === "session.persistence");
+  if (!saved) throw new Error("Expected session persistence");
+  await original.connection.close();
+  const h = await harness("text-reasoning", { MUSE_TEST_HISTORY: history });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  expect(await h.open(saved.persistence)).toMatchObject({ type: "session.ready" });
+  const hosts = async (event: string) =>
+    (await h.recorded()).filter((frame) => frame.event === event).length;
+  await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
+  expect(await hosts("hostClosed")).toBe(0);
+  await vi.advanceTimersByTimeAsync(1);
+  for (let tries = 0; (await hosts("hostClosed")) === 0 && tries < 500; tries++) await delay(10);
+  expect(await hosts("hostClosed")).toBe(1);
+  expect((await h.recorded()).some((frame) => frame.method === "session/read")).toBe(true);
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  expect(await hosts("hostStarted")).toBe(2);
+  expect((await h.recorded()).filter((frame) => frame.method === "session/resume")).toHaveLength(2);
+  expect(h.events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+}, 15000);
