@@ -17,6 +17,7 @@ import type {
   PluginScreenContribution as SDKPluginScreenContribution,
   PluginSettingsScreenContribution as SDKPluginSettingsScreenContribution,
   PluginTimelineRendererContribution,
+  PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
   PluginPanelLocation,
   PluginWorkspacePanelContribution as SDKPluginWorkspacePanelContribution,
@@ -60,6 +61,7 @@ export interface EvaluatedPlugin {
   themes: PluginThemeContribution[];
   timelineTransformers: PluginTimelineTransformerContribution[];
   timelineRenderers: PluginTimelineRendererContribution[];
+  timelineSelectionActions: PluginTimelineSelectionActionContribution[];
 }
 
 export interface InstalledPlugin extends EvaluatedPlugin {
@@ -89,6 +91,7 @@ export type {
   PluginSettingsScreenContribution,
   PluginThemeContribution,
   PluginTimelineRendererContribution,
+  PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
   PluginWorkspacePanelContribution,
 };

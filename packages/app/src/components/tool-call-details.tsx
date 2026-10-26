@@ -1,3 +1,4 @@
+import { SelectableText } from "@/components/selectable-text";
 import { useMemo, type ReactNode } from "react";
 import {
   View,
@@ -173,11 +174,11 @@ function ShellDetailSection({ command, output, ds }: ShellDetailProps) {
             contentContainerStyle={styles.codeHorizontalContent}
           >
             <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
-              <Text selectable style={styles.scrollText}>
-                <Text style={styles.shellPrompt}>$ </Text>
+              <SelectableText style={styles.scrollText}>
+                <SelectableText style={styles.shellPrompt}>$ </SelectableText>
                 {normalizedCommand}
                 {hasOutput ? `\n\n${commandOutput}` : ""}
-              </Text>
+              </SelectableText>
             </View>
           </ScrollView>
         </ScrollView>
@@ -257,13 +258,11 @@ function parseSubAgentLog(log: string): ParsedSubAgentLog {
 function SubAgentActionRow({ action }: { action: SubAgentActivityRow }) {
   return (
     <View style={styles.subAgentActionRow}>
-      <Text selectable style={styles.subAgentActionTool}>
+      <SelectableText style={styles.subAgentActionTool}>
         {formatSubAgentToolName(action.toolName)}
-      </Text>
+      </SelectableText>
       {action.summary ? (
-        <Text selectable style={styles.subAgentActionSummary}>
-          {action.summary}
-        </Text>
+        <SelectableText style={styles.subAgentActionSummary}>{action.summary}</SelectableText>
       ) : null}
     </View>
   );
@@ -292,18 +291,10 @@ function SubAgentLogText({
   hasActions: boolean;
 }) {
   if (activityLog.length > 0) {
-    return (
-      <Text selectable style={styles.scrollText}>
-        {activityLog}
-      </Text>
-    );
+    return <SelectableText style={styles.scrollText}>{activityLog}</SelectableText>;
   }
   if (!hasActions) {
-    return (
-      <Text selectable style={styles.scrollText}>
-        {fallbackHeader}
-      </Text>
-    );
+    return <SelectableText style={styles.scrollText}>{fallbackHeader}</SelectableText>;
   }
   return null;
 }
@@ -340,9 +331,9 @@ function SubAgentDetailSection({
           >
             <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
               {childSessionId ? (
-                <Text selectable style={styles.subAgentSessionText}>
+                <SelectableText style={styles.subAgentSessionText}>
                   session {childSessionId}
-                </Text>
+                </SelectableText>
               ) : null}
               {hasActions ? (
                 <View style={styles.subAgentActions}>
@@ -416,9 +407,9 @@ function ScrollableTextSection({
         {keyedLines ? (
           <HighlightedLines lines={keyedLines} startLine={startLine} />
         ) : (
-          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+          <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {content}
-          </Text>
+          </SelectableText>
         )}
       </ScrollView>
     </ScrollView>
@@ -443,9 +434,9 @@ function FetchDetailSection({ url, result, ds }: FetchDetailProps) {
         showsVerticalScrollIndicator
       >
         <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
-          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+          <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {result ? `${url}\n\n${result}` : url}
-          </Text>
+          </SelectableText>
         </ScrollView>
       </ScrollView>
     </View>
@@ -461,9 +452,7 @@ function ScrollablePlainTextSection({ text, ds }: { text: string; ds: DetailStyl
         nestedScrollEnabled
         showsVerticalScrollIndicator
       >
-        <Text selectable style={styles.plainText}>
-          {text}
-        </Text>
+        <SelectableText style={styles.plainText}>{text}</SelectableText>
       </ScrollView>
     </View>
   );
@@ -489,9 +478,9 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
           showsVerticalScrollIndicator
         >
           <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
-            <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+            <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
               {detail.content}
-            </Text>
+            </SelectableText>
           </ScrollView>
         </ScrollView>
       </View>,
@@ -500,27 +489,27 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
   if (detail.filePaths && detail.filePaths.length > 0) {
     out.push(
       <View key="search-files" style={styles.section}>
-        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+        <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.filePaths.join("\n")}
-        </Text>
+        </SelectableText>
       </View>,
     );
   }
   if (detail.webResults && detail.webResults.length > 0) {
     out.push(
       <View key="search-web-results" style={styles.section}>
-        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+        <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.webResults.map((entry) => `${entry.title}\n${entry.url}`).join("\n\n")}
-        </Text>
+        </SelectableText>
       </View>,
     );
   }
   if (detail.annotations && detail.annotations.length > 0) {
     out.push(
       <View key="search-annotations" style={styles.section}>
-        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+        <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.annotations.join("\n\n")}
-        </Text>
+        </SelectableText>
       </View>,
     );
   }
@@ -579,9 +568,9 @@ function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles, t: TFunct
           contentContainerStyle={styles.jsonContent}
           showsHorizontalScrollIndicator={true}
         >
-          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+          <SelectableText style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {value}
-          </Text>
+          </SelectableText>
         </ScrollView>
       </View>,
     );
@@ -594,17 +583,13 @@ function PaseoDetailSection({ section }: { section: PaseoToolDetailSection }) {
     <View style={styles.paseoSection}>
       <Text style={styles.paseoSectionTitle}>{section.title}</Text>
       {section.kind === "prose" ? (
-        <Text selectable style={styles.paseoProse}>
-          {section.text}
-        </Text>
+        <SelectableText style={styles.paseoProse}>{section.text}</SelectableText>
       ) : (
         <View style={styles.paseoFields}>
           {section.fields.map((field) => (
             <View key={field.label} style={styles.paseoFieldRow}>
               <Text style={styles.paseoFieldLabel}>{field.label}</Text>
-              <Text selectable style={styles.paseoFieldValue}>
-                {field.value}
-              </Text>
+              <SelectableText style={styles.paseoFieldValue}>{field.value}</SelectableText>
             </View>
           ))}
         </View>
@@ -706,13 +691,12 @@ function ErrorSection({ errorText, ds }: { errorText: string; ds: DetailStyles }
         contentContainerStyle={styles.jsonContent}
         showsHorizontalScrollIndicator={true}
       >
-        <Text
-          selectable
+        <SelectableText
           style={[styles.scrollText, styles.errorText]}
           dataSet={CODE_SURFACE_DATASET}
         >
           {errorText}
-        </Text>
+        </SelectableText>
       </ScrollView>
     </View>
   );
