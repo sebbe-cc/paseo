@@ -28,6 +28,7 @@ vi.mock("../../utils/client.js", () => ({
     listProjects,
     renameProject,
     removeProject,
+    getLastServerInfoMessage: () => null,
     close,
   })),
 }));
@@ -43,6 +44,7 @@ describe("project commands", () => {
       "ls",
       "rename",
       "delete",
+      "container",
     ]);
   });
 
