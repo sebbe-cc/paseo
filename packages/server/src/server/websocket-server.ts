@@ -18,6 +18,7 @@ import { CreationService } from "./creation/index.js";
 import { MessageReceipts } from "./message-receipts/index.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
+import type { Socket } from "node:net";
 import { join } from "path";
 import { getHostName } from "./host-name.js";
 import { randomUUID } from "node:crypto";
@@ -900,7 +901,7 @@ export class VoiceAssistantWebSocketServer {
   ): WebSocketServer {
     const password = auth?.password;
     const wss = new WebSocketServer({
-      server,
+      noServer: true,
       path: "/ws",
       maxPayload: MAX_WEBSOCKET_MESSAGE_BYTES,
       handleProtocols: (protocols) => selectWebSocketProtocol(protocols, password),
@@ -916,6 +917,19 @@ export class VoiceAssistantWebSocketServer {
     wss.on("connection", (ws, request) => {
       void this.attachAuthenticatedSocket(ws, request, password);
     });
+    const proxyUpgrade = this.serviceProxy?.upgradeHandler({ passthroughUnknown: true });
+    const onUpgrade = (request: IncomingMessage, socket: Socket, head: Buffer): void => {
+      // EventEmitter invokes every listener. Dispatch once so the daemon's
+      // path/host/origin checks cannot reject a socket already owned by a service.
+      if (proxyUpgrade?.(request, socket, head)) {
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+      });
+    };
+    server.on("upgrade", onUpgrade);
+    wss.once("close", () => server.removeListener("upgrade", onUpgrade));
     return wss;
   }
 
