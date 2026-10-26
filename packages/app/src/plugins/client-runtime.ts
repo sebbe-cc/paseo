@@ -12,6 +12,8 @@ import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
 import type { InstalledPlugin } from "./types";
+import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
+import { pluginRecentNavigation } from "./recent-navigation";
 
 export function createPluginClientRuntime(
   installation: InstalledPlugin,
@@ -26,6 +28,9 @@ export function createPluginClientRuntime(
     ...capabilities,
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
+    navigation: pluginRecentNavigation,
+    addKeyboardShortcut: (contribution) =>
+      pluginKeyboardShortcuts.add(installation.serverId, contribution),
     hosts: createPluginHosts(getHostRuntimeStore(), installation.lifetime.signal),
     addComposerPill(contribution) {
       return pluginButtonStore.addComposerPill(installation, contribution);
