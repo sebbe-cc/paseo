@@ -140,7 +140,11 @@ const GitLabPipelineDetailsSchema = z
     ref: z.string().nullable().optional(),
     sha: z.string().nullable().optional(),
     web_url: z.string().nullable().optional(),
-    jobs: z.array(GitLabPipelineJobSchema).optional().default([]),
+    // glab reports null jobs for pipelines run by external CI.
+    jobs: z
+      .array(GitLabPipelineJobSchema)
+      .nullish()
+      .transform((jobs) => jobs ?? []),
   })
   .passthrough();
 
