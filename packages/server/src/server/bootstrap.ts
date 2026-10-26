@@ -1431,7 +1431,6 @@ export async function createPaseoDaemon(
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
-  await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1817,6 +1816,9 @@ export async function createPaseoDaemon(
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             providerSnapshotManager.settlePluginProviders();
+            // A due schedule can reopen a persisted provider. Its session-open
+            // hooks must be registered before the scheduler starts ticking.
+            await scheduleService.start();
             wsServer.beginAcceptingConnections();
             relayRuntime = createRelayRuntime({
               config: {
@@ -1862,6 +1864,7 @@ export async function createPaseoDaemon(
     } catch (error) {
       localCredential = null;
       await deleteLocalCredential(config.paseoHome);
+      await scheduleService.stop().catch(() => undefined);
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
