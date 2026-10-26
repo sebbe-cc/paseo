@@ -210,6 +210,24 @@ export const PASEO_TOOL_CATALOG = {
       outputFields: ["workspaceId", "archivedAgentIds", "removedDirectory"],
     },
   },
+  get_workspace_labels: {
+    label: "Read workspace labels",
+    context: field("workspaceId"),
+    detail: { inputOrder: ["workspaceId"], outputFields: ["workspaceId", "labels"] },
+  },
+  set_workspace_label: {
+    label: "Set workspace label",
+    context: field("name"),
+    detail: {
+      inputOrder: ["workspaceId", "name", "color"],
+      outputFields: ["workspaceId", "label", "labels"],
+    },
+  },
+  remove_workspace_label: {
+    label: "Remove workspace label",
+    context: field("name"),
+    detail: { inputOrder: ["workspaceId", "name"], outputFields: ["workspaceId", "labels"] },
+  },
   list_workspace_scripts: { label: "List scripts", detail: { inputOrder: ["workspaceId"] } },
   start_workspace_script: {
     label: "Start script",
