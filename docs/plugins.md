@@ -439,6 +439,13 @@ Emit from the operation owner, not a client subscription. Provider history repla
 live hooks. Observers must not be awaited inside agent mutations: a callback can send a prompt or
 answer a permission through its own daemon session. Awaiting it there deadlocks that command.
 
+## Voice providers
+
+The experimental fork voice API and startup selection are defined in the
+[public contract](../public-docs/plugins/reference.md#voice-providers-experimental-fork-api).
+Keep vendor authentication, media bootstrap and delegation in a server plugin.
+The [Codex Live example](../plugin-examples/codex-live/README.md) explains isolated testing and transport limits.
+
 ## Contribute a provider
 
 Register a provider from `index.server.ts`. The provider connection is callback-based and owns all

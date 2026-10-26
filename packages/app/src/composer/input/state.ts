@@ -3,7 +3,7 @@ import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 import type { MessagePayload, TextReplacement } from "@/composer/types";
 import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
 
-export type SendBehavior = ActiveTurnBehavior | "queue";
+export type SendBehavior = Exclude<ActiveTurnBehavior, "steer_only"> | "queue";
 
 export function resolveActiveSendBehavior(
   sendBehavior: SendBehavior,
@@ -227,4 +227,50 @@ export function resolveRetainedSelection(
   const end = Math.min(Math.max(retained.end, 0), textLength);
   const start = Math.min(Math.max(retained.start, 0), end);
   return { start, end };
+}
+
+export interface ToggleRealtimeVoiceContext {
+  voice:
+    | {
+        isVoiceSwitching: boolean;
+        isVoiceModeForAgent: (serverId: string, agentId: string) => boolean;
+        startVoice: (serverId: string, agentId: string) => Promise<unknown>;
+      }
+    | null
+    | undefined;
+  voiceServerId: string | undefined;
+  voiceAgentId: string | undefined;
+  isConnected: boolean;
+  disabled: boolean;
+  isAgentRunning: boolean;
+  isPluginVoice: boolean;
+  handleStopRealtimeVoice: () => Promise<unknown> | void;
+  toast: { error: (msg: string) => void };
+  interruptBeforeVoiceMessage: string;
+  exitFullscreen: () => void;
+}
+
+export function toggleRealtimeVoice(ctx: ToggleRealtimeVoiceContext): void {
+  if (!ctx.voice || !ctx.voiceServerId || !ctx.voiceAgentId || !ctx.isConnected || ctx.disabled) {
+    return;
+  }
+  if (ctx.voice.isVoiceSwitching) return;
+  if (ctx.voice.isVoiceModeForAgent(ctx.voiceServerId, ctx.voiceAgentId)) {
+    void ctx.handleStopRealtimeVoice();
+    return;
+  }
+  if (ctx.isAgentRunning && !ctx.isPluginVoice) {
+    ctx.toast.error(ctx.interruptBeforeVoiceMessage);
+    return;
+  }
+  ctx.exitFullscreen();
+  void ctx.voice.startVoice(ctx.voiceServerId, ctx.voiceAgentId).catch((error) => {
+    console.error("[MessageInput] Failed to start realtime voice", error);
+    let message: string | null = null;
+    if (error instanceof Error) message = error.message;
+    else if (typeof error === "string") message = error;
+    if (message && message.trim().length > 0) {
+      ctx.toast.error(message);
+    }
+  });
 }

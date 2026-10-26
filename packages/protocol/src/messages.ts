@@ -1242,7 +1242,7 @@ const ImageAttachmentSchema = z.object({
   mimeType: z.string(), // e.g., "image/jpeg", "image/png"
 });
 
-export const ActiveTurnBehaviorSchema = z.enum(["interrupt", "steer"]);
+export const ActiveTurnBehaviorSchema = z.enum(["interrupt", "steer", "steer_only"]);
 export type ActiveTurnBehavior = z.infer<typeof ActiveTurnBehaviorSchema>;
 
 export const SendAgentMessageSchema = z.object({
@@ -3535,6 +3535,8 @@ export const VoiceInputStateMessageSchema = z.object({
   type: z.literal("voice_input_state"),
   payload: z.object({
     isSpeaking: z.boolean(),
+    sessionEnded: z.boolean().optional(),
+    error: z.string().optional(),
   }),
 });
 
@@ -3589,6 +3591,7 @@ export const ServerCapabilityStateSchema = z.object({
 });
 
 export const ServerVoiceCapabilitiesSchema = z.object({
+  provider: z.object({ pluginId: z.string(), providerId: z.string() }).optional(),
   dictation: ServerCapabilityStateSchema,
   voice: ServerCapabilityStateSchema,
 });
@@ -3662,6 +3665,7 @@ export const ServerInfoStatusPayloadSchema = z
         connectedHosts: z.boolean().optional(),
         hostMultiplexing: z.boolean().optional(),
         usageSources: z.boolean().optional(),
+        pluginVoiceProviders: z.boolean().optional(),
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
         providersSnapshotCwd: z.boolean().optional(),
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.

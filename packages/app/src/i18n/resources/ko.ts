@@ -1160,6 +1160,7 @@ export const ko: TranslationResources = {
       description: "연결을 확인한 후 다시 시도하세요.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "{{label}} 그룹",
     statusBucket: {
@@ -2496,6 +2497,7 @@ export const ko: TranslationResources = {
         cycleTheme: "테마 순환",
         focusMessageInput: "메시지 입력란에 포커스",
         cycleAgentMode: "에이전트 모드 전환",
+        toggleGlobalVoice: "전역 음성 전환",
         toggleVoiceMode: "음성 모드 토글",
         startStopDictation: "받아쓰기 시작/중지",
         interruptAgent: "에이전트 중단",
