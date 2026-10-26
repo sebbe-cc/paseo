@@ -64,6 +64,12 @@ buildNpmPackage {
   # npm rebuild. We manually rebuild only node-pty in buildPhase.
   npmRebuildFlags = ["--ignore-scripts"];
 
+  # --ignore-scripts also skips the root postinstall, so apply patches/ here. Without the
+  # @gorhom/bottom-sheet patch the renderer crashed at start with React #130 (pa-ituxb).
+  preBuild = ''
+    npm run postinstall
+  '';
+
   nativeBuildInputs =
     [
       python3 # for node-gyp (node-pty)
