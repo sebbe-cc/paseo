@@ -851,6 +851,32 @@ export default function contribute() { void handler; return () => undefined; }`,
     );
   });
 
+  it("classifies typed package imports by their bundled runtime target", async () => {
+    const entries = await createSplitPlugin();
+    const dependency = path.join(entries.directory, "node_modules", "fixture-dependency");
+    await mkdir(dependency, { recursive: true });
+    await Promise.all([
+      writeFile(
+        path.join(dependency, "package.json"),
+        JSON.stringify({ name: "fixture-dependency", main: "index.js", types: "index.d.ts" }),
+      ),
+      writeFile(path.join(dependency, "index.d.ts"), "export declare function handler(): void;"),
+      symlink(
+        path.join(entries.directory, "server", "handler.ts"),
+        path.join(dependency, "index.js"),
+      ),
+      writeFile(
+        entries.client,
+        `import { handler } from "fixture-dependency";
+export default function contribute() { void handler; return () => undefined; }`,
+      ),
+    ]);
+
+    await expect(compilePlugin(entries)).rejects.toThrow(
+      "server-only module cannot be imported into the plugin client bundle",
+    );
+  });
+
   it("allows linked dependencies to resolve within their own package root", async () => {
     const entries = await createSplitPlugin();
     const linkedPackage = await mkdtemp(path.join(tmpdir(), "paseo-plugin-linked-dependency-"));
