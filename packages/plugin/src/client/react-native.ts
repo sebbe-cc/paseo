@@ -1,9 +1,12 @@
-import type { ForwardRefExoticComponent, RefAttributes } from "react";
-import type { StyleProp, ViewStyle } from "react-native";
+import type { ComponentType, ForwardRefExoticComponent, RefAttributes } from "react";
+import type { StyleProp, TextProps, ViewStyle } from "react-native";
 
 // COMPAT(pluginReactNativeEntrypoint): added in v0.13.0, remove after 2027-04-20
 /** @deprecated Import Paseo UI from @getpaseo/plugin/client/ui. */
 export * from "./ui.js";
+
+/** Text with native substring selection and timeline selection actions. */
+export declare const SelectableText: ComponentType<TextProps>;
 
 /** @deprecated Render StreamedText from @getpaseo/plugin/client/ui. Removed after 2027-04-20 with this entry. */
 export declare function useRevealedText(text: string, phase: "streaming" | "complete"): string;

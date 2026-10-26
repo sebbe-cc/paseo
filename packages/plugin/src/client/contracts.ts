@@ -1,4 +1,5 @@
 import type { PluginText } from "../text.js";
+import type { PluginAttachmentItem } from "../attachments.js";
 import type { ComponentType } from "react";
 import type { PaseoApi } from "@getpaseo/client";
 import type { AgentTimelineItem, JsonValue } from "@getpaseo/protocol/agent-types";
@@ -194,6 +195,9 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
     contribution: PluginComposerPillContribution<PluginText>,
   ): PluginButtonRegistration<PluginText>;
   addAttachmentSource(contribution: PluginAttachmentSourceContribution<PluginText>): PluginCleanup;
+  addTimelineSelectionAction(
+    contribution: PluginTimelineSelectionActionContribution,
+  ): PluginCleanup;
   addTheme(contribution: PluginThemeContribution<PluginText>): PluginCleanup;
   addFilePanel(contribution: PluginFilePanelContribution<PluginText>): PluginCleanup;
   addTimelineTransformer<ItemType extends AgentTimelineItem["type"]>(
@@ -370,3 +374,32 @@ export type SettingsState<Schema extends ZodType> = (
   reset(): Promise<boolean>;
   reload(): Promise<void>;
 };
+
+export interface PluginTimelineSelectionSegment {
+  readonly itemId: string;
+  readonly surfaceId: string;
+  readonly text: string;
+  readonly start?: number;
+  readonly end?: number;
+  readonly prefix?: string;
+  readonly suffix?: string;
+}
+
+export interface PluginTimelineSelection {
+  readonly text: string;
+  readonly segments: readonly PluginTimelineSelectionSegment[];
+}
+
+export interface PluginTimelineSelectionActionProps extends PluginHostProps {
+  agentId: string;
+  selection: PluginTimelineSelection;
+  composer: { addAttachment(item: PluginAttachmentItem): void };
+  close(): void;
+}
+
+export interface PluginTimelineSelectionActionContribution {
+  id: string;
+  title: string;
+  icon: string;
+  Content: ComponentType<PluginTimelineSelectionActionProps>;
+}
