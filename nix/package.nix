@@ -89,7 +89,12 @@ buildNpmPackage rec {
   # Don't use the default npm build hook — we need a custom build sequence
   dontNpmBuild = true;
 
-  preBuild = lib.optionalString (buildMetadata != null) ''
+  # --ignore-scripts also skips the root postinstall, so apply patches/ here and fail the
+  # build if one did not take; the daemon shipped without the @opencode-ai/sdk patch (pa-moid0).
+  preBuild = ''
+    npm run postinstall
+    node scripts/check-patches-applied.mjs
+  '' + lib.optionalString (buildMetadata != null) ''
     node scripts/stamp-build-version.mjs ${lib.escapeShellArg buildMetadata}
   '';
 
