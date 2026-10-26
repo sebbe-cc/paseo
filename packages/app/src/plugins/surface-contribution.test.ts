@@ -44,6 +44,7 @@ function installation(
     timelineTransformers: [],
     timelineRenderers: [],
     timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
