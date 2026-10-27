@@ -30,6 +30,8 @@ function installation(): InstalledPlugin {
     themes: [],
     timelineTransformers: [],
     timelineRenderers: [],
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
