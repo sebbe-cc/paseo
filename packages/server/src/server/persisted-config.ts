@@ -103,6 +103,10 @@ const SpeechProviderIdSchema = z
 
 const FeatureDictationSchema = z
   .object({
+    provider: z
+      .object({ pluginId: z.string().min(1), providerId: z.string().min(1) })
+      .strict()
+      .optional(),
     enabled: z.boolean().optional(),
     stt: z
       .object({
