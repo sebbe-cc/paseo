@@ -372,6 +372,7 @@ const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: true,
   supportsRewindBoth: true,
+  supportsPreCompactHook: true,
 };
 
 const DEFAULT_MODES: AgentMode[] = [
@@ -473,6 +474,7 @@ interface ClaudeAgentSessionOptions {
   handle?: AgentPersistenceHandle;
   agentId?: string;
   launchEnv?: Record<string, string>;
+  beforeCompact?: AgentLaunchContext["beforeCompact"];
   persistSession?: boolean;
   logger: Logger;
   queryFactory?: ClaudeQueryFactory;
@@ -1644,6 +1646,7 @@ export class ClaudeAgentClient implements AgentClient {
       runtimeSettings: this.runtimeSettings,
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
+      beforeCompact: launchContext?.beforeCompact,
       persistSession: options?.persistSession,
       logger: this.logger,
       queryFactory: this.queryFactory,
@@ -1674,6 +1677,7 @@ export class ClaudeAgentClient implements AgentClient {
       handle,
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
+      beforeCompact: launchContext?.beforeCompact,
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
@@ -2282,6 +2286,7 @@ class ClaudeAgentSession implements AgentSession {
 
   private readonly config: ClaudeAgentConfig;
   private readonly launchEnv?: Record<string, string>;
+  private readonly beforeCompact?: AgentLaunchContext["beforeCompact"];
   private readonly agentId?: string;
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly runtimeSettings?: ProviderRuntimeSettings;
@@ -2393,6 +2398,7 @@ class ClaudeAgentSession implements AgentSession {
     this.config = config;
     assertClaudeThinkingOptionSupported(config.model, config.thinkingOptionId);
     this.launchEnv = options.launchEnv;
+    this.beforeCompact = options.beforeCompact;
     this.agentId = options.agentId;
     this.defaults = options.defaults;
     this.runtimeSettings = options.runtimeSettings;
@@ -3655,7 +3661,7 @@ class ClaudeAgentSession implements AgentSession {
       // subagents keep running. Without this declaration an interrupt kills every one of them.
       // Claude stops a helper itself with its TaskStop tool.
       perTaskStopAffordance: true,
-      hooks: this.buildSubagentEffortHooks(),
+      hooks: { ...this.buildSubagentEffortHooks(), ...this.buildPreCompactHooks() },
       ...(this.persistSession === undefined ? {} : { persistSession: this.persistSession }),
       env: sdkEnv,
     };
@@ -5237,6 +5243,20 @@ class ClaudeAgentSession implements AgentSession {
       PostToolUse: [{ hooks: [observe] }],
       SubagentStop: [{ hooks: [observe] }],
     };
+  }
+
+  // Plugin agent.compact hooks; skip blocks the compaction ("Compaction blocked by PreCompact hook").
+  private buildPreCompactHooks(): ClaudeOptions["hooks"] {
+    const beforeCompact = this.beforeCompact;
+    if (!beforeCompact) return {};
+    const preCompact = async (input: unknown) => {
+      const trigger = (input as { trigger?: string }).trigger === "manual" ? "manual" : "auto";
+      const { skip } = await beforeCompact({ reason: trigger });
+      return skip
+        ? { decision: "block" as const, reason: "A Paseo plugin replaced this compaction" }
+        : {};
+    };
+    return { PreCompact: [{ hooks: [preCompact] }] };
   }
 
   private notifySubscribers(event: AgentStreamEvent): void {
