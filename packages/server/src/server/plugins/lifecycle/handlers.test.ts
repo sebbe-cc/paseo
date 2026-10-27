@@ -98,3 +98,25 @@ test("session-open hooks reject changes to session identity instead of silently 
     ),
   ).rejects.toThrow("agent.session_open hooks can only change env");
 });
+
+test("agent.compact hooks can only change skip", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  const input = {
+    agentId: "agent-1",
+    provider: "claude",
+    reason: "auto",
+    source: "provider",
+    usage: { contextWindowUsedTokens: 900, contextWindowMaxTokens: 1000 },
+    skip: false,
+  };
+  const remove = hooks.before("agent.compact", ({ request }) => ({ ...request, skip: true }));
+  await expect(hooks.invoke("skip", "before", "agent.compact", input, paseo)).resolves.toEqual({
+    ...input,
+    skip: true,
+  });
+  remove();
+  hooks.before("agent.compact", ({ request }) => ({ ...request, reason: "manual" }));
+  await expect(hooks.invoke("reason", "before", "agent.compact", input, paseo)).rejects.toThrow(
+    "agent.compact hooks can only change skip",
+  );
+});
