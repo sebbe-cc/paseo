@@ -518,6 +518,46 @@ the current job continues. An idle agent starts a new turn. The SDK rejects this
 option on older hosts before sending it. Explicit agent cancellation remains a
 separate Paseo action.
 
+### Dictation providers (experimental fork API)
+
+This API requires the `feat/plugin-dictation-provider` topic. Check
+`server_info.features.pluginDictationProviders` before using it. It drives the
+composer's dictation button, not voice mode. Clients that advertise
+`plugin_dictation_providers` send the composer's `agentId` with
+`dictation_stream_start`; older clients keep Paseo's built-in dictation.
+
+```ts
+server.registerDictationProvider({ id: "live", label: "Live", start: startDictation });
+```
+
+Select it in `config.json`; like voice, selection is read at startup and an
+unavailable plugin fails explicitly:
+
+```json
+{
+  "features": {
+    "dictation": {
+      "provider": { "pluginId": "my-plugin", "providerId": "live" }
+    }
+  }
+}
+```
+
+`start({ agentId, directory, paseo, signal })` resolves with a
+`DictationProviderSession` once it accepts audio. `agentId` is the chat being
+dictated into and is absent outside an agent chat, so read its timeline only
+when present.
+
+| Method                | Contract                                                                         |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `appendAudio(base64)` | PCM16 little-endian, mono, 16 kHz. Accept promptly; bound any queue.             |
+| `commit()`            | Resolve with the text spoken since the previous commit. Paseo joins the commits. |
+| `close()`             | Idempotent. Drop uncommitted audio; release transports and timers.               |
+
+Paseo commits when the user stops dictating and every 15 s of audio during long
+dictation. Audio and commits arrive in order. A rejected commit fails the
+dictation with a retryable error.
+
 ### Usage sources
 
 **Requires Paseo 0.11.** Register a source from your server entry with
