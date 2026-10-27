@@ -1189,6 +1189,7 @@ export const es: TranslationResources = {
       description: "Comprueba tu conexión e inténtalo de nuevo.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "Grupo {{label}}",
     statusBucket: {
@@ -2356,6 +2357,8 @@ export const es: TranslationResources = {
     diagnostics: {
       title: "Diagnóstico",
       testAudio: "audio de prueba",
+      thinkingTone: "Tono de espera en modo voz",
+      thinkingToneHint: "Pitar mientras el agente prepara una respuesta de voz",
       playTest: "Prueba de juego",
       playing: "Jugando...",
       playbackFailed: "Error de reproducción:{{message}}",
@@ -2540,6 +2543,7 @@ export const es: TranslationResources = {
         cycleTheme: "Tema del ciclo",
         focusMessageInput: "Entrada de mensaje de enfoque",
         cycleAgentMode: "Alternar modo del agente",
+        toggleGlobalVoice: "Activar o desactivar la voz global",
         toggleVoiceMode: "Alternar modo de voz",
         startStopDictation: "Iniciar dictado/stop",
         interruptAgent: "agente de interrupción",
