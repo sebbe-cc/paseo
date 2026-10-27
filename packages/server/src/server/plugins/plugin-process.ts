@@ -1,3 +1,4 @@
+import { PluginVoiceWorker } from "./voice-worker.js";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
 import {
@@ -63,6 +64,7 @@ export function createPluginWorker(options: {
     send({ type: "hooks.changed", hooks: hooks.catalog() });
   });
   const handlers = new Map<string, RegisteredRpc>();
+  const voice = new PluginVoiceWorker();
   const providers = new Map<string, ProviderRegistration>();
   const usageSources = new Map<string, UsageSourceRegistration>();
   const providerConnections = new Map<
@@ -74,6 +76,7 @@ export function createPluginWorker(options: {
   let daemonClient: DaemonClient | null = null;
   let paseo: PaseoApi | null = null;
   let stopping = false;
+  let directory = "";
   function send(message: PluginProcessMessage): void {
     channel.send(message);
   }
@@ -264,6 +267,7 @@ export function createPluginWorker(options: {
   });
 
   async function initialize(message: Extract<PluginProcessRequest, { type: "initialize" }>) {
+    directory = message.pluginDirectory;
     daemonClient = new DaemonClient({
       url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
       clientId: createPluginClientId(message.pluginId),
@@ -283,6 +287,7 @@ export function createPluginWorker(options: {
     const contributedCleanup = contribute({
       handle: (contract, handler) =>
         register(contract, (input, context) => handler(contract.input.parse(input), context)),
+      registerVoiceProvider: voice.register,
       registerProvider,
       registerUsageSource,
       registerSettings,
@@ -312,12 +317,14 @@ export function createPluginWorker(options: {
         .sort((left, right) => left.id.localeCompare(right.id))
         .map(providerMetadata),
       usageSources: usageSourceMetadata,
+      voiceProviders: voice.catalog(),
     });
   }
 
   async function shutdown(): Promise<void> {
     if (stopping) return;
     stopping = true;
+    await voice.shutdown();
     const releaseApi = paseo
       ?.dispose()
       .catch((error) => console.error("Plugin API cleanup failed", error));
@@ -339,10 +346,19 @@ export function createPluginWorker(options: {
     channel.disconnect();
   }
 
-  function handleUsageRequest(
-    message: Extract<PluginProcessRequest, { type: "usage.fetch" | "usage.discover" }>,
+  function handleServiceRequest(
+    message: Extract<
+      PluginProcessRequest,
+      { type: "usage.fetch" | "usage.discover" | "voice.request" }
+    >,
   ): void {
     void (async () => {
+      if (message.type === "voice.request") {
+        if (!paseo) throw new Error("Plugin API is unavailable");
+        return voice.request(message.sessionId, message.command, paseo, directory, (event) =>
+          send({ type: "voice.event", sessionId: message.sessionId, event }),
+        );
+      }
       const source = usageSources.get(message.sourceId);
       if (!source) throw new Error(`Unknown usage source: ${message.sourceId}`);
       if (message.type === "usage.discover")
@@ -357,6 +373,7 @@ export function createPluginWorker(options: {
 
   function rejectWhileStopping(message: PluginProcessRequest): void {
     if (
+      message.type === "voice.request" ||
       message.type === "provider.status" ||
       message.type === "provider.catalog_key" ||
       message.type === "usage.fetch" ||
@@ -379,6 +396,19 @@ export function createPluginWorker(options: {
     } else if (message.type === "provider.close") {
       send({ type: "provider.closed", connectionId: message.connectionId });
     }
+  }
+
+  function isServiceRequest(
+    message: PluginProcessRequest,
+  ): message is Extract<
+    PluginProcessRequest,
+    { type: "usage.fetch" | "usage.discover" | "voice.request" }
+  > {
+    return (
+      message.type === "voice.request" ||
+      message.type === "usage.fetch" ||
+      message.type === "usage.discover"
+    );
   }
 
   function handleMessage(rawMessage: unknown): void {
@@ -447,8 +477,8 @@ export function createPluginWorker(options: {
       );
       return;
     }
-    if (message.type === "usage.fetch" || message.type === "usage.discover") {
-      handleUsageRequest(message);
+    if (isServiceRequest(message)) {
+      handleServiceRequest(message);
       return;
     }
     if (message.type === "provider.connect") {

@@ -1182,6 +1182,7 @@ export const fr: TranslationResources = {
       description: "Vérifiez votre connexion et réessayez.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "Groupe {{label}}",
     statusBucket: {
@@ -2354,6 +2355,8 @@ export const fr: TranslationResources = {
     diagnostics: {
       title: "Diagnostic",
       testAudio: "Tester le son",
+      thinkingTone: "Tonalité d'attente en mode vocal",
+      thinkingToneHint: "Bip pendant que l'agent prépare une réponse vocale",
       playTest: "Lancer le test",
       playing: "Lecture…",
       playbackFailed: "Échec de la lecture : {{message}}",
@@ -2541,6 +2544,7 @@ export const fr: TranslationResources = {
         cycleTheme: "Parcourir les thèmes",
         focusMessageInput: "Aller à la zone de saisie",
         cycleAgentMode: "Parcourir les modes de l’agent",
+        toggleGlobalVoice: "Activer ou désactiver la voix globale",
         toggleVoiceMode: "Activer/désactiver le mode vocal",
         startStopDictation: "Démarrer/arrêter la dictée",
         interruptAgent: "Interrompre l’agent",
