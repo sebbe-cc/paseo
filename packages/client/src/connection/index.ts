@@ -141,6 +141,7 @@ export const DEFAULT_CLIENT_CAPABILITIES = {
   [CLIENT_CAPS.timelineNotifications]: true,
   [CLIENT_CAPS.pluginTimelineItems]: true,
   [CLIENT_CAPS.pluginVoiceProviders]: true,
+  [CLIENT_CAPS.pluginDictationProviders]: true,
   [CLIENT_CAPS.workspaceSetupBlocked]: true,
   [CLIENT_CAPS.workspaceSetupObservation]: true,
   [CLIENT_CAPS.explicitEventSubscriptions]: true,

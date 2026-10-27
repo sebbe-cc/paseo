@@ -223,7 +223,6 @@ import {
 } from "../utils/directory-suggestions.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type { Resolvable } from "./speech/provider-resolver.js";
-import type { SpeechReadinessSnapshot } from "./speech/speech-runtime.js";
 import type pino from "pino";
 import { ScheduleService } from "./schedule/service.js";
 import {
@@ -486,6 +485,8 @@ export interface SessionOptions {
   pluginRuntime?: {
     hasVoiceProvider?: import("@getpaseo/plugin/server").PluginVoiceHost["hasVoiceProvider"];
     startVoiceProvider?: import("@getpaseo/plugin/server").PluginVoiceHost["startVoiceProvider"];
+    hasDictationProvider?: import("@getpaseo/plugin/server").PluginDictationHost["hasDictationProvider"];
+    startDictationProvider?: import("@getpaseo/plugin/server").PluginDictationHost["startDictationProvider"];
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
     listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
@@ -556,12 +557,7 @@ export interface SessionOptions {
     registerVoiceCallerContext?: (agentId: string, context: VoiceCallerContext) => void;
     unregisterVoiceCallerContext?: (agentId: string) => void;
   };
-  dictation?: {
-    finalTimeoutMs?: number;
-    stt?: Resolvable<SpeechToTextProvider | null>;
-    sttLanguage?: string;
-    getSpeechReadiness?: () => SpeechReadinessSnapshot;
-  };
+  dictation?: import("./session/voice/voice-session.js").VoiceSessionOptions["dictation"];
   serverId?: string;
   daemonVersion?: string;
   daemonRuntimeConfig?: DaemonRuntimeConfig;
@@ -1278,6 +1274,7 @@ export class Session {
       this.delivery,
       () => this.refreshObservationProducers(),
       (source) => this.supportsForSource(CLIENT_CAPS.pluginVoiceProviders, source),
+      (source) => this.supportsForSource(CLIENT_CAPS.pluginDictationProviders, source),
     );
 
     this.sessionLogger.trace({}, "agent.session.lifecycle.created");
