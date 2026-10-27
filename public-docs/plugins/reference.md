@@ -811,6 +811,22 @@ server.before("agent.session_open", ({ request }) => {
 This runs on create, resume, refresh, and import. To inject only on creation, set `env` in an
 `agent.create` callback instead.
 
+### Replace context compaction
+
+```ts
+server.before("agent.compact", async ({ request }) => {
+  await saveHandoff(request.agentId);
+  return { ...request, skip: true };
+});
+```
+
+`source` is `"provider"` when the harness has its own pre-compact hook (Claude `PreCompact`, with
+`reason` from its `auto`/`manual` matcher); Paseo holds the compaction until the callbacks finish
+and `skip: true` blocks it. Other providers get `"threshold"`: Paseo fires once per agent when
+context usage reaches `PASEO_COMPACT_THRESHOLD` (default `0.8`) of the window. `skip` there only
+tells Paseo the plugin took over; the harness still compacts at its own limit unless the plugin
+ends or restarts the session first.
+
 ### Choose workspace isolation
 
 ```ts
@@ -982,6 +998,7 @@ type PluginTurnOutcome =
 | -------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
 | `agent.create`       | `config`, optional `env`                                                | Public agent config except `cwd`; `env` |
 | `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env` | Only `env`                              |
+| `agent.compact`      | `agentId`, `provider`, `reason`, `source`, `usage`, `skip`              | Only `skip`                             |
 | `workspace.create`   | `source`, optional `title`, `firstAgentContext`                         | Entire explicit creation request        |
 
 **`agent.create.config`** uses `AgentSessionConfig`:
