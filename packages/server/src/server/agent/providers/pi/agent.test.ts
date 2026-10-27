@@ -3392,6 +3392,26 @@ describe("PiRpcAgentClient", () => {
     });
   });
 
+  test("gives alwaysLoad servers direct exposure in Pi's built-in MCP", async () => {
+    const pi = new FakePi();
+    pi.queueCommands([{ name: "mcp", source: "extension", sourceInfo: { path: "builtin:mcp" } }]);
+    const session = await createClient(pi).createSession(
+      createConfig({
+        mcpServers: {
+          paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents", alwaysLoad: true },
+          other: { type: "stdio", command: "other-mcp", alwaysLoad: false },
+        },
+      }),
+    );
+    onTestFinished(() => session.close());
+
+    const actualLaunch = pi.recordedLaunches.at(-1)!;
+    expect(await readRegisteredMcpServers(actualLaunch.extensionPaths[0]!)).toEqual({
+      paseo: { url: "http://127.0.0.1:6767/mcp/agents", exposure: "direct" },
+      other: { command: "other-mcp" },
+    });
+  });
+
   test("uses pi-mcp-adapter when it replaces Pi's built-in MCP", async () => {
     const agentDir = mkdtempSync(path.join(tmpdir(), "paseo-pi-agent-"));
     onTestFinished(() => rmSync(agentDir, { recursive: true, force: true }));
