@@ -1166,6 +1166,7 @@ export const ja: TranslationResources = {
       description: "接続を確認してもう一度お試しください。",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "{{label}} グループ",
     statusBucket: {
@@ -2324,6 +2325,8 @@ export const ja: TranslationResources = {
     diagnostics: {
       title: "診断",
       testAudio: "音声をテスト",
+      thinkingTone: "音声モードの待機音",
+      thinkingToneHint: "エージェントが音声の返答を準備している間に鳴らす",
       playTest: "テスト再生",
       playing: "再生中...",
       playbackFailed: "再生に失敗しました: {{message}}",
@@ -2507,6 +2510,7 @@ export const ja: TranslationResources = {
         cycleTheme: "テーマを順に切り替え",
         focusMessageInput: "メッセージ入力にフォーカス",
         cycleAgentMode: "エージェントモードを順に切り替え",
+        toggleGlobalVoice: "グローバル音声を切り替え",
         toggleVoiceMode: "音声モードを切り替え",
         startStopDictation: "音声入力を開始/停止",
         interruptAgent: "エージェントを中断",

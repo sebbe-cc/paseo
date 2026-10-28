@@ -357,3 +357,22 @@ test("a human pasting an agent envelope stays a human message through provider r
     clientMessageId: "human-submission",
   });
 });
+
+test("steer_only never replaces a job when the provider cannot steer", async () => {
+  const { startAgentRun } = await import("./agent-prompt.js");
+  const manager = new AgentManager({ clients: {}, logger: createTestLogger() });
+  vi.spyOn(manager, "tryRunOutOfBand").mockReturnValue(false);
+  vi.spyOn(manager, "getAgent").mockReturnValue(null);
+  vi.spyOn(manager, "hasInFlightRun").mockReturnValue(true);
+  vi.spyOn(manager, "steerAgentRun").mockResolvedValue({ status: "unavailable" });
+  const replace = vi.spyOn(manager, "replaceAgentRun");
+  const stream = vi.spyOn(manager, "streamAgent");
+  await expect(
+    startAgentRun(manager, "agent", "new direction", createTestLogger(), {
+      activeTurnBehavior: "steer_only",
+      replaceRunning: true,
+    }),
+  ).rejects.toThrow("current job continues");
+  expect(replace).not.toHaveBeenCalled();
+  expect(stream).not.toHaveBeenCalled();
+});
