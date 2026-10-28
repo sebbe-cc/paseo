@@ -4,6 +4,8 @@ export type KeyboardFocusScope =
   | "command-center"
   | "editable"
   | "browser"
+  // A focused timeline, sidebar or Explorer list: bare keys navigate it.
+  | "list"
   | "other";
 
 export type MessageInputKeyboardActionKind =
@@ -55,7 +57,20 @@ export type KeyboardActionId =
   | "workspace.pin"
   | "view.toggle.focus"
   | "theme.cycle"
-  | "message-input.action";
+  | "message-input.action"
+  | ListKeyboardActionId;
+
+export type ListKeyboardActionId =
+  | "list.next"
+  | "list.prev"
+  | "list.first"
+  | "list.last"
+  | "list.prompt.next"
+  | "list.prompt.prev"
+  | "list.open"
+  | "list.expand"
+  | "list.collapse"
+  | "list.insert";
 
 export type KeyboardShortcutPayload =
   | { index: number }
