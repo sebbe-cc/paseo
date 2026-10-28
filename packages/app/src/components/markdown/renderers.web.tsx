@@ -1,5 +1,12 @@
 import { Text } from "react-native";
-import { forwardRef, useCallback, useMemo, useState, type ComponentProps } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useMemo,
+  useState,
+  type ComponentProps,
+  type CSSProperties,
+} from "react";
 import type {
   CodeBlockRendererProps,
   LinkRendererProps,
@@ -31,7 +38,9 @@ function WebCodeBlock({ code, language }: CodeBlockRendererProps) {
 const LINK_HOVER_STYLE = { textDecoration: "underline" } as const;
 
 function WebLink({ link, anchorProps, children }: LinkRendererProps) {
-  const { tooltipPath, onHoverIn } = useFileLink(markdownLinkSource(link.url, link.sourceType));
+  const { tooltipPath, missing, searchedRoots, onHoverIn } = useFileLink(
+    markdownLinkSource(link.url, link.sourceType),
+  );
   const [hovered, setHovered] = useState(false);
   const handleMouseEnter = useCallback(() => setHovered(true), []);
   const handleMouseLeave = useCallback(() => setHovered(false), []);
@@ -43,6 +52,28 @@ function WebLink({ link, anchorProps, children }: LinkRendererProps) {
     }),
     [anchorProps.style, hovered],
   );
+  if (missing) {
+    // Proven missing by the daemon batch check: plain code, not a link, no
+    // press — with a "saknas" mark and the searched roots as tooltip.
+    // Plain DOM spans (not RN Text) take plain style objects, not unistyles.
+    return (
+      <Tooltip delayDuration={400}>
+        <TooltipTrigger asChild>
+          <InlineLinkTrigger>
+            <span style={MISSING_WRAP_STYLE}>
+              <code>{children}</code>
+              <span style={MISSING_MARK_STYLE}> (saknas)</span>
+            </span>
+          </InlineLinkTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="top" align="start" maxWidth={520}>
+          <Text selectable={false} style={styles.tooltipPath}>
+            {missingTooltipText(searchedRoots)}
+          </Text>
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
   const anchor = (
     <a
       {...anchorProps}
@@ -68,6 +99,18 @@ function WebLink({ link, anchorProps, children }: LinkRendererProps) {
     </Tooltip>
   );
 }
+
+/** Tooltip for a missing file link: where the daemon looked. */
+function missingTooltipText(searchedRoots: string[]): string {
+  if (searchedRoots.length === 0) {
+    return "saknas";
+  }
+  return `saknas — sökt i: ${searchedRoots.join(", ")}`;
+}
+
+// Plain DOM spans (not RN Text) take plain style objects, not unistyles.
+const MISSING_WRAP_STYLE: CSSProperties = { overflowWrap: "anywhere" };
+const MISSING_MARK_STYLE: CSSProperties = { opacity: 0.65, fontSize: "0.85em" };
 // TooltipTrigger also supplies native Pressable handlers; forward only DOM events.
 // A View renders a div, which is invalid inside the library's prose paragraphs.
 const InlineLinkTrigger = forwardRef<HTMLSpanElement, ComponentProps<"span">>(

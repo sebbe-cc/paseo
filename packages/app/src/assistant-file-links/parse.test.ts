@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAssistantFileLink,
   normalizeInlinePathTarget,
+  parseAssistantFileCandidatePath,
   parseAssistantFileLink,
   parseFileProtocolUrl,
   parseInlinePathToken,
@@ -610,4 +611,44 @@ describe("encoded filename line markers", () => {
       ).toBeUndefined();
     },
   );
+});
+
+describe("parseAssistantFileCandidatePath", () => {
+  it("keeps relative links unresolved for the daemon search", () => {
+    expect(
+      parseAssistantFileCandidatePath("task-pa-9-summary.md", { workspaceRoot: "/ws" }),
+    ).toMatchObject({ path: "task-pa-9-summary.md" });
+    expect(
+      parseAssistantFileCandidatePath(".gc/artifacts/x.md", { workspaceRoot: "/ws" }),
+    ).toMatchObject({ path: ".gc/artifacts/x.md" });
+    expect(
+      parseAssistantFileCandidatePath("../shared/y.md", { workspaceRoot: "/ws/sub" }),
+    ).toMatchObject({ path: "../shared/y.md" });
+  });
+
+  it("strips line suffixes into line fields", () => {
+    expect(parseAssistantFileCandidatePath("notes.md:12", {})).toMatchObject({
+      path: "notes.md",
+      lineStart: 12,
+    });
+  });
+
+  it("passes absolute, home, file and windows paths through", () => {
+    expect(parseAssistantFileCandidatePath("/abs/a.md", {})).toMatchObject({ path: "/abs/a.md" });
+    expect(parseAssistantFileCandidatePath("~/docs/a.md", {})).toMatchObject({
+      path: "~/docs/a.md",
+    });
+    expect(parseAssistantFileCandidatePath("file:///abs/a.md", {})).toMatchObject({
+      path: "/abs/a.md",
+    });
+    expect(parseAssistantFileCandidatePath("C:/repo/a.md", {})).toMatchObject({
+      path: "C:/repo/a.md",
+    });
+  });
+
+  it("returns null for non-file tokens", () => {
+    expect(parseAssistantFileCandidatePath("https://example.com/x.md", {})).toBeNull();
+    expect(parseAssistantFileCandidatePath("just some words", {})).toBeNull();
+    expect(parseAssistantFileCandidatePath("", {})).toBeNull();
+  });
 });
