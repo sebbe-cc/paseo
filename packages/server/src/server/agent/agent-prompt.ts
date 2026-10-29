@@ -17,6 +17,7 @@ export type AgentRunController = Pick<
   | "hasInFlightRun"
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
+  | "steerAgentRun"
   | "streamAgent"
 > & {
   reloadAgentSession(agentId: string): Promise<unknown>;
@@ -47,6 +48,13 @@ async function steerOrReplaceActiveRun(
     }
   | null
 > {
+  if (options?.activeTurnBehavior === "steer_only") {
+    const result = await agentManager.steerAgentRun(agentId, prompt, options.runOptions);
+    if (result.status === "accepted") return { disposition: "steered" };
+    if (agentManager.hasInFlightRun(agentId))
+      throw new Error("This agent cannot accept guidance while working; its current job continues");
+    return null;
+  }
   if (options?.activeTurnBehavior !== "steer") {
     return null;
   }
@@ -72,7 +80,11 @@ async function startOrReplaceRun(
   iterator: AsyncGenerator<import("./agent-sdk-types.js").AgentStreamEvent>;
   replaced: boolean;
 }> {
-  const replaced = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
+  const replaced = Boolean(
+    options?.activeTurnBehavior !== "steer_only" &&
+    options?.replaceRunning &&
+    agentManager.hasInFlightRun(agentId),
+  );
   const iterator = replaced
     ? await agentManager.replaceAgentRun(agentId, prompt, options?.runOptions)
     : agentManager.streamAgent(agentId, prompt, options?.runOptions);
