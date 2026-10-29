@@ -18,6 +18,8 @@ export interface PaseoTerminalCreateOptions {
   command?: string;
   args?: string[];
   size?: { rows: number; cols: number };
+  /** Persistent tmux terminal: survives daemon restarts with the same PIDs. */
+  persistent?: boolean;
   requestId?: string;
 }
 

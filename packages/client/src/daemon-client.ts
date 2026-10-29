@@ -6211,6 +6211,7 @@ export class DaemonClient {
       args?: string[];
       workspaceId?: string;
       size?: { rows: number; cols: number };
+      persistent?: boolean;
     },
   ): Promise<CreateTerminalPayload> {
     const resolvedRequestId = this.createRequestId(requestId);
@@ -6223,6 +6224,7 @@ export class DaemonClient {
       args: options?.args,
       ...(options?.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
       ...(options?.size !== undefined ? { size: options.size } : {}),
+      ...(options?.persistent === true ? { persistent: true } : {}),
       requestId: resolvedRequestId,
     });
     return this.sendCorrelatedRequest({

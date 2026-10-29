@@ -8,6 +8,7 @@ import {
 import { captureTerminalLines, type CaptureTerminalLinesResult } from "./terminal-capture.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
+import { tmuxKillSession, type PersistentTerminalBinding } from "./tmux.js";
 import { assertAbsolutePath, isSameOrDescendantPath } from "../server/path-utils.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
 import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
@@ -64,6 +65,8 @@ export interface TerminalManager {
     cols?: number;
     activityToken?: string;
     activityUrl?: string | null;
+    /** Persistent tmux binding (pa-bhkn0): the session survives daemon restarts. */
+    persistent?: PersistentTerminalBinding;
   }): Promise<TerminalSession>;
   registerCwdEnv(options: { cwd: string; env: Record<string, string> }): void;
   validateTerminalActivityToken(terminalId: string, token: string): "valid" | "unknown" | "invalid";
@@ -85,7 +88,12 @@ export interface TerminalManager {
     options?: { start?: number; end?: number; stripAnsi?: boolean },
   ): Promise<CaptureTerminalLinesResult>;
   listDirectories(): string[];
-  killAll(): void;
+  /**
+   * Kill every terminal. With `sparePersistent`, persistent tmux sessions are
+   * left untouched (their clients die with the worker, the sessions live on
+   * for reattach); without it their sessions are killed as well.
+   */
+  killAll(options?: { sparePersistent?: boolean }): void;
   subscribeTerminalsChanged(listener: TerminalsChangedListener): () => void;
   subscribeTerminalActivity(listener: TerminalActivityListener): () => void;
   subscribeTerminalWorkspaceContributionChanged(
@@ -110,6 +118,16 @@ export function createTerminalManager(
   const terminalTitleUnsubscribeById = new Map<string, () => void>();
   const terminalActivityUnsubscribeById = new Map<string, () => void>();
   const terminalActivityTokenById = new Map<string, string>();
+  // Persistent tmux bindings by terminal id (pa-bhkn0). `session.kill()` only
+  // ever kills the daemon-held PTY client; the tmux session itself is killed
+  // explicitly in the kill paths below, never implicitly.
+  const persistentBindingById = new Map<string, PersistentTerminalBinding>();
+
+  function forgetPersistentBinding(id: string): PersistentTerminalBinding | undefined {
+    const binding = persistentBindingById.get(id);
+    persistentBindingById.delete(id);
+    return binding;
+  }
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
   const terminalActivityListeners = new Set<TerminalActivityListener>();
   const terminalWorkspaceContributionChangedListeners =
@@ -140,6 +158,9 @@ export function createTerminalManager(
 
     terminalsById.delete(id);
     terminalActivityTokenById.delete(id);
+    // The session is gone, so its tmux session is gone (or going) too: drop
+    // the binding without touching tmux. Explicit kills handle tmux first.
+    forgetPersistentBinding(id);
 
     const terminals = terminalsByCwd.get(session.cwd);
     if (terminals) {
@@ -321,6 +342,7 @@ export function createTerminalManager(
       cols?: number;
       activityToken?: string;
       activityUrl?: string | null;
+      persistent?: PersistentTerminalBinding;
     }): Promise<TerminalSession> {
       assertAbsolutePath(options.cwd);
 
@@ -341,6 +363,9 @@ export function createTerminalManager(
         ...(terminalActivityUrl ? { PASEO_TERMINAL_ACTIVITY_URL: terminalActivityUrl } : {}),
       };
       terminalActivityTokenById.set(terminalId, activityToken);
+      if (options.persistent) {
+        persistentBindingById.set(terminalId, options.persistent);
+      }
       let session: TerminalSession;
       try {
         session = registerSession(
@@ -355,11 +380,13 @@ export function createTerminalManager(
             ...(options.rows !== undefined ? { rows: options.rows } : {}),
             ...(options.cols !== undefined ? { cols: options.cols } : {}),
             ...(mergedEnv ? { env: mergedEnv } : {}),
+            ...(options.persistent ? { persistent: options.persistent } : {}),
             activityEnv,
           }),
         );
       } catch (error) {
         terminalActivityTokenById.delete(terminalId);
+        persistentBindingById.delete(terminalId);
         throw error;
       }
 
@@ -427,7 +454,11 @@ export function createTerminalManager(
     },
 
     killTerminal(id: string): void {
+      // removeSessionById forgets the binding, so capture it first: an
+      // explicit kill ends the tmux session, not just the PTY client.
+      const binding = forgetPersistentBinding(id);
       removeSessionById(id, { kill: true });
+      if (binding) tmuxKillSession(binding);
     },
 
     async killTerminalAndWait(
@@ -438,11 +469,15 @@ export function createTerminalManager(
       if (!session) {
         return;
       }
+      // Capture before removeSessionById forgets it: an explicit stop (script
+      // stop, user kill) ends the tmux session, not just the PTY client.
+      const binding = forgetPersistentBinding(id);
       try {
         await session.killAndWait(options);
       } finally {
         removeSessionById(id, { kill: false });
       }
+      if (binding) tmuxKillSession(binding);
     },
 
     async captureTerminal(
@@ -463,9 +498,21 @@ export function createTerminalManager(
       return Array.from(terminalsByCwd.keys());
     },
 
-    killAll(): void {
+    killAll(options?: { sparePersistent?: boolean }): void {
+      const spare = options?.sparePersistent === true;
+      const bindings: PersistentTerminalBinding[] = [];
       for (const id of Array.from(terminalsById.keys())) {
+        if (spare && persistentBindingById.has(id)) {
+          // Shutdown with survival: leave the PTY client and its tmux session
+          // alone. The dying worker takes the client; the session is reattached.
+          continue;
+        }
+        const binding = forgetPersistentBinding(id);
+        if (binding) bindings.push(binding);
         removeSessionById(id, { kill: true });
+      }
+      if (!spare) {
+        for (const binding of bindings) tmuxKillSession(binding);
       }
     },
 

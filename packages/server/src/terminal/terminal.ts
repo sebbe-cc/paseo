@@ -24,6 +24,7 @@ import type { TerminalCell, TerminalState } from "@getpaseo/protocol/messages";
 import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
 import { TerminalActivityTracker } from "./activity/terminal-activity-tracker.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
+import { persistentSpawnArgs, type PersistentTerminalBinding } from "./tmux.js";
 
 const { Terminal } = xterm;
 const require = createRequire(import.meta.url);
@@ -153,6 +154,12 @@ export interface CreateTerminalOptions {
   title?: string;
   command?: string;
   args?: string[];
+  /**
+   * Persistent terminals (pa-bhkn0): the PTY runs a tmux client attached to a
+   * tmux-server session instead of the shell directly, so the session and its
+   * PIDs survive daemon restarts. POSIX only; throws on Windows.
+   */
+  persistent?: PersistentTerminalBinding;
 }
 
 function toTerminalActivity(snapshot: {
@@ -1022,10 +1029,27 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
 
   ensureNodePtySpawnHelperExecutableForCurrentPlatform();
 
-  // Create PTY
-  const { command: spawnCommand, args: spawnArgs } = command
-    ? await resolveTerminalSpawnCommand(command, args)
-    : { command: resolvedShell, args: [] as string[] };
+  // Create PTY. A persistent terminal spawns a tmux client that attaches to
+  // (or creates) the surviving server session instead of the shell itself.
+  let spawnCommand: string;
+  let spawnArgs: string[] | string;
+  if (options.persistent) {
+    if (process.platform === "win32") {
+      throw new Error("Persistent tmux terminals are not supported on Windows");
+    }
+    ({ command: spawnCommand, args: spawnArgs } = persistentSpawnArgs({
+      binding: options.persistent,
+      cwd,
+      shell: resolvedShell,
+      ...(command ? { command, args } : {}),
+      cols,
+      rows,
+    }));
+  } else {
+    ({ command: spawnCommand, args: spawnArgs } = command
+      ? await resolveTerminalSpawnCommand(command, args)
+      : { command: resolvedShell, args: [] as string[] });
+  }
   const terminalEnv = buildTerminalEnvironment({
     shell: spawnCommand,
     env: {
@@ -1036,6 +1060,10 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
   });
 
   await assertTerminalCommandCanStart({ command, cwd, env: terminalEnv });
+  if (options.persistent) {
+    // The tmux client is the actual spawn target; fail fast when it is gone.
+    await assertTerminalCommandCanStart({ command: spawnCommand, cwd, env: terminalEnv });
+  }
 
   const ptyProcess = pty.spawn(spawnCommand, spawnArgs, {
     name: "xterm-256color",

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type pino from "pino";
 import type {
   OwnedSubscription,
@@ -37,6 +38,17 @@ import {
 } from "./terminal-restore.js";
 import type { TerminalSession } from "./terminal.js";
 import type { TerminalManager, TerminalsChangedEvent } from "./terminal-manager.js";
+import {
+  ensureTmuxSocketDir,
+  persistentSessionName,
+  resolveTmuxBinary,
+  tmuxSocketPath,
+  type PersistentTerminalBinding,
+} from "./tmux.js";
+import {
+  recordPersistentTerminal,
+  removePersistentTerminal,
+} from "../server/persistent-terminals.js";
 import { applyTerminalSize } from "./terminal-size-ownership.js";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
@@ -81,6 +93,8 @@ interface SnapshotSendResult {
 
 export interface TerminalSessionControllerOptions {
   terminalManager: TerminalManager | null;
+  /** PASEO_HOME for the persistent-terminal journal (pa-bhkn0); unset disables it. */
+  persistenceDir?: string;
   emit: (msg: SessionOutboundMessage) => void;
   hasBinaryChannel: () => boolean;
   isPathWithinRoot: (rootPath: string, candidatePath: string) => boolean;
@@ -146,6 +160,7 @@ export class TerminalSessionController {
   private readonly listTerminalWorkspaceRoots: () => Promise<readonly string[]>;
   private readonly clientSupportsWrapReflow: (source: object) => boolean;
   private readonly getClientBufferedAmount: (source: object) => number | null;
+  private readonly persistenceDir: string | undefined;
 
   private readonly subscribedDirectories = new Map<string, TerminalDirectorySubscription>();
   private unsubscribeTerminalsChanged: (() => void) | null = null;
@@ -164,6 +179,24 @@ export class TerminalSessionController {
       (async () => (await this.listTerminalWorkspaceRefs()).map((workspace) => workspace.cwd));
     this.clientSupportsWrapReflow = options.clientSupportsWrapReflow ?? (() => false);
     this.getClientBufferedAmount = options.getClientBufferedAmount ?? (() => 0);
+    this.persistenceDir = options.persistenceDir;
+  }
+
+  private resolvePersistentBinding(terminalId: string): PersistentTerminalBinding {
+    if (this.persistenceDir === undefined) {
+      throw new Error("Persistent terminals are not enabled on this daemon");
+    }
+    const tmuxBin = resolveTmuxBinary();
+    if (!tmuxBin) {
+      throw new Error("Persistent terminals need tmux on PATH (pa-bhkn0)");
+    }
+    const socketPath = tmuxSocketPath(this.persistenceDir);
+    ensureTmuxSocketDir(socketPath);
+    return {
+      tmuxBin,
+      socketPath,
+      sessionName: persistentSessionName(terminalId),
+    };
   }
 
   start(): void {
@@ -571,7 +604,15 @@ export class TerminalSessionController {
         throw new Error(`Workspace ${workspaceId} is not active or does not exist`);
       }
 
+      // Persistent terminals need their id (and tmux session name) before the
+      // spawn, so pre-generate it and journal the record for boot reattach.
+      const persistentRequested = msg.persistent === true;
+      const terminalId = persistentRequested ? randomUUID() : undefined;
+      const persistent = persistentRequested
+        ? this.resolvePersistentBinding(terminalId as string)
+        : undefined;
       const session = await this.terminalManager.createTerminal({
+        ...(terminalId ? { id: terminalId } : {}),
         cwd: msg.cwd,
         workspaceId,
         name: msg.name,
@@ -579,7 +620,19 @@ export class TerminalSessionController {
         args: msg.args,
         rows: msg.size?.rows,
         cols: msg.size?.cols,
+        ...(persistent ? { persistent } : {}),
       });
+      if (persistent && this.persistenceDir !== undefined) {
+        recordPersistentTerminal(this.persistenceDir, {
+          id: session.id,
+          name: session.name,
+          cwd: session.cwd,
+          workspaceId: session.workspaceId,
+          ...(session.getTitle() ? { title: session.getTitle() } : {}),
+          sessionName: persistent.sessionName,
+          createdAt: new Date().toISOString(),
+        });
+      }
       this.emit({
         type: "create_terminal_response",
         payload: {
@@ -775,6 +828,9 @@ export class TerminalSessionController {
       try {
         this.detachStream(msg.terminalId, { emitExit: true });
         await this.terminalManager.killTerminalAndWait(msg.terminalId);
+        if (this.persistenceDir !== undefined) {
+          removePersistentTerminal(this.persistenceDir, msg.terminalId);
+        }
         success = true;
       } catch (error) {
         this.sessionLogger.error(
