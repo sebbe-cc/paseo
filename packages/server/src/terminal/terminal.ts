@@ -24,7 +24,12 @@ import type { TerminalCell, TerminalState } from "@getpaseo/protocol/messages";
 import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
 import { TerminalActivityTracker } from "./activity/terminal-activity-tracker.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
-import { persistentSpawnArgs, type PersistentTerminalBinding } from "./tmux.js";
+import {
+  ensureTmuxServer,
+  ensureTmuxServerStable,
+  persistentSpawnArgs,
+  type PersistentTerminalBinding,
+} from "./tmux.js";
 
 const { Terminal } = xterm;
 const require = createRequire(import.meta.url);
@@ -1063,6 +1068,10 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
   if (options.persistent) {
     // The tmux client is the actual spawn target; fail fast when it is gone.
     await assertTerminalCommandCanStart({ command: spawnCommand, cwd, env: terminalEnv });
+    // Orphaned tmux clients attach to ANOTHER session by default; harden the
+    // server first so a dead session detaches (and exits) the client instead
+    // of serving a stranger's output (pa-vbhcu).
+    ensureTmuxServer(options.persistent);
   }
 
   const ptyProcess = pty.spawn(spawnCommand, spawnArgs, {
@@ -1072,6 +1081,14 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     cwd,
     env: terminalEnv,
   });
+
+  if (options.persistent) {
+    // The spawn above may have started a brand-new tmux server; make sure the
+    // detach-on-destroy hardening sticks there too (retries while the server
+    // comes up, best-effort). Without it an orphaned client attaches to
+    // another session and the dead terminal serves that session's output.
+    await ensureTmuxServerStable(options.persistent);
+  }
 
   function emitTitleChange(nextTitle: string | undefined): void {
     if (title === nextTitle) {

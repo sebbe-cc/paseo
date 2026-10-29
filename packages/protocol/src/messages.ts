@@ -6573,6 +6573,9 @@ export const CaptureTerminalResponseSchema = z.object({
     lines: z.array(z.string()),
     totalLines: z.number().int().nonnegative(),
     requestId: z.string(),
+    // Null on success; set when the terminal (or its tmux session) is gone
+    // (pa-vbhcu). Optional so older daemons' responses still parse.
+    error: z.string().nullable().optional(),
   }),
 });
 

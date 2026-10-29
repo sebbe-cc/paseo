@@ -8,7 +8,7 @@ import {
 import { captureTerminalLines, type CaptureTerminalLinesResult } from "./terminal-capture.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
-import { tmuxKillSession, type PersistentTerminalBinding } from "./tmux.js";
+import { tmuxKillSession, tmuxSessionAlive, type PersistentTerminalBinding } from "./tmux.js";
 import { assertAbsolutePath, isSameOrDescendantPath } from "../server/path-utils.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
 import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
@@ -89,6 +89,13 @@ export interface TerminalManager {
   ): Promise<CaptureTerminalLinesResult>;
   listDirectories(): string[];
   /**
+   * The tmux binding of a persistent terminal (pa-vbhcu), or null when the
+   * terminal is not persistent or is gone. Lets read/send paths address the
+   * exact tmux session (`=name` / `$id`) and fail loudly when it is missing
+   * instead of falling back to another session.
+   */
+  getPersistentBinding(id: string): PersistentTerminalBinding | null;
+  /**
    * Kill every terminal. With `sparePersistent`, persistent tmux sessions are
    * left untouched (their clients die with the worker, the sessions live on
    * for reattach); without it their sessions are killed as well.
@@ -127,6 +134,12 @@ export function createTerminalManager(
     const binding = persistentBindingById.get(id);
     persistentBindingById.delete(id);
     return binding;
+  }
+
+  function getPersistentBinding(id: string): PersistentTerminalBinding | null {
+    // The terminal is gone (or was never persistent): no exact target to check.
+    if (!terminalsById.has(id)) return null;
+    return persistentBindingById.get(id) ?? null;
   }
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
   const terminalActivityListeners = new Set<TerminalActivityListener>();
@@ -491,12 +504,21 @@ export function createTerminalManager(
           totalLines: 0,
         };
       }
+      // A persistent terminal whose tmux session is gone must fail loudly
+      // (pa-vbhcu): its PTY buffer is stale output, and a bare `-t` would
+      // resolve to ANOTHER session. The exact check never falls back.
+      const binding = persistentBindingById.get(id);
+      if (binding && !tmuxSessionAlive(binding)) {
+        throw new Error(`tmux session '${binding.sessionName}' for terminal ${id} is gone`);
+      }
       return captureTerminalLines(session, options);
     },
 
     listDirectories(): string[] {
       return Array.from(terminalsByCwd.keys());
     },
+
+    getPersistentBinding,
 
     killAll(options?: { sparePersistent?: boolean }): void {
       const spare = options?.sparePersistent === true;

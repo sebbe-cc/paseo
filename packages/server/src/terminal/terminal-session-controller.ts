@@ -42,6 +42,7 @@ import {
   ensureTmuxSocketDir,
   persistentSessionName,
   resolveTmuxBinary,
+  tmuxSessionAlive,
   tmuxSocketPath,
   type PersistentTerminalBinding,
 } from "./tmux.js";
@@ -54,6 +55,13 @@ import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
 
 const MAX_TERMINAL_STREAM_SLOTS = 256;
+
+/**
+ * Minimum time between exact tmux liveness probes of one persistent terminal
+ * on the input path (pa-vbhcu). Capture always probes; input is throttled so
+ * per-keystroke traffic never forks a tmux process per message.
+ */
+const PERSISTENT_LIVENESS_CHECK_INTERVAL_MS = 2000;
 
 interface TerminalDirectorySubscription {
   cwd: string;
@@ -163,6 +171,7 @@ export class TerminalSessionController {
   private readonly persistenceDir: string | undefined;
 
   private readonly subscribedDirectories = new Map<string, TerminalDirectorySubscription>();
+  private readonly lastPersistentLivenessCheckAt = new Map<string, number>();
   private unsubscribeTerminalsChanged: (() => void) | null = null;
   private readonly activeStreams = new Map<number, ActiveTerminalStream>();
   private nextSlot = 0;
@@ -275,6 +284,9 @@ export class TerminalSessionController {
     const terminal = this.terminalManager.getTerminal(activeStream.terminalId);
     if (!terminal) {
       this.detachStream(activeStream.terminalId, { emitExit: true });
+      return;
+    }
+    if (this.forgetDeadPersistentTerminal(activeStream.terminalId)) {
       return;
     }
 
@@ -808,6 +820,9 @@ export class TerminalSessionController {
       this.sessionLogger.warn({ terminalId: msg.terminalId }, "Terminal not found for input");
       return;
     }
+    if (this.forgetDeadPersistentTerminal(msg.terminalId)) {
+      return;
+    }
 
     if (msg.message.type === "resize") {
       applyTerminalSize(session, source, msg.message);
@@ -817,8 +832,41 @@ export class TerminalSessionController {
     session.send(msg.message);
   }
 
+  /**
+   * Drop a persistent terminal whose tmux session is gone (pa-vbhcu). The
+   * record would otherwise keep serving stale PTY output (or silently swallow
+   * input) while the session no longer exists; forgetting it here converges to
+   * the normal exit path, so later capture/send/kill fail clearly with
+   * "not found" instead of touching another session. Exact tmux targets only,
+   * double-checked before killing, throttled to one check per terminal per
+   * `PERSISTENT_LIVENESS_CHECK_INTERVAL_MS` so per-keystroke input stays cheap.
+   * Returns true when the terminal was forgotten and the caller must drop.
+   */
+  private forgetDeadPersistentTerminal(terminalId: string): boolean {
+    if (!this.terminalManager) return false;
+    const now = Date.now();
+    const lastCheck = this.lastPersistentLivenessCheckAt.get(terminalId);
+    if (lastCheck !== undefined && now - lastCheck < PERSISTENT_LIVENESS_CHECK_INTERVAL_MS) {
+      return false;
+    }
+    this.lastPersistentLivenessCheckAt.set(terminalId, now);
+    const binding = this.terminalManager.getPersistentBinding(terminalId);
+    if (!binding) return false;
+    // A live session never flaps on the exact target; still, re-check once
+    // before killing so a momentary tmux hiccup cannot drop a live terminal.
+    if (tmuxSessionAlive(binding) || tmuxSessionAlive(binding)) return false;
+    this.sessionLogger.warn(
+      { terminalId, sessionName: binding.sessionName },
+      "Persistent tmux session is gone; forgetting the dead terminal",
+    );
+    this.killTracked(terminalId, { emitExit: true });
+    this.lastPersistentLivenessCheckAt.delete(terminalId);
+    return true;
+  }
+
   private killTracked(terminalId: string, options?: { emitExit: boolean }): void {
     this.detachStream(terminalId, { emitExit: options?.emitExit ?? true });
+    this.lastPersistentLivenessCheckAt.delete(terminalId);
     this.terminalManager?.killTerminal(terminalId);
   }
 
@@ -850,29 +898,44 @@ export class TerminalSessionController {
   }
 
   private async handleCaptureTerminalRequest(msg: CaptureTerminalRequest): Promise<void> {
-    if (!this.terminalManager) {
+    const respond = (response: {
+      lines: string[];
+      totalLines: number;
+      error: string | null;
+    }): void => {
       this.emit({
         type: "capture_terminal_response",
         payload: {
           terminalId: msg.terminalId,
-          lines: [],
-          totalLines: 0,
+          lines: response.lines,
+          totalLines: response.totalLines,
+          error: response.error,
           requestId: msg.requestId,
         },
       });
+    };
+
+    if (!this.terminalManager) {
+      respond({ lines: [], totalLines: 0, error: "Terminal manager not available" });
       return;
     }
 
     const session = this.terminalManager.getTerminal(msg.terminalId);
     if (!session) {
-      this.emit({
-        type: "capture_terminal_response",
-        payload: {
-          terminalId: msg.terminalId,
-          lines: [],
-          totalLines: 0,
-          requestId: msg.requestId,
-        },
+      respond({ lines: [], totalLines: 0, error: `Terminal ${msg.terminalId} not found` });
+      return;
+    }
+
+    // A persistent terminal whose tmux session is gone must fail loudly
+    // (pa-vbhcu): never serve its stale PTY buffer as if it were live output.
+    // Forgetting it converges to the normal exit path, so later capture,
+    // send and kill fail clearly with "not found" instead of touching a
+    // different session.
+    if (this.forgetDeadPersistentTerminal(msg.terminalId)) {
+      respond({
+        lines: [],
+        totalLines: 0,
+        error: `Terminal ${msg.terminalId} is gone (its tmux session no longer exists)`,
       });
       return;
     }
@@ -883,29 +946,14 @@ export class TerminalSessionController {
         end: msg.end,
         stripAnsi: msg.stripAnsi,
       });
-      this.emit({
-        type: "capture_terminal_response",
-        payload: {
-          terminalId: msg.terminalId,
-          lines: capture.lines,
-          totalLines: capture.totalLines,
-          requestId: msg.requestId,
-        },
-      });
+      respond({ lines: capture.lines, totalLines: capture.totalLines, error: null });
     } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to capture terminal";
       this.sessionLogger.error(
         { err: error, terminalId: msg.terminalId },
         "Failed to capture terminal",
       );
-      this.emit({
-        type: "capture_terminal_response",
-        payload: {
-          terminalId: msg.terminalId,
-          lines: [],
-          totalLines: 0,
-          requestId: msg.requestId,
-        },
-      });
+      respond({ lines: [], totalLines: 0, error: message });
     }
   }
 

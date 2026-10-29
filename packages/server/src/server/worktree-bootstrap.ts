@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { randomUUID } from "node:crypto";
+import { connect } from "node:net";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
 import {
@@ -34,6 +35,8 @@ import {
   persistentSessionName,
   resolveTmuxBinary,
   tmuxKillSession,
+  tmuxPanePid,
+  tmuxSessionAlive,
   tmuxSocketPath,
   type PersistentTerminalBinding,
 } from "../terminal/tmux.js";
@@ -42,6 +45,75 @@ import { recordPersistentTerminal, removePersistentTerminal } from "./persistent
 const MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES = 64 * 1024;
 const WORKTREE_SETUP_TRUNCATION_MARKER = "\n...<output truncated in the middle>...\n";
 const WORKTREE_BOOTSTRAP_TERMINAL_READY_TIMEOUT_MS = 1_500;
+// Status must mean alive: a service reports `running` only once its port
+// listens (pa-vbhcu), a script only once its shell/process lives. Slow
+// starters (cold python) get room; a dead session fails fast every poll.
+// Plain scripts settle briefly so a command that dies instantly (never
+// started) fails instead of flashing `running` (services prove themselves
+// through the port check instead).
+const WORKSPACE_SCRIPT_ALIVE_POLL_MS = 250;
+const WORKSPACE_SCRIPT_SERVICE_TIMEOUT_MS = 20_000;
+const WORKSPACE_SCRIPT_TIMEOUT_MS = 10_000;
+const WORKSPACE_SCRIPT_SETTLE_MS = 2_000;
+
+function isLoopbackPortOpen(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const done = (open: boolean): void => {
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+/**
+ * Block until the just-sent script command is provably running (pa-vbhcu):
+ * the tmux session exists (exact target, no prefix fallback) and its pane
+ * lives, and a service additionally listens on its port. Throws otherwise, so
+ * `script start` reports an error instead of a phantom `running`.
+ */
+async function waitForWorkspaceScriptAlive(input: {
+  terminal: TerminalSession;
+  binding: PersistentTerminalBinding | null;
+  servicePort: number | null;
+  scriptName: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const { terminal, binding, servicePort, scriptName, timeoutMs } = input;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  for (;;) {
+    if (binding) {
+      if (!tmuxSessionAlive(binding)) {
+        throw new Error(
+          `tmux session '${binding.sessionName}' for script '${scriptName}' is gone; the script did not start`,
+        );
+      }
+      if (servicePort === null) {
+        if (tmuxPanePid(binding) !== null && Date.now() - startedAt >= WORKSPACE_SCRIPT_SETTLE_MS) {
+          return;
+        }
+      }
+    } else if (terminal.getExitInfo() !== null) {
+      throw new Error(`terminal for script '${scriptName}' exited before the script started`);
+    } else if (servicePort === null) {
+      if (Date.now() - startedAt >= WORKSPACE_SCRIPT_SETTLE_MS) return;
+    }
+    if (servicePort !== null && (await isLoopbackPortOpen(servicePort))) return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        servicePort !== null
+          ? `service '${scriptName}' did not start listening on 127.0.0.1:${servicePort} within ${timeoutMs}ms`
+          : `terminal for script '${scriptName}' did not become ready within ${timeoutMs}ms`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, WORKSPACE_SCRIPT_ALIVE_POLL_MS));
+  }
+}
 
 interface MiddleTruncationAccumulator {
   totalBytes: number;
@@ -736,7 +808,24 @@ export async function spawnWorkspaceScript(
     if (!reusableTerminal) {
       await waitForTerminalBootstrapReadiness(terminal);
     }
+    // The terminal id is the tmux session name source for fresh terminals, so
+    // the binding below addresses exactly this script's session (pa-vbhcu).
+    const scriptBinding = resolvePersistentBinding?.(terminal.id) ?? null;
+    if (scriptBinding && !tmuxSessionAlive(scriptBinding)) {
+      throw new Error(
+        `tmux session '${scriptBinding.sessionName}' for script '${scriptName}' was never created; the script did not start`,
+      );
+    }
     terminal.send({ type: "input", data: `${config.command}\r` });
+    // `running` must mean alive: the process lives (or the port listens),
+    // never just "the command was sent" (pa-vbhcu).
+    await waitForWorkspaceScriptAlive({
+      terminal,
+      binding: scriptBinding,
+      servicePort: serviceScript ? port : null,
+      scriptName,
+      timeoutMs: serviceScript ? WORKSPACE_SCRIPT_SERVICE_TIMEOUT_MS : WORKSPACE_SCRIPT_TIMEOUT_MS,
+    });
 
     logger?.info(
       {
