@@ -1,7 +1,8 @@
 import { expect, test } from "vitest";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { PluginHookHandlers } from "./index.js";
+import type { PluginTurnPrepareRequest } from "@getpaseo/plugin/server";
+import { PluginHookHandlers, validateBeforeResult } from "./index.js";
 
 const paseo = createPaseoApi(
   new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "lifecycle-unit" }),
@@ -300,4 +301,92 @@ test("turn context composes once, wraps without mutating the prompt, and caps le
   expect(wrapped).toContain("memory: sentinel-alpha");
   expect(wrapped).toContain("do the thing");
   expect(wrapPromptWithTurnContext("do the thing", null)).toBe("do the thing");
+});
+
+function turnPrepareRequest(): PluginTurnPrepareRequest {
+  // Real 0.14.0 payload shape.
+  return {
+    agent: {
+      id: "agent-1",
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      provider: "codex",
+      cwd: "/project",
+      title: "Worker",
+      labels: { "gc-session": "test" },
+    },
+    turn: { prompt: "do the thing", kind: "next", purpose: "interactive", turnNumber: 2 },
+    accumulatedContext: [],
+  };
+}
+
+test("agent.turn_prepare keeps the accumulated request form from a child host (pa-89is1.9)", async () => {
+  // Child plugin hosts answer with the full request shape (their in-process
+  // invokeTurnPrepare returns {...request, accumulatedContext}). The daemon
+  // used to parse that as the bare {context} handler form and threw
+  // `unrecognized_keys [agent, turn, accumulatedContext]` on every turn,
+  // then dropped the memory by returning the empty input.
+  const request = turnPrepareRequest();
+  const output = validateBeforeResult("agent.turn_prepare", request, {
+    ...structuredClone(request),
+    accumulatedContext: ["memory: sentinel-alpha"],
+  });
+  expect(output.accumulatedContext).toEqual(["memory: sentinel-alpha"]);
+  expect(output.agent).toEqual(request.agent);
+  expect(output.turn).toEqual(request.turn);
+  expect(request.accumulatedContext).toEqual([]);
+  // What agent-manager composes from the validated result reaches the model.
+  const { composeTurnContext } = await import("./index.js");
+  expect(composeTurnContext(output.accumulatedContext ?? [])).toContain("memory: sentinel-alpha");
+});
+
+test("agent.turn_prepare merges child context without losing earlier plugins", () => {
+  const request: PluginTurnPrepareRequest = {
+    ...turnPrepareRequest(),
+    accumulatedContext: ["memory: sentinel-alpha"],
+  };
+  const output = validateBeforeResult("agent.turn_prepare", request, {
+    ...structuredClone(request),
+    accumulatedContext: ["memory: sentinel-alpha", "memory: sentinel-beta"],
+  });
+  expect(output.accumulatedContext).toEqual(["memory: sentinel-alpha", "memory: sentinel-beta"]);
+});
+
+test("agent.turn_prepare accepts an empty echo without throwing (pa-89is1.9)", () => {
+  // A plugin with nothing to add echoes the request back. This is the exact
+  // per-turn daemon.log case: it must validate quietly, not fail open.
+  const request = turnPrepareRequest();
+  const output = validateBeforeResult("agent.turn_prepare", request, {
+    ...structuredClone(request),
+    accumulatedContext: [],
+  });
+  expect(output.accumulatedContext).toEqual([]);
+  expect(output.agent).toEqual(request.agent);
+});
+
+test("agent.turn_prepare rejects identity changes from a child host", () => {
+  const request = turnPrepareRequest();
+  expect(() =>
+    validateBeforeResult("agent.turn_prepare", request, {
+      ...structuredClone(request),
+      agent: { ...structuredClone(request).agent, id: "other-agent" },
+      accumulatedContext: ["memory: sentinel-alpha"],
+    }),
+  ).toThrow("agent.turn_prepare hooks cannot change agent or turn identity");
+});
+
+test("agent.turn_prepare still accepts the bare {context} handler form", () => {
+  const request = turnPrepareRequest();
+  expect(
+    validateBeforeResult("agent.turn_prepare", request, { context: "memory: sentinel-alpha" })
+      .accumulatedContext,
+  ).toEqual(["memory: sentinel-alpha"]);
+  expect(
+    validateBeforeResult("agent.turn_prepare", request, {
+      context: ["memory: sentinel-alpha", "memory: sentinel-alpha", "  "],
+    }).accumulatedContext,
+  ).toEqual(["memory: sentinel-alpha"]);
+  expect(validateBeforeResult("agent.turn_prepare", request, undefined).accumulatedContext).toEqual(
+    [],
+  );
 });

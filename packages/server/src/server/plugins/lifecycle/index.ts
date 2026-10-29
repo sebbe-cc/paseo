@@ -282,6 +282,48 @@ function validateCreateResult(
   }
 }
 
+/**
+ * Merge a turn_prepare child answer into the running request. Child plugin
+ * hosts answer with the full request shape `{...request, accumulatedContext}`
+ * (their in-process `invokeTurnPrepare` accumulates each handler's
+ * `{context}` piece and returns the request), never with the bare handler
+ * `{context}` form — parsing that strict shape threw
+ * `unrecognized_keys [agent, turn, accumulatedContext]` on every turn, and
+ * returning the empty input dropped per-turn memory even when validation
+ * passed. Agent/turn identity stays immutable; only accumulated context
+ * merges through, in order without duplicates.
+ */
+function mergeTurnPrepareResult(
+  input: PluginBeforeRequests["agent.turn_prepare"],
+  output: unknown,
+): PluginBeforeRequests["agent.turn_prepare"] {
+  if (output === undefined) return input;
+  if (typeof output !== "object" || output === null || !("accumulatedContext" in output)) {
+    // Bare `{context}` handler form (tolerated for direct answers).
+    return appendTurnContext(input, normalizeTurnContextPieces(output));
+  }
+  const parsed = beforeSchemas["agent.turn_prepare"].parse(output);
+  const expected = beforeSchemas["agent.turn_prepare"].parse(input);
+  if (
+    JSON.stringify(parsed.agent) !== JSON.stringify(expected.agent) ||
+    JSON.stringify(parsed.turn) !== JSON.stringify(expected.turn)
+  ) {
+    throw new Error("agent.turn_prepare hooks cannot change agent or turn identity");
+  }
+  return appendTurnContext(input, parsed.accumulatedContext);
+}
+
+function appendTurnContext(
+  input: PluginBeforeRequests["agent.turn_prepare"],
+  pieces: string[],
+): PluginBeforeRequests["agent.turn_prepare"] {
+  const merged = [...input.accumulatedContext];
+  for (const piece of pieces) {
+    if (!merged.includes(piece)) merged.push(piece);
+  }
+  return { ...input, accumulatedContext: merged };
+}
+
 export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
   name: Name,
   input: PluginBeforeRequests[Name],
@@ -289,9 +331,12 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
 ): PluginBeforeRequests[Name] {
   if (name === "agent.turn_prepare") {
     // turn_prepare hooks contribute hidden context only; agent/turn identity
-    // is verified and immutable. The daemon accumulates `context` itself.
-    normalizeTurnContextPieces(output);
-    return input;
+    // is verified and immutable. The daemon merges the child's accumulated
+    // result itself.
+    return mergeTurnPrepareResult(
+      input as PluginBeforeRequests["agent.turn_prepare"],
+      output,
+    ) as PluginBeforeRequests[Name];
   }
   const result = validateBeforeRequest(name, output);
   if (name === "agent.session_open") {
