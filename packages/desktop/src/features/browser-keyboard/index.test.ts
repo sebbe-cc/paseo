@@ -199,6 +199,30 @@ describe("BrowserKeyboard", () => {
     ]);
   });
 
+  test("forwards modifier release from a focused guest", () => {
+    const { attach } = createBrowserKeyboard();
+    const guest = new FakeBrowserContents(55);
+    const host = new FakeBrowserContents(56);
+    attach({ browserId: "browser-a", contents: guest, hostContents: host });
+
+    guest.input(electronInput({ type: "keyUp", key: "Control", code: "ControlLeft" }));
+
+    expect(host.sent).toContainEqual({
+      channel: "paseo:event:browser-shortcut-input",
+      payload: {
+        alt: false,
+        browserId: "browser-a",
+        code: "ControlLeft",
+        control: false,
+        key: "Control",
+        meta: false,
+        repeat: false,
+        shift: false,
+        type: "keyUp",
+      },
+    });
+  });
+
   test("handles a reserved shortcut once when the same guest attaches again", () => {
     const { attach } = createBrowserKeyboard();
     const guest = new FakeBrowserContents(53);
