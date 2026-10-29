@@ -50,6 +50,8 @@ export interface SidebarProjectionInput {
   groupMode: SidebarGroupMode;
   /** The merged label catalog, for the order and color of label sections. */
   labelCatalog: readonly WorkspaceLabelDefinition[];
+  /** Manual label section order, as group keys; new labels sort last. */
+  labelGroupOrder: readonly string[];
   pinnedCollapsed: boolean;
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
@@ -116,6 +118,7 @@ function buildWorkspaceGroups(
         workspaces: unpinnedWorkspaces,
         catalog: input.labelCatalog,
         unlabelledTitle: input.t("workspaceLabels.unlabelled"),
+        labelGroupOrder: input.labelGroupOrder,
       });
   }
 }
