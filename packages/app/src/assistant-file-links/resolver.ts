@@ -1,6 +1,7 @@
 import {
   classifyAssistantFileLink,
   isFileLookingAssistantToken,
+  parseAssistantFileCandidatePath,
   type AssistantFileLinkClassification,
   type InlinePathTarget,
 } from "./parse";
@@ -154,6 +155,58 @@ export function classifyForResolution(
 
 export function getAssistantFileLinkToken(source: AssistantFileLinkSource): string {
   return getAssistantFileLinkTokenInfo(source).token;
+}
+
+export type AssistantFileBatchClassification =
+  | { kind: "external"; url: string }
+  | { kind: "file"; candidate: string; lineStart?: number; lineEnd?: number }
+  | { kind: "ignored" };
+
+/**
+ * Batch-checkable form of a file-link source: the raw (unresolved) candidate
+ * path the daemon searches for, or external/ignored when there is nothing
+ * to check. Unlike `classifyForResolution` this never joins workspace paths
+ * — joining is the daemon's job, across the agent cwd, the workspace and
+ * git roots, and the sibling worktrees.
+ */
+export function classifyForBatch(
+  source: AssistantFileLinkSource,
+  context: AssistantFileLinkContext,
+): AssistantFileBatchClassification {
+  const tokenInfo = getAssistantFileLinkTokenInfo(source);
+  const token = tokenInfo.token.trim();
+  if (!token) {
+    return { kind: "ignored" };
+  }
+
+  const classification = classifyAssistantFileLink(token, {
+    workspaceRoot: context.workspaceRoot,
+    decodeHref: tokenInfo.fromHref,
+    explicitLink: source.sourceType !== "inline-code" && !isLinkifiedSource(source),
+    relativePathBase: context.relativePathBase,
+  });
+  if (!classification) {
+    return { kind: "ignored" };
+  }
+  if (classification.kind === "external") {
+    return { kind: "external", url: classification.raw };
+  }
+
+  const candidate = parseAssistantFileCandidatePath(token, {
+    workspaceRoot: context.workspaceRoot,
+    decodeHref: tokenInfo.fromHref,
+    explicitLink: source.sourceType !== "inline-code" && !isLinkifiedSource(source),
+    relativePathBase: context.relativePathBase,
+  });
+  if (!candidate) {
+    return { kind: "ignored" };
+  }
+  return {
+    kind: "file",
+    candidate: candidate.path,
+    ...(candidate.lineStart !== undefined ? { lineStart: candidate.lineStart } : {}),
+    ...(candidate.lineEnd !== undefined ? { lineEnd: candidate.lineEnd } : {}),
+  };
 }
 
 // Markdown link hrefs are percent-encoded by the renderer; inline-code and
