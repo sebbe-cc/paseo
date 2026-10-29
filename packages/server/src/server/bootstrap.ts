@@ -202,6 +202,7 @@ import { ScriptHealthMonitor } from "./script-health-monitor.js";
 import { createScriptStatusEmitter } from "./script-status-projection.js";
 import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import { createWorkspaceScriptsService } from "./session/workspace-scripts/workspace-scripts-service.js";
+import { reattachPersistentTerminals } from "./persistent-terminals.js";
 import { assertWorkspaceAutomationAllowedForWorkspace } from "./workspace-automation-gate.js";
 import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
 import {
@@ -1547,6 +1548,7 @@ export async function createPaseoDaemon(
       assertAutomationAllowed: (workspaceId) =>
         assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, workspaceId),
       globalServicePorts: loadPersistedConfig(config.paseoHome).worktrees?.servicePorts,
+      persistenceDir: config.paseoHome,
     }),
     markWorkspaceArchiving: markWorkspaceArchivingExternal,
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
@@ -1929,6 +1931,18 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      // Persistent terminals (pa-bhkn0): reattach the tmux sessions that
+      // survived the previous daemon. Same terminal ids, same PIDs, running
+      // again — never a duplicate of a live session. Agent hosts are
+      // unaffected: they are closed at shutdown, never journaled.
+      await reattachPersistentTerminals({
+        paseoHome: config.paseoHome,
+        terminalManager,
+        runtimeStore: scriptRuntimeStore,
+        serviceProxy,
+        serviceProxyPublicBaseUrl,
+        logger,
+      }).catch((error) => logger.warn({ err: error }, "Persistent terminal reattach failed"));
     } catch (error) {
       localCredential = null;
       await deleteLocalCredential(config.paseoHome);
@@ -1973,7 +1987,10 @@ export async function createPaseoDaemon(
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();
     await pluginRuntime.stopAllPlugins();
-    terminalManager.killAll();
+    // Graceful shutdown spares persistent tmux sessions (pa-bhkn0): workspace
+    // scripts and persistent terminals keep their PIDs for reattach, while
+    // agent hosts were already closed above exactly as before.
+    terminalManager.killAll({ sparePersistent: true });
     await speechService.stop();
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
