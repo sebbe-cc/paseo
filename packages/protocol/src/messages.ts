@@ -2537,6 +2537,20 @@ export const DirectorySuggestionsRequestSchema = z.object({
   requestId: z.string(),
 });
 
+// Batch existence + worktree-aware resolution for assistant message file
+// links (fix/assistant-file-links-worktree). The client classifies link text
+// and sends the path candidates; the daemon — which has direct filesystem
+// access — resolves each against the agent cwd, the workspace and git
+// roots, and the sibling worktrees of the same repo, and reports what it
+// found. Read-only: the daemon only stats and lists, never writes.
+export const AssistantFileResolveRequestSchema = z.object({
+  type: z.literal("assistant_file_resolve_request"),
+  cwd: z.string(),
+  workspaceRoot: z.string().optional(),
+  candidates: z.array(z.string().min(1)).min(1).max(50),
+  requestId: z.string(),
+});
+
 export const PaseoWorktreeListRequestSchema = z.object({
   type: z.literal("paseo_worktree_list_request"),
   cwd: z.string().optional(),
@@ -3399,6 +3413,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ForgeSearchRequestSchema,
   GitHubSearchRequestSchema,
   DirectorySuggestionsRequestSchema,
+  AssistantFileResolveRequestSchema,
   PaseoWorktreeListRequestSchema,
   PaseoWorktreeArchiveRequestSchema,
   CreatePaseoWorktreeRequestSchema,
@@ -3839,6 +3854,9 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(assistantFileResolve): added in fix/assistant-file-links-worktree.
+        // Remove the gate when the daemon floor always resolves assistant file links.
+        assistantFileResolve: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6049,6 +6067,23 @@ export const DirectorySuggestionsResponseSchema = z.object({
   }),
 });
 
+export const AssistantFileResolveResultSchema = z.object({
+  path: z.string(),
+  status: z.enum(["found", "missing"]),
+  absolutePath: z.string().nullable(),
+  searchedRoots: z.array(z.string()),
+  modifiedAt: z.string().nullable(),
+});
+
+export const AssistantFileResolveResponseSchema = z.object({
+  type: z.literal("assistant_file_resolve_response"),
+  payload: z.object({
+    results: z.array(AssistantFileResolveResultSchema),
+    error: z.string().nullable(),
+    requestId: z.string(),
+  }),
+});
+
 const PaseoWorktreeSchema = z.object({
   worktreePath: z.string(),
   createdAt: z.string(),
@@ -7138,6 +7173,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ForgeSearchResponseSchema,
   GitHubSearchResponseSchema,
   DirectorySuggestionsResponseSchema,
+  AssistantFileResolveResponseSchema,
   PaseoWorktreeListResponseSchema,
   PaseoWorktreeArchiveResponseSchema,
   CreatePaseoWorktreeResponseSchema,
@@ -7557,6 +7593,8 @@ export type ChangeRequestCheckoutSource = z.infer<typeof ChangeRequestCheckoutSo
 export type CreatePaseoWorktreeRequest = z.infer<typeof CreatePaseoWorktreeRequestSchema>;
 export type DirectorySuggestionsRequest = z.infer<typeof DirectorySuggestionsRequestSchema>;
 export type DirectorySuggestionsResponse = z.infer<typeof DirectorySuggestionsResponseSchema>;
+export type AssistantFileResolveRequest = z.infer<typeof AssistantFileResolveRequestSchema>;
+export type AssistantFileResolveResponse = z.infer<typeof AssistantFileResolveResponseSchema>;
 export type PaseoWorktreeListRequest = z.infer<typeof PaseoWorktreeListRequestSchema>;
 export type PaseoWorktreeListResponse = z.infer<typeof PaseoWorktreeListResponseSchema>;
 export type PaseoWorktreeArchiveRequest = z.infer<typeof PaseoWorktreeArchiveRequestSchema>;

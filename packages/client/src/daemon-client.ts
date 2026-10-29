@@ -82,6 +82,7 @@ import type {
   GitHubSearchResponse,
   GitHubSearchRequest,
   DirectorySuggestionsResponse,
+  AssistantFileResolveResponse,
   PaseoWorktreeListResponse,
   PaseoWorktreeArchiveResponse,
   ProjectIconSource,
@@ -547,6 +548,8 @@ type BranchSuggestionsPayload = BranchSuggestionsResponse["payload"];
 type ForgeSearchPayload = ForgeSearchResponse["payload"];
 type GitHubSearchPayload = GitHubSearchResponse["payload"];
 type DirectorySuggestionsPayload = DirectorySuggestionsResponse["payload"];
+export type AssistantFileResolvePayload = AssistantFileResolveResponse["payload"];
+export type AssistantFileResolveResult = AssistantFileResolvePayload["results"][number];
 type PaseoWorktreeListPayload = PaseoWorktreeListResponse["payload"];
 type PaseoWorktreeArchivePayload = PaseoWorktreeArchiveResponse["payload"];
 type CreatePaseoWorktreePayload = Extract<
@@ -5151,6 +5154,26 @@ export class DaemonClient {
       responseType: "directory_suggestions_response",
       // Home-tree scans on large home dirs can take several seconds; don't cut
       // the suggestion request off early (it would surface as an empty list).
+    });
+  }
+
+  async resolveAssistantFiles(
+    options: {
+      cwd: string;
+      workspaceRoot?: string;
+      candidates: string[];
+    },
+    requestId?: string,
+  ): Promise<AssistantFileResolvePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "assistant_file_resolve_request",
+        cwd: options.cwd,
+        workspaceRoot: options.workspaceRoot,
+        candidates: options.candidates,
+      },
+      responseType: "assistant_file_resolve_response",
     });
   }
 
