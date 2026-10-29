@@ -878,11 +878,12 @@ type PluginTurnOutcome =
 
 ### Before hooks
 
-| Name                 | Request fields                                                          | Editable                                |
-| -------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| `agent.create`       | `config`, optional `env`                                                | Public agent config except `cwd`; `env` |
-| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env` | Only `env`                              |
-| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                         | Entire explicit creation request        |
+| Name                 | Request fields                                                                                                                                         | Editable                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `agent.create`       | `config`, optional `env`, `labels`, `initialPrompt`                                                                                                    | Public agent config except `cwd`; `env` (`labels`/`initialPrompt` read-only)                                      |
+| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env`, `labels`, `initialPrompt`, optional `systemPrompt`/`daemonAppendSystemPrompt` | `env`, plus `systemPrompt`/`daemonAppendSystemPrompt` on interactive opens; history opens keep saved instructions |
+| `agent.turn_prepare` | `agent` (with `labels`), `turn` (`prompt`, `kind`, `purpose`, `turnNumber`), `accumulatedContext`                                                      | Returns hidden `context` only; never edits the prompt or identity                                                 |
+| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                                                                                                        | Entire explicit creation request                                                                                  |
 
 **`agent.create.config`** uses `AgentSessionConfig`:
 
@@ -895,6 +896,13 @@ type PluginTurnOutcome =
 | `mcpServers`, `toolPolicy`                    | MCP configuration and exact-tool preapprovals                              |
 | `cwd`                                         | Cannot change                                                              |
 
+**`agent.create` readable context:** besides `config` and `env`, the hook sees
+`labels` (the verified labels the agent will be registered with, for example a
+`gc-session` role marker) and `initialPrompt` (the first user prompt when the
+caller supplied one, otherwise `null`; normal creation happens before the first
+prompt, which arrives per turn via `agent.turn_prepare`). Both are read-only:
+changing them fails the operation. `cwd` still cannot move.
+
 **`agent.session_open` request example:**
 
 ```json
@@ -905,16 +913,31 @@ type PluginTurnOutcome =
   "cwd": "/projects/shop",
   "reason": "resume",
   "purpose": "interactive",
-  "env": { "COMPANY_ENV": "development" }
+  "env": { "COMPANY_ENV": "development" },
+  "labels": { "gc-session": "worker" },
+  "initialPrompt": null,
+  "systemPrompt": "You are the worker.",
+  "daemonAppendSystemPrompt": null
 }
 ```
 
-| Field         | Values                                                                                                                  |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `workspaceId` | String or `null`                                                                                                        |
-| `reason`      | `create`, `resume`, `refresh`, `import`                                                                                 |
-| `purpose`     | `interactive`, `history`                                                                                                |
-| `env`         | Launch override map; excludes the daemon's inherited environment. Replace the map to add, replace, or remove overrides. |
+| Field                      | Values                                                                                                                  |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `workspaceId`              | String or `null`                                                                                                        |
+| `reason`                   | `create`, `resume`, `refresh`, `import`                                                                                 |
+| `purpose`                  | `interactive`, `history`                                                                                                |
+| `labels`                   | Verified agent labels; read-only                                                                                        |
+| `initialPrompt`            | First user prompt when known, otherwise `null`; read-only                                                               |
+| `systemPrompt`             | Stable role instructions; recomposable on interactive opens, frozen on history opens                                    |
+| `daemonAppendSystemPrompt` | Daemon-level append; same recomposition rule as `systemPrompt`                                                          |
+| `env`                      | Launch override map; excludes the daemon's inherited environment. Replace the map to add, replace, or remove overrides. |
+
+A hook may return changed `systemPrompt`/`daemonAppendSystemPrompt` when
+`purpose` is `interactive` (create, resume, refresh, import). The daemon applies
+them to the session going forward, so a resumed or refreshed agent picks up
+fresh plugin instructions instead of a frozen copy. When `purpose` is `history`
+the open never runs the model and must leave the saved instructions unchanged;
+changing them fails the open, exactly like changing `labels` or `initialPrompt`.
 
 ### Ordering and returned values
 
@@ -923,9 +946,14 @@ Creation request
   → agent.create hooks (plugin-ID order; registration order within each plugin)
   → resolve defaults and validate provider configuration
   → derive launch configuration with Paseo runtime tools and daemon prompt
-  → agent.session_open hooks (same ordering; env only)
+  → agent.session_open hooks (same ordering; env plus interactive instruction recomposition)
   → set PASEO_AGENT_ID and PASEO_AGENT_CWD
   → open provider session and save agent configuration
+
+Every foreground turn
+  → agent.turn_prepare hooks (same ordering; fail-open, see below)
+  → hidden context wrapped around the provider-bound prompt
+  → provider runs the turn; the stored timeline keeps the original user text
 ```
 
 | Callback returns                                        | Next callback receives                              |
@@ -938,20 +966,57 @@ Creation request
 No automatic deep merge. Later callbacks can overwrite earlier values. Agent configuration is
 saved; environment overrides are not persisted with it.
 
+### Hidden per-turn context (`agent.turn_prepare`)
+
+Stable role instructions live in `config.systemPrompt` and are mapped per
+provider (Claude preset append, Codex per-turn `developerInstructions`, Pi
+`before_agent_start`, Muse/Omp session prompt). Changing context — memory,
+retrieved facts, compaction-sensitive state — arrives per turn instead:
+
+```ts
+server.before("agent.turn_prepare", ({ request }) => {
+  if (request.turn.purpose !== "interactive") {
+    return;
+  }
+  return { context: `Open tasks for ${request.turn.prompt}` };
+});
+```
+
+The hook sees verified identity (`agent.id`, `provider`, `cwd`, `labels`),
+the untouched prompt snapshot (`turn.prompt`), and lifecycle status
+(`turn.kind` is `start`, `resume`, `refresh`, `compaction`, or `next`;
+`turnNumber` counts foreground turns from 1). It returns only `{ context }`
+(a string or string array); it cannot change the prompt, the agent, or start
+a turn. The daemon delivers the composed blocks as hidden model context
+wrapped in a `<system-reminder data-paseo-turn-context>` marker around the
+provider-bound prompt, identically on Claude, Codex, Muse, and Pi. The stored
+timeline keeps the original user text, so there is no visible extra message,
+and identical blocks from several plugins are sent once per turn (capped at
+8000 characters).
+
+| Contract               | Behavior                                                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cancellation / timeout | 5 seconds per turn across all `turn_prepare` hooks; a timeout contributes nothing and the turn starts. The signal aborts on plugin stop.                                                                                 |
+| Ordering               | Plugin-ID order, registration order within each plugin; each hook sees earlier hooks' blocks in `accumulatedContext`.                                                                                                    |
+| Replacement / dedup    | Exact duplicate blocks are delivered once per turn. A plugin replaces its own text by returning the new text; there is no cross-turn memory — every turn recomposes from scratch.                                        |
+| Fail-open              | A throwing hook, an invalid return, or a timeout is logged against the plugin and skipped; the turn still starts with the remaining blocks (possibly none). A failing hook never stops the start.                        |
+| History opens          | `turn_prepare` never runs for `history` resumes; reading history starts no model run.                                                                                                                                    |
+| Post-compaction/resume | The next turn after a completed compaction carries `kind: "compaction"`; the first turn after a resume or refresh carries `resume` / `refresh`, so memory plugins can re-inject without relying on frozen session state. |
+
 ### Context and cleanup
 
-| Contract                           | Behavior                                                                                                  |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `context.paseo`                    | Existing SDK connected to this daemon                                                                     |
-| `context.signal`                   | Aborted on invocation timeout or plugin stop; pass to external requests                                   |
-| Input data                         | Detached snapshot; change state through returned requests or SDK commands                                 |
-| Registration result                | Idempotent remover, e.g. `const remove = server.on(...); remove();`                                       |
-| Reload, disable, removal, shutdown | Remaining registrations removed                                                                           |
-| Unknown hook name                  | Registration fails                                                                                        |
-| Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation; an event handler logs an error. |
-| Event-handler error                | Logged against plugin; original operation continues                                                       |
-| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                             |
-| Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                 |
+| Contract                           | Behavior                                                                                                                                                                                             |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `context.paseo`                    | Existing SDK connected to this daemon                                                                                                                                                                |
+| `context.signal`                   | Aborted on invocation timeout or plugin stop; pass to external requests                                                                                                                              |
+| Input data                         | Detached snapshot; change state through returned requests or SDK commands                                                                                                                            |
+| Registration result                | Idempotent remover, e.g. `const remove = server.on(...); remove();`                                                                                                                                  |
+| Reload, disable, removal, shutdown | Remaining registrations removed                                                                                                                                                                      |
+| Unknown hook name                  | Registration fails                                                                                                                                                                                   |
+| Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation; an event handler logs an error. `agent.turn_prepare` is the exception: it is fail-open with a 5 second budget (see below). |
+| Event-handler error                | Logged against plugin; original operation continues                                                                                                                                                  |
+| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                                                                                                                        |
+| Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                                                                                                            |
 
 ### Complete examples
 
