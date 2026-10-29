@@ -1102,6 +1102,7 @@ test("advertises client capabilities in hello", async () => {
       timeline_notifications: true,
       plugin_timeline_items: true,
       plugin_voice_providers: true,
+      plugin_dictation_providers: true,
       workspace_setup_blocked: true,
       workspace_setup_observation: true,
       hello_rejection: true,
