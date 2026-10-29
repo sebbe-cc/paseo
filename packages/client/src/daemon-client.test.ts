@@ -4724,6 +4724,91 @@ test("requests directory suggestions via RPC", async () => {
   });
 });
 
+test("requests assistant file resolution via RPC", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const promise = client.resolveAssistantFiles(
+    {
+      cwd: "/tmp/project",
+      workspaceRoot: "/tmp/project",
+      candidates: ["task-a-summary.md", "docs/plan.md"],
+    },
+    "req-resolve",
+  );
+
+  expect(mock.sent).toHaveLength(1);
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request.type).toBe("assistant_file_resolve_request");
+  expect(request.cwd).toBe("/tmp/project");
+  expect(request.workspaceRoot).toBe("/tmp/project");
+  expect(request.candidates).toEqual(["task-a-summary.md", "docs/plan.md"]);
+  expect(request.requestId).toBe("req-resolve");
+
+  mock.triggerMessage(
+    JSON.stringify({
+      type: "session",
+      message: {
+        type: "assistant_file_resolve_response",
+        payload: {
+          results: [
+            {
+              path: "task-a-summary.md",
+              status: "found",
+              absolutePath: "/tmp/other/task-a-summary.md",
+              searchedRoots: ["/tmp/project"],
+              modifiedAt: null,
+            },
+            {
+              path: "docs/plan.md",
+              status: "missing",
+              absolutePath: null,
+              searchedRoots: ["/tmp/project"],
+              modifiedAt: null,
+            },
+          ],
+          error: null,
+          requestId: "req-resolve",
+        },
+      },
+    }),
+  );
+
+  await expect(promise).resolves.toEqual({
+    results: [
+      {
+        path: "task-a-summary.md",
+        status: "found",
+        absolutePath: "/tmp/other/task-a-summary.md",
+        searchedRoots: ["/tmp/project"],
+        modifiedAt: null,
+      },
+      {
+        path: "docs/plan.md",
+        status: "missing",
+        absolutePath: null,
+        searchedRoots: ["/tmp/project"],
+        modifiedAt: null,
+      },
+    ],
+    error: null,
+    requestId: "req-resolve",
+  });
+});
+
 test("requests checkout merge from base via RPC", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

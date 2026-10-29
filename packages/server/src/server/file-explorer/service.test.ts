@@ -15,6 +15,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runGitCommand, snapshotGitCommandRuntimeMetrics } from "../../utils/run-git-command.js";
 import {
+  assertFilesystemRootWriteAllowed,
   createExplorerEntry,
   deleteExplorerEntry,
   duplicateExplorerEntry,
@@ -800,6 +801,45 @@ describe("file explorer service", () => {
       ).resolves.toMatchObject({ status: "error" });
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes through the filesystem root inside the home/tmp allowlist", async () => {
+    const dir = await createTempDir("paseo-filesystem-root-write-");
+    try {
+      const filePath = path.join(dir, "notes.txt");
+      await writeFile(filePath, "before", "utf8");
+      const version = await getExplorerFileVersion({ root: "/", relativePath: filePath });
+      if (version.status !== "ready") throw new Error("expected a ready version");
+      const result = await writeExplorerFile({
+        root: "/",
+        relativePath: filePath,
+        content: "after",
+        expectedModifiedAt: version.modifiedAt,
+        expectedRevision: version.revision,
+      });
+      expect(result.status).toBe("written");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("confines filesystem-root writes to the home/tmp allowlist", async () => {
+    const allowed = await createTempDir("paseo-write-allowed-");
+    const outside = await createTempDir("paseo-write-outside-");
+    try {
+      const outsideFile = path.join(outside, "notes.txt");
+      await writeFile(outsideFile, "x", "utf8");
+      // Custom allowlist keeps the test hermetic: only `allowed` is writable.
+      await assertFilesystemRootWriteAllowed("/", path.join(allowed, "notes.txt"), [allowed]);
+      await expect(assertFilesystemRootWriteAllowed("/", outsideFile, [allowed])).rejects.toThrow(
+        "Writing outside of the home and temp directories is not allowed",
+      );
+      // A workspace-scoped root is never confined by this guard.
+      await assertFilesystemRootWriteAllowed(outside, outsideFile, [allowed]);
+    } finally {
+      await rm(allowed, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

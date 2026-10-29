@@ -41,6 +41,7 @@ import {
   type WorkspaceScriptStopRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
+  type AssistantFileResolveRequest,
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
@@ -221,6 +222,7 @@ import {
   searchDirectoryEntries,
   WORKSPACE_SEARCH_HIDDEN_DIRECTORIES,
 } from "../utils/directory-suggestions.js";
+import { resolveAssistantFilePaths } from "./file-explorer/assistant-resolve.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type { Resolvable } from "./speech/provider-resolver.js";
 import type pino from "pino";
@@ -3112,6 +3114,8 @@ export class Session {
         return this.handleProjectIconGetRequest(msg.projectId, msg.requestId);
       case "file_download_token_request":
         return this.workspaceFilesSession.handleFileDownloadTokenRequest(msg);
+      case "assistant_file_resolve_request":
+        return this.handleAssistantFileResolveRequest(msg);
       case "file.upload.request":
         this.workspaceFilesSession.handleFileUploadRequest(msg, this.delivery);
         return undefined;
@@ -5212,6 +5216,36 @@ export class Session {
         payload: {
           directories: [],
           entries: [],
+          error: error instanceof Error ? error.message : String(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  private async handleAssistantFileResolveRequest(msg: AssistantFileResolveRequest): Promise<void> {
+    const { cwd, workspaceRoot, candidates, requestId } = msg;
+    try {
+      const results = await resolveAssistantFilePaths({
+        cwd,
+        workspaceRoot,
+        candidates,
+      });
+      this.emit({
+        type: "assistant_file_resolve_response",
+        payload: { results, error: null, requestId },
+      });
+    } catch (error) {
+      this.emit({
+        type: "assistant_file_resolve_response",
+        payload: {
+          results: candidates.map((path) => ({
+            path,
+            status: "missing" as const,
+            absolutePath: null,
+            searchedRoots: [],
+            modifiedAt: null,
+          })),
           error: error instanceof Error ? error.message : String(error),
           requestId,
         },
