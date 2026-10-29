@@ -1,3 +1,4 @@
+import type { PluginVoiceHost, VoiceProviderEvent } from "@getpaseo/plugin/server";
 import type { UsageScope } from "@getpaseo/plugin/server/usage";
 import {
   ProviderStatusSchema,
@@ -75,6 +76,8 @@ interface LoadedPlugin {
   hooks: { events: string[]; before: string[] };
   providers: readonly PluginProviderMetadata[];
   usageSources: readonly PluginUsageSourceMetadata[];
+  voiceProviders: ReadonlyArray<{ id: string; label: string }>;
+  voiceSessions: Map<string, (event: VoiceProviderEvent) => void>;
   child: PluginChild | null;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
@@ -506,6 +509,71 @@ export class PluginRuntime {
     this.logTails.delete(pluginId);
   }
 
+  hasVoiceProvider: PluginVoiceHost["hasVoiceProvider"] = ({ pluginId, providerId }) => {
+    return (
+      this.plugins.get(pluginId)?.voiceProviders.some((provider) => provider.id === providerId) ===
+      true
+    );
+  };
+
+  startVoiceProvider: PluginVoiceHost["startVoiceProvider"] = async (selection, context) => {
+    const loaded = this.plugins.get(selection.pluginId);
+    if (!loaded || !this.hasVoiceProvider(selection))
+      throw new Error("Selected voice provider is unavailable");
+    context.signal.throwIfAborted();
+    const sessionId = randomUUID();
+    let closing: Promise<void> | null = null;
+    const close = (): Promise<void> => {
+      if (closing) return closing;
+      loaded.voiceSessions.delete(sessionId);
+      context.signal.removeEventListener("abort", onAbort);
+      closing = this.request(loaded, {
+        type: "voice.request",
+        requestId: randomUUID(),
+        sessionId,
+        command: { type: "close" },
+      }).then(() => undefined);
+      return closing;
+    };
+    const onAbort = () => {
+      void close().catch(() => undefined);
+    };
+    loaded.voiceSessions.set(sessionId, context.emit);
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await this.request(loaded, {
+        type: "voice.request",
+        requestId: randomUUID(),
+        sessionId,
+        command: { type: "start", providerId: selection.providerId, agentId: context.agentId },
+      });
+      context.signal.throwIfAborted();
+      if (!loaded.voiceSessions.has(sessionId))
+        throw new Error("Voice provider closed during startup");
+    } catch (error) {
+      await close().catch(() => undefined);
+      throw error;
+    }
+    return {
+      appendAudio: async (audio) => {
+        if (!loaded.voiceSessions.has(sessionId)) throw new Error("Voice provider is closed");
+        await this.request(loaded, {
+          type: "voice.request",
+          requestId: randomUUID(),
+          sessionId,
+          command: { type: "audio", audio },
+        });
+      },
+      close,
+    };
+  };
+
+  private closeVoiceSessions(loaded: LoadedPlugin): void {
+    const listeners = [...loaded.voiceSessions.values()];
+    loaded.voiceSessions.clear();
+    for (const emit of listeners) emit({ type: "closed", error: "Voice provider stopped" });
+  }
+
   async invoke(pluginId: string, method: string, input: unknown): Promise<unknown> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) throw new Error(`Plugin is not available: ${pluginId}`);
@@ -647,6 +715,8 @@ export class PluginRuntime {
         hooks: { events: [], before: [] },
         providers: [],
         usageSources: [],
+        voiceProviders: [],
+        voiceSessions: new Map(),
         child: null,
         outputCapture: null,
         pending: new Map(),
@@ -775,6 +845,8 @@ export class PluginRuntime {
       hooks: ready.hooks ?? { events: [], before: [] },
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
+      voiceProviders: ready.voiceProviders ?? [],
+      voiceSessions: new Map(),
       child,
       outputCapture,
       pending,
@@ -851,6 +923,12 @@ export class PluginRuntime {
   }
 
   private handleChildMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {
+    if (message.type === "voice.event") {
+      const emit = loaded.voiceSessions.get(message.sessionId);
+      if (message.event.type === "closed") loaded.voiceSessions.delete(message.sessionId);
+      emit?.(message.event);
+      return;
+    }
     if (message.type === "hooks.changed") {
       loaded.hooks = message.hooks;
       return;
@@ -1162,6 +1240,7 @@ export class PluginRuntime {
   }
 
   private async handleChildClose(loaded: LoadedPlugin): Promise<void> {
+    this.closeVoiceSessions(loaded);
     loaded.sessionSocket?.peerClosed();
     const wasPublished = this.plugins.get(loaded.id) === loaded;
     if (wasPublished) {
@@ -1177,6 +1256,7 @@ export class PluginRuntime {
   }
 
   private async stopPlugin(loaded: LoadedPlugin): Promise<void> {
+    this.closeVoiceSessions(loaded);
     this.appendLog(loaded.id, "stdout", "[paseo] Stopping plugin");
     for (const [connectionId, state] of loaded.providerConnections) {
       if (state.connected) continue;
