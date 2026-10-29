@@ -75,6 +75,7 @@ interface LoadedPlugin {
   hooks: { events: string[]; before: string[] };
   providers: readonly PluginProviderMetadata[];
   usageSources: readonly PluginUsageSourceMetadata[];
+  disabledUsageSources: readonly string[];
   child: PluginChild | null;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
@@ -397,6 +398,10 @@ export class PluginRuntime {
     return this.plugins.get(pluginId)?.usageSources ?? [];
   }
 
+  getDisabledUsageSources(pluginId: string): readonly string[] {
+    return this.plugins.get(pluginId)?.disabledUsageSources ?? [];
+  }
+
   fetchUsage(pluginId: string, sourceId: string, input: unknown): Promise<unknown> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) throw new Error(`Plugin is not available: ${pluginId}`);
@@ -647,6 +652,7 @@ export class PluginRuntime {
         hooks: { events: [], before: [] },
         providers: [],
         usageSources: [],
+        disabledUsageSources: [],
         child: null,
         outputCapture: null,
         pending: new Map(),
@@ -775,6 +781,7 @@ export class PluginRuntime {
       hooks: ready.hooks ?? { events: [], before: [] },
       providers: ready.providers ?? [],
       usageSources: ready.usageSources ?? [],
+      disabledUsageSources: ready.disabledUsageSources ?? [],
       child,
       outputCapture,
       pending,

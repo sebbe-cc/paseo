@@ -80,6 +80,16 @@ export interface UsageSourceRegistration {
   label: string;
   icon?: string;
   input: ZodType;
+  /**
+   * Source ids this registration takes over, e.g. `["codex"]`. The daemon
+   * runs this source's `discover`/`fetch` instead of the named built-in
+   * sources and shows the results on their native cards (same id prefix,
+   * windows and summary). First claimant wins on conflict; a failing
+   * override falls back to the built-in source with its errors retained.
+   * A source that wins at least one takeover publishes only through the
+   * taken-over cards, never under its own id.
+   */
+  replaces?: string[];
   /** Accounts for this scope only. The same key in any scope identifies the same account. */
   discover(scope: UsageScope): Promise<UsageAccount[]>;
   /** Re-reads the login store; never writes it. */
