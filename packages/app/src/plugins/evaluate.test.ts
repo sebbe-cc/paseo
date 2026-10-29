@@ -86,6 +86,7 @@ describe("evaluatePluginClientBundle", () => {
           plugin.addTheme({ id: "night", name: "Night", appearance: "dark", colors: { background: "#000", foreground: "#fff", raised: "#111", control: "#222", border: "#333", mutedForeground: "#aaa", ring: "#555" } }),
           plugin.addTimelineTransformer({ id: "transformer", query: { itemType: "tool_call" }, transform() { return { items: [] }; } }),
           plugin.addTimelineRenderer({ kind: "card", version: 1, schema, Component }),
+          plugin.addInlineDecorator({ id: "bead", pattern: /pa-[a-z0-9]+/, onPress() {} }).remove,
         ];
       `),
       {
@@ -116,6 +117,7 @@ describe("evaluatePluginClientBundle", () => {
         plugin.themes,
         plugin.timelineTransformers,
         plugin.timelineRenderers,
+        plugin.inlineDecorators,
       ].every((items) => items.length === 1),
     ).toBe(true);
     expect(pillCount).toBe(1);
@@ -136,6 +138,7 @@ describe("evaluatePluginClientBundle", () => {
         plugin.themes,
         plugin.timelineTransformers,
         plugin.timelineRenderers,
+        plugin.inlineDecorators,
       ].every((items) => items.length === 0),
     ).toBe(true);
     expect(pillCount).toBe(0);
@@ -168,6 +171,33 @@ describe("evaluatePluginClientBundle", () => {
     expect(plugin.timelineRenderers.map(({ kind, version }) => ({ kind, version }))).toEqual([
       { kind: "test-report", version: 1 },
     ]);
+  });
+
+  it("collects inline decorators and rejects duplicates and unsafe patterns", () => {
+    const plugin = evaluatePluginClientBundle(
+      "beads",
+      bundle(`
+        plugin.addInlineDecorator({ id: "bead", pattern: /pa-[a-z0-9]+/, inlineCode: false, onPress() {} });
+      `),
+    );
+    expect(
+      plugin.inlineDecorators.map(({ id, source, inlineCode }) => ({ id, source, inlineCode })),
+    ).toEqual([{ id: "bead", source: "pa-[a-z0-9]+", inlineCode: false }]);
+    expect(() =>
+      evaluatePluginClientBundle(
+        "beads",
+        bundle(`
+          plugin.addInlineDecorator({ id: "bead", pattern: /pa-1/, onPress() {} });
+          plugin.addInlineDecorator({ id: "bead", pattern: /pa-2/, onPress() {} });
+        `),
+      ),
+    ).toThrow("Duplicate inline decorator: bead");
+    expect(() =>
+      evaluatePluginClientBundle(
+        "beads",
+        bundle(`plugin.addInlineDecorator({ id: "bead", pattern: /pa-1/u, onPress() {} });`),
+      ),
+    ).toThrow("may only use the g flag");
   });
 
   it("rejects unknown timeline item types", () => {
@@ -892,4 +922,32 @@ describe("file panels", () => {
       ),
     ).toThrow("Duplicate file panel");
   });
+});
+
+it("registers selection actions and removes them idempotently across plugin cleanup", async () => {
+  const plugin = evaluatePluginClientBundle(
+    "selection",
+    bundle(`
+    const remove = plugin.addTimelineSelectionAction({ id: "annotate", title: "Annotate", icon: "MessageSquare", Content() { return null; } });
+    remove(); remove();
+    plugin.addTimelineSelectionAction({ id: "annotate", title: "Annotate", icon: "MessageSquare", Content: require("react").memo(function Content() { return null; }) });
+  `),
+  );
+  expect(plugin.timelineSelectionActions).toHaveLength(1);
+  expect(plugin.timelineSelectionActions[0].title).toBe("Annotate");
+  await plugin.cleanup();
+  expect(plugin.timelineSelectionActions).toHaveLength(0);
+});
+
+it("rejects duplicate selection actions", () => {
+  expect(() =>
+    evaluatePluginClientBundle(
+      "selection",
+      bundle(`
+    const contribution = { id: "annotate", title: "Annotate", icon: "MessageSquare", Content() { return null; } };
+    plugin.addTimelineSelectionAction(contribution);
+    plugin.addTimelineSelectionAction(contribution);
+  `),
+    ),
+  ).toThrow("Duplicate timeline selection action");
 });
