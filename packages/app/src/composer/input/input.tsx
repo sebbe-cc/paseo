@@ -1480,6 +1480,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       canStart: canStartDictation,
       canConfirm: canConfirmDictation,
       enableDuration: true,
+      agentId: voiceAgentId,
     });
 
     const isRealtimeVoiceForCurrentAgent = computeIsRealtimeVoiceForAgent(
