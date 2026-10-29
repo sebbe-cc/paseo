@@ -240,6 +240,9 @@ export const pageSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 export const gapSchema = z.object({ after: z.string(), next: z.string() });
+export const sessionReadSchema = z
+  .object({ session: z.object({ activeTurnId: z.string().nullable() }).passthrough() })
+  .passthrough();
 export const sessionListSchema = z.object({
   nextCursor: z.string().nullable(),
   sessions: z.array(
