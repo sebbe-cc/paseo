@@ -4,8 +4,17 @@ import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
-import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
-import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import {
+  composeTurnContext,
+  describeHookAgent,
+  publishAgentStream,
+  wrapPromptWithTurnContext,
+} from "../plugins/lifecycle/index.js";
+import type {
+  PluginSessionOpenRequest,
+  PluginTurnKind,
+  PluginTurnPrepareRequest,
+} from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
@@ -749,10 +758,22 @@ function resolveCompactThreshold(configured: number | undefined): number {
   return configured ?? (Number(process.env.PASEO_COMPACT_THRESHOLD) || 0.8);
 }
 
+/**
+ * turn_prepare (agent.turn_prepare) runs before every foreground turn and is
+ * fail-open: a throwing, timed-out, or invalid hook contributes no context
+ * and never stops the turn. Contributed blocks are delivered as hidden model
+ * context wrapped in a system-reminder marker. The stored timeline keeps the
+ * original user text; only the provider-bound request carries the wrapper, so
+ * there is no visible extra message. Identical blocks are sent once per turn.
+ */
+export const TURN_PREPARE_TIMEOUT_MS = 5_000;
+
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly compactThreshold: number;
   private readonly compactThresholdFired = new Set<string>();
+  private readonly turnNumbers = new Map<string, number>();
+  private readonly pendingTurnKinds = new Map<string, PluginTurnKind>();
   private readonly retiredInternalAgents = new Map<
     string,
     RetiredInternalAgent & { expiresAt: number }
@@ -1370,22 +1391,25 @@ export class AgentManager {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
         env: options.env,
+        labels: { ...options.labels },
+        initialPrompt: options.initialPrompt ?? null,
       });
       config = { ...request.config, internal: config.internal };
       options = { ...options, env: request.env };
     }
     await this.deleteAgentState(resolvedAgentId);
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      config,
-      resolvedAgentId,
-      { env: options?.env },
-    );
+    const prepared = await this.prepareSessionConfig(config, resolvedAgentId, {
+      env: options?.env,
+    });
+    let storedConfig = prepared.storedConfig;
+    let launchConfig = prepared.launchConfig;
+    const paseoToolPolicy = prepared.paseoToolPolicy;
     this.requireEnabledProvider(storedConfig.provider);
     const client = await this.requireAvailableClient({
       provider: storedConfig.provider,
     });
     this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
+    const opened = await this.buildLaunchContext(
       resolvedAgentId,
       client,
       storedConfig.cwd,
@@ -1397,8 +1421,17 @@ export class AgentManager {
         workspaceId: options.workspaceId ?? null,
         title: options.initialTitle ?? storedConfig.title ?? null,
         labels: options.labels ?? {},
+        initialPrompt: options.initialPrompt ?? null,
+        systemPrompt: storedConfig.systemPrompt ?? null,
+        daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
       },
     );
+    const launchContext = opened.context;
+    ({ storedConfig, launchConfig } = this.applySessionOpenInstructions(
+      storedConfig,
+      launchConfig,
+      opened.instructions,
+    ));
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
     const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
@@ -1496,11 +1529,12 @@ export class AgentManager {
       : resumeOptions;
     const purpose = currentResumeOptions?.purpose ?? "interactive";
 
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      mergedConfig,
-      resolvedAgentId,
-      { purpose },
-    );
+    const preparedResume = await this.prepareSessionConfig(mergedConfig, resolvedAgentId, {
+      purpose,
+    });
+    let storedConfig = preparedResume.storedConfig;
+    let launchConfig = preparedResume.launchConfig;
+    const paseoToolPolicy = preparedResume.paseoToolPolicy;
     const client = this.requireClient(handle.provider);
     const available = await client.isAvailable();
     if (!available) {
@@ -1509,7 +1543,7 @@ export class AgentManager {
       );
     }
     this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
+    const openedResume = await this.buildLaunchContext(
       resolvedAgentId,
       client,
       storedConfig.cwd,
@@ -1521,8 +1555,18 @@ export class AgentManager {
         workspaceId: options?.workspaceId ?? null,
         title: record?.title ?? mergedConfig.title ?? null,
         labels: record?.labels ?? options?.labels ?? {},
+        initialPrompt: null,
+        systemPrompt: storedConfig.systemPrompt ?? null,
+        daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
       },
     );
+    const launchContext = openedResume.context;
+    ({ storedConfig, launchConfig } = this.applySessionOpenInstructions(
+      storedConfig,
+      launchConfig,
+      openedResume.instructions,
+    ));
+    if (purpose === "interactive") this.markPendingTurnKind(resolvedAgentId, "resume");
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(
       handle,
@@ -1564,15 +1608,18 @@ export class AgentManager {
       throw new Error(`Provider '${input.provider}' does not support importing sessions`);
     }
 
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
+    const preparedImport = await this.prepareSessionConfig(
       {
         provider: input.provider,
         cwd: input.cwd,
       },
       resolvedAgentId,
     );
+    let storedConfig = preparedImport.storedConfig;
+    let launchConfig = preparedImport.launchConfig;
+    const paseoToolPolicy = preparedImport.paseoToolPolicy;
     this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
-    const launchContext = await this.buildLaunchContext(
+    const openedImport = await this.buildLaunchContext(
       resolvedAgentId,
       client,
       storedConfig.cwd,
@@ -1583,8 +1630,18 @@ export class AgentManager {
         purpose: "interactive",
         workspaceId: input.workspaceId,
         labels: input.labels ?? {},
+        initialPrompt: null,
+        systemPrompt: storedConfig.systemPrompt ?? null,
+        daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
       },
     );
+    const launchContext = openedImport.context;
+    ({ storedConfig, launchConfig } = this.applySessionOpenInstructions(
+      storedConfig,
+      launchConfig,
+      openedImport.instructions,
+    ));
+    this.markPendingTurnKind(resolvedAgentId, "resume");
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const imported = await client.importSession(
       {
@@ -1667,26 +1724,21 @@ export class AgentManager {
       ...overrides,
       provider,
     } as AgentSessionConfig;
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      refreshConfig,
-      agentId,
-    );
+    const preparedRefresh = await this.prepareSessionConfig(refreshConfig, agentId);
+    const paseoToolPolicy = preparedRefresh.paseoToolPolicy;
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
-    const launchContext = await this.buildLaunchContext(
+    const opened = await this.openRefreshedSession(
       agentId,
       client,
-      storedConfig.cwd,
+      existing,
+      preparedRefresh.storedConfig,
+      preparedRefresh.launchConfig,
       paseoToolPolicy,
-      undefined,
-      {
-        reason: "refresh",
-        purpose: "interactive",
-        workspaceId: existing.workspaceId,
-        title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
-        labels: existing.labels,
-      },
     );
+    const storedConfig = opened.storedConfig;
+    const launchConfig = opened.launchConfig;
+    const launchContext = opened.launchContext;
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
       Object.keys(stripInternalPaseoMcpServer(providerLaunchConfig).mcpServers ?? {}).length > 0 &&
@@ -2725,8 +2777,31 @@ export class AgentManager {
     options?: AgentRunOptions;
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
+    // Hidden per-turn context: verified identity + prompt snapshot in, separate
+    // channel out. Never mutates the stored prompt, never creates a turn, and
+    // never blocks the start when hooks fail. Without a plugin lifecycle the
+    // fast path stays fully synchronous so turn timing is unchanged.
+    const turnNumber = (this.turnNumbers.get(agentId) ?? 0) + 1;
+    this.turnNumbers.set(agentId, turnNumber);
+    const turnKind = this.takePendingTurnKind(agentId, turnNumber);
+    const pendingContext = this.pluginLifecycle
+      ? this.collectTurnPrepareContext({
+          agentId,
+          provider: agent.provider,
+          cwd: agent.cwd,
+          workspaceId: agent.workspaceId ?? null,
+          labels: { ...agent.labels },
+          title: agent.config.title ?? null,
+          prompt,
+          purpose: "interactive",
+          turnNumber,
+          kind: turnKind,
+        })
+      : null;
+    const turnContext = pendingContext ? await pendingContext : null;
+    const providerPrompt = this.withTurnPrepareContext(prompt, turnContext);
     try {
-      const result = await agent.session.startTurn(prompt, options);
+      const result = await agent.session.startTurn(providerPrompt, options);
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
       }
@@ -4021,6 +4096,8 @@ export class AgentManager {
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
     this.compactThresholdFired.delete(agent.id);
+    this.turnNumbers.delete(agent.id);
+    this.pendingTurnKinds.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
       agent.unsubscribeSession = null;
@@ -4053,6 +4130,8 @@ export class AgentManager {
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
     this.detachPluginTools(agentId);
+    this.turnNumbers.delete(agentId);
+    this.pendingTurnKinds.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }
@@ -5140,6 +5219,9 @@ export class AgentManager {
     item = limitAgentTimelineItemContent(item);
     const row = this.timelineStore.append(agentId, item, options);
     this.enqueueDurableTimelineAppend(agentId, row);
+    if (item.type === "compaction" && item.status === "completed") {
+      this.markPendingTurnKind(agentId, "compaction");
+    }
     return row;
   }
 
@@ -5531,6 +5613,24 @@ export class AgentManager {
       : next;
   }
 
+  private readInitialPromptText(agentId: string): string | null {
+    try {
+      const rows = this.timelineStore.getRows?.(agentId) as
+        | Array<{ item?: { type?: string; text?: string } }>
+        | undefined;
+      if (!rows) return null;
+      for (const row of rows) {
+        if (row?.item?.type === "user_message" && typeof row.item.text === "string") {
+          const text = row.item.text.trim();
+          if (text) return row.item.text;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private async buildLaunchContext(
     agentId: string,
     client: AgentClient,
@@ -5543,26 +5643,40 @@ export class AgentManager {
       workspaceId?: string | null;
       title?: string | null;
       labels?: Record<string, string>;
+      initialPrompt?: string | null;
+      systemPrompt?: string | null;
+      daemonAppendSystemPrompt?: string | null;
     },
-  ): Promise<AgentLaunchContext> {
+  ): Promise<{
+    context: AgentLaunchContext;
+    instructions: { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null;
+  }> {
     // A plugin changing during this open must still make the resulting session stale.
     const generation = this.sessionOpenGeneration;
     this.detachPluginTools(agentId);
     let mcpServers: AgentSessionConfig["mcpServers"];
     let mcpServerOwners: Record<string, string> | undefined;
+    let instructions: {
+      systemPrompt?: string | null;
+      daemonAppendSystemPrompt?: string | null;
+    } | null = null;
     if (this.pluginLifecycle) {
+      const purpose = opening?.purpose ?? "interactive";
       const request = {
         agentId,
         provider: client.provider,
         cwd,
         workspaceId: opening?.workspaceId ?? null,
         reason: opening?.reason ?? "resume",
-        purpose: opening?.purpose ?? "interactive",
+        purpose,
         env: { ...env },
         title: opening?.title ?? null,
         labels: opening?.labels ?? {},
         tools: [],
         mcpServers: {},
+        initialPrompt: opening?.initialPrompt ?? this.readInitialPromptText(agentId),
+        systemPrompt: opening?.systemPrompt ?? null,
+        daemonAppendSystemPrompt: opening?.daemonAppendSystemPrompt ?? null,
       };
       const transformed = await this.pluginLifecycle.before("agent.session_open", request);
       env = transformed.env;
@@ -5571,6 +5685,7 @@ export class AgentManager {
         mcpServers = transformed.mcpServers;
         mcpServerOwners = transformed.mcpServerOwners;
       }
+      instructions = AgentManager.diffSessionOpenInstructions(request, transformed);
     }
     const context: AgentLaunchContext = {
       agentId,
@@ -5606,7 +5721,179 @@ export class AgentManager {
       }
     }
     this.sessionOpenGenerations.set(agentId, generation);
-    return context;
+    return { context, instructions };
+  }
+
+  /**
+   * Interactive opens may recompose stable plugin instructions; history
+   * opens keep the saved instructions untouched.
+   */
+  private static diffSessionOpenInstructions(
+    request: Pick<PluginSessionOpenRequest, "purpose" | "systemPrompt" | "daemonAppendSystemPrompt">,
+    transformed: Pick<PluginSessionOpenRequest, "systemPrompt" | "daemonAppendSystemPrompt">,
+  ): { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null {
+    if (request.purpose !== "interactive") return null;
+    const systemChanged = (transformed.systemPrompt ?? null) !== (request.systemPrompt ?? null);
+    const appendChanged =
+      (transformed.daemonAppendSystemPrompt ?? null) !== (request.daemonAppendSystemPrompt ?? null);
+    if (!systemChanged && !appendChanged) return null;
+    return {
+      systemPrompt: transformed.systemPrompt ?? null,
+      daemonAppendSystemPrompt: transformed.daemonAppendSystemPrompt ?? null,
+    };
+  }
+
+  private async openRefreshedSession(
+    agentId: string,
+    client: AgentClient,
+    existing: ActiveManagedAgent,
+    storedConfig: AgentSessionConfig,
+    launchConfig: AgentSessionConfig,
+    paseoToolPolicy: ProviderPaseoToolsPolicy | undefined,
+  ): Promise<{
+    storedConfig: AgentSessionConfig;
+    launchConfig: AgentSessionConfig;
+    launchContext: AgentLaunchContext;
+  }> {
+    const opened = await this.buildLaunchContext(
+      agentId,
+      client,
+      storedConfig.cwd,
+      paseoToolPolicy,
+      undefined,
+      {
+        reason: "refresh",
+        purpose: "interactive",
+        workspaceId: existing.workspaceId,
+        title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
+        labels: existing.labels,
+        initialPrompt: null,
+        systemPrompt: storedConfig.systemPrompt ?? null,
+        daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
+      },
+    );
+    const applied = this.applySessionOpenInstructions(
+      storedConfig,
+      launchConfig,
+      opened.instructions,
+    );
+    this.markPendingTurnKind(agentId, "refresh");
+    return {
+      storedConfig: applied.storedConfig,
+      launchConfig: applied.launchConfig,
+      launchContext: opened.context,
+    };
+  }
+
+  private applySessionOpenInstructions(
+    storedConfig: AgentSessionConfig,
+    launchConfig: AgentSessionConfig,
+    instructions: { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null,
+  ): { storedConfig: AgentSessionConfig; launchConfig: AgentSessionConfig } {
+    if (!instructions) return { storedConfig, launchConfig };
+    const nextStored = { ...storedConfig };
+    const nextLaunch = { ...launchConfig };
+    if (instructions.systemPrompt !== undefined) {
+      if (instructions.systemPrompt == null) {
+        delete nextStored.systemPrompt;
+        delete nextLaunch.systemPrompt;
+      } else {
+        nextStored.systemPrompt = instructions.systemPrompt;
+        nextLaunch.systemPrompt = instructions.systemPrompt;
+      }
+    }
+    if (instructions.daemonAppendSystemPrompt !== undefined) {
+      if (instructions.daemonAppendSystemPrompt == null) {
+        delete nextStored.daemonAppendSystemPrompt;
+        delete nextLaunch.daemonAppendSystemPrompt;
+      } else {
+        nextStored.daemonAppendSystemPrompt = instructions.daemonAppendSystemPrompt;
+        nextLaunch.daemonAppendSystemPrompt = instructions.daemonAppendSystemPrompt;
+      }
+    }
+    return { storedConfig: nextStored, launchConfig: nextLaunch };
+  }
+
+  private takePendingTurnKind(agentId: string, turnNumber: number): PluginTurnKind {
+    const pending = this.pendingTurnKinds.get(agentId);
+    this.pendingTurnKinds.delete(agentId);
+    if (pending) return pending;
+    return turnNumber <= 1 ? "start" : "next";
+  }
+
+  private markPendingTurnKind(agentId: string, kind: PluginTurnKind): void {
+    const current = this.pendingTurnKinds.get(agentId);
+    // A compaction marker describes the next turn even across a resume/refresh.
+    if (current === "compaction" && kind !== "compaction") return;
+    this.pendingTurnKinds.set(agentId, kind);
+  }
+
+  /**
+   * Collect hidden per-turn context without touching the stored prompt.
+   * Fail-open: no hooks, a timeout, or an invalid hook yields no context and
+   * the turn starts normally.
+   */
+  private async collectTurnPrepareContext(params: {
+    agentId: string;
+    provider: string;
+    cwd: string;
+    workspaceId: string | null;
+    labels: Record<string, string>;
+    title: string | null;
+    prompt: AgentPromptInput;
+    purpose: "interactive" | "history";
+    turnNumber: number;
+    kind: PluginTurnKind;
+  }): Promise<string | null> {
+    if (!this.pluginLifecycle || params.purpose !== "interactive") return null;
+    const agent = this.agents.get(params.agentId);
+    if (agent?.internal) return null;
+    const promptText = submittedPromptText(params.prompt);
+    if (!promptText.trim()) return null;
+    const request: PluginTurnPrepareRequest = {
+      agent: {
+        id: params.agentId,
+        workspaceId: params.workspaceId,
+        parentAgentId: getParentAgentIdFromLabels(params.labels) ?? null,
+        provider: params.provider,
+        cwd: params.cwd,
+        title: params.title,
+        labels: { ...params.labels },
+      },
+      turn: {
+        prompt: promptText,
+        kind: params.kind,
+        purpose: params.purpose,
+        turnNumber: params.turnNumber,
+      },
+      accumulatedContext: [],
+    };
+    let prepared: PluginTurnPrepareRequest;
+    try {
+      prepared = await withTimeout(
+        this.pluginLifecycle.before("agent.turn_prepare", request),
+        TURN_PREPARE_TIMEOUT_MS,
+        `agent.turn_prepare timed out after ${TURN_PREPARE_TIMEOUT_MS}ms`,
+      );
+    } catch (error) {
+      this.logger.warn({ err: error, agentId: params.agentId }, "agent.turn_prepare failed open");
+      return null;
+    }
+    return composeTurnContext(prepared.accumulatedContext ?? []);
+  }
+
+  private withTurnPrepareContext(
+    prompt: AgentPromptInput,
+    context: string | null,
+  ): AgentPromptInput {
+    if (!context) return prompt;
+    if (typeof prompt === "string") {
+      return wrapPromptWithTurnContext(prompt, context);
+    }
+    return [
+      { type: "text", text: `${wrapPromptWithTurnContext("", context)}` },
+      ...prompt,
+    ] as AgentPromptInput;
   }
 
   // Providers without a pre-compact hook: fire once per crossing, re-armed when usage drops.
