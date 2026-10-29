@@ -1,4 +1,6 @@
 import type { Logger } from "pino";
+import { randomUUID } from "node:crypto";
+import { connect } from "node:net";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
 import {
@@ -28,10 +30,90 @@ import {
   refreshWorkspaceServicePort,
 } from "./workspace-service-port-registry.js";
 import type { PaseoServicePortAllocation } from "@getpaseo/protocol/paseo-config-schema";
+import {
+  ensureTmuxSocketDir,
+  persistentSessionName,
+  resolveTmuxBinary,
+  tmuxKillSession,
+  tmuxPanePid,
+  tmuxSessionAlive,
+  tmuxSocketPath,
+  type PersistentTerminalBinding,
+} from "../terminal/tmux.js";
+import { recordPersistentTerminal, removePersistentTerminal } from "./persistent-terminals.js";
 
 const MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES = 64 * 1024;
 const WORKTREE_SETUP_TRUNCATION_MARKER = "\n...<output truncated in the middle>...\n";
 const WORKTREE_BOOTSTRAP_TERMINAL_READY_TIMEOUT_MS = 1_500;
+// Status must mean alive: a service reports `running` only once its port
+// listens (pa-vbhcu), a script only once its shell/process lives. Slow
+// starters (cold python) get room; a dead session fails fast every poll.
+// Plain scripts settle briefly so a command that dies instantly (never
+// started) fails instead of flashing `running` (services prove themselves
+// through the port check instead).
+const WORKSPACE_SCRIPT_ALIVE_POLL_MS = 250;
+const WORKSPACE_SCRIPT_SERVICE_TIMEOUT_MS = 20_000;
+const WORKSPACE_SCRIPT_TIMEOUT_MS = 10_000;
+const WORKSPACE_SCRIPT_SETTLE_MS = 2_000;
+
+function isLoopbackPortOpen(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const done = (open: boolean): void => {
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+/**
+ * Block until the just-sent script command is provably running (pa-vbhcu):
+ * the tmux session exists (exact target, no prefix fallback) and its pane
+ * lives, and a service additionally listens on its port. Throws otherwise, so
+ * `script start` reports an error instead of a phantom `running`.
+ */
+async function waitForWorkspaceScriptAlive(input: {
+  terminal: TerminalSession;
+  binding: PersistentTerminalBinding | null;
+  servicePort: number | null;
+  scriptName: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const { terminal, binding, servicePort, scriptName, timeoutMs } = input;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  for (;;) {
+    if (binding) {
+      if (!tmuxSessionAlive(binding)) {
+        throw new Error(
+          `tmux session '${binding.sessionName}' for script '${scriptName}' is gone; the script did not start`,
+        );
+      }
+      if (servicePort === null) {
+        if (tmuxPanePid(binding) !== null && Date.now() - startedAt >= WORKSPACE_SCRIPT_SETTLE_MS) {
+          return;
+        }
+      }
+    } else if (terminal.getExitInfo() !== null) {
+      throw new Error(`terminal for script '${scriptName}' exited before the script started`);
+    } else if (servicePort === null) {
+      if (Date.now() - startedAt >= WORKSPACE_SCRIPT_SETTLE_MS) return;
+    }
+    if (servicePort !== null && (await isLoopbackPortOpen(servicePort))) return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        servicePort !== null
+          ? `service '${scriptName}' did not start listening on 127.0.0.1:${servicePort} within ${timeoutMs}ms`
+          : `terminal for script '${scriptName}' did not become ready within ${timeoutMs}ms`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, WORKSPACE_SCRIPT_ALIVE_POLL_MS));
+  }
+}
 
 interface MiddleTruncationAccumulator {
   totalBytes: number;
@@ -381,6 +463,12 @@ export interface SpawnWorkspaceScriptOptions {
   globalServicePorts?: PaseoServicePortAllocation;
   logger?: Logger;
   onLifecycleChanged?: () => void;
+  /**
+   * PASEO_HOME for the persistent-terminal journal (pa-bhkn0). When set, the
+   * script's terminal is tmux-backed and journaled, so it survives daemon
+   * restarts with the same PIDs. Requires tmux on PATH.
+   */
+  persistenceDir?: string;
 }
 
 interface ServiceScriptSetupResult {
@@ -500,6 +588,10 @@ async function acquireWorkspaceScriptTerminal(params: {
   workspaceId: string;
   scriptName: string;
   env: Record<string, string> | undefined;
+  /** tmux persistence for the new terminal; null keeps the legacy PTY. */
+  resolvePersistentBinding: ((terminalId: string) => PersistentTerminalBinding | null) | null;
+  /** Pre-generated id for a new terminal, so the journal can name the session. */
+  newTerminalId: string;
 }): Promise<{ terminal: TerminalSession; reusableTerminal: TerminalSession | null }> {
   const {
     serviceScript,
@@ -509,20 +601,26 @@ async function acquireWorkspaceScriptTerminal(params: {
     workspaceId,
     scriptName,
     env,
+    resolvePersistentBinding,
+    newTerminalId,
   } = params;
   let reusableTerminal: TerminalSession | null = null;
   if (!serviceScript && existingRuntimeEntry?.terminalId) {
     reusableTerminal = terminalManager.getTerminal(existingRuntimeEntry.terminalId) ?? null;
   }
-  const terminal =
-    reusableTerminal ??
-    (await terminalManager.createTerminal({
-      cwd: repoRoot,
-      workspaceId,
-      name: scriptName,
-      title: scriptName,
-      env,
-    }));
+  if (reusableTerminal) {
+    return { terminal: reusableTerminal, reusableTerminal };
+  }
+  const persistent = resolvePersistentBinding?.(newTerminalId) ?? null;
+  const terminal = await terminalManager.createTerminal({
+    id: newTerminalId,
+    cwd: repoRoot,
+    workspaceId,
+    name: scriptName,
+    title: scriptName,
+    env,
+    ...(persistent ? { persistent } : {}),
+  });
   return { terminal, reusableTerminal };
 }
 
@@ -544,7 +642,28 @@ export async function spawnWorkspaceScript(
     globalServicePorts,
     logger,
     onLifecycleChanged,
+    persistenceDir,
   } = options;
+  // Persistent tmux terminals (pa-bhkn0): resolve once per spawn. Without
+  // tmux the lab cannot survive restarts, so fail loudly instead of silently
+  // starting a killable terminal.
+  let resolvePersistentBinding: ((terminalId: string) => PersistentTerminalBinding | null) | null =
+    null;
+  if (persistenceDir !== undefined) {
+    const tmuxBin = resolveTmuxBinary();
+    if (!tmuxBin) {
+      throw new Error(
+        "Workspace scripts need tmux on PATH so their terminals survive daemon restarts (pa-bhkn0)",
+      );
+    }
+    const socketPath = tmuxSocketPath(persistenceDir);
+    ensureTmuxSocketDir(socketPath);
+    resolvePersistentBinding = (terminalId: string): PersistentTerminalBinding => ({
+      tmuxBin,
+      socketPath,
+      sessionName: persistentSessionName(terminalId),
+    });
+  }
   const configResult = readPaseoConfig(repoRoot);
   if (!configResult.ok) {
     throw paseoConfigParseError(configResult);
@@ -562,6 +681,7 @@ export async function spawnWorkspaceScript(
   let runtimeRegistered = false;
   let routeRegistered = false;
   let disposeLifecycleListeners: (() => void) | null = null;
+  let spawnedTerminalId: string | null = null;
 
   try {
     if (runtimeStore.isRunning({ workspaceId, scriptName })) {
@@ -600,6 +720,8 @@ export async function spawnWorkspaceScript(
       workspaceId,
       scriptName,
       env,
+      resolvePersistentBinding,
+      newTerminalId: randomUUID(),
     });
 
     runtimeStore.set({
@@ -611,6 +733,27 @@ export async function spawnWorkspaceScript(
       exitCode: null,
     });
     runtimeRegistered = true;
+    spawnedTerminalId = terminal.id;
+
+    if (persistenceDir !== undefined && !reusableTerminal) {
+      recordPersistentTerminal(persistenceDir, {
+        id: terminal.id,
+        name: terminal.name,
+        cwd: terminal.cwd,
+        workspaceId,
+        ...(terminal.getTitle() ? { title: terminal.getTitle() } : {}),
+        sessionName: persistentSessionName(terminal.id),
+        scriptName,
+        scriptType,
+        ...(hostname ? { serviceHostname: hostname } : {}),
+        ...(port != null ? { servicePort: port } : {}),
+        projectSlug,
+        branchName,
+        command: config.command,
+        ...(env ? { env } : {}),
+        createdAt: new Date().toISOString(),
+      });
+    }
 
     const stopRuntimeIfCurrent = (input: { exitCode: number | null; removeRoute: boolean }) => {
       const current = runtimeStore.get({ workspaceId, scriptName });
@@ -665,7 +808,24 @@ export async function spawnWorkspaceScript(
     if (!reusableTerminal) {
       await waitForTerminalBootstrapReadiness(terminal);
     }
+    // The terminal id is the tmux session name source for fresh terminals, so
+    // the binding below addresses exactly this script's session (pa-vbhcu).
+    const scriptBinding = resolvePersistentBinding?.(terminal.id) ?? null;
+    if (scriptBinding && !tmuxSessionAlive(scriptBinding)) {
+      throw new Error(
+        `tmux session '${scriptBinding.sessionName}' for script '${scriptName}' was never created; the script did not start`,
+      );
+    }
     terminal.send({ type: "input", data: `${config.command}\r` });
+    // `running` must mean alive: the process lives (or the port listens),
+    // never just "the command was sent" (pa-vbhcu).
+    await waitForWorkspaceScriptAlive({
+      terminal,
+      binding: scriptBinding,
+      servicePort: serviceScript ? port : null,
+      scriptName,
+      timeoutMs: serviceScript ? WORKSPACE_SCRIPT_SERVICE_TIMEOUT_MS : WORKSPACE_SCRIPT_TIMEOUT_MS,
+    });
 
     logger?.info(
       {
@@ -694,6 +854,13 @@ export async function spawnWorkspaceScript(
     }
     if (runtimeRegistered) {
       runtimeStore.remove({ workspaceId, scriptName });
+    }
+    if (persistenceDir !== undefined && spawnedTerminalId) {
+      // A half-spawned tmux session must not linger, and the journal must
+      // not reattach a shell that never got its command.
+      removePersistentTerminal(persistenceDir, spawnedTerminalId);
+      const binding = resolvePersistentBinding?.(spawnedTerminalId);
+      if (binding) tmuxKillSession(binding);
     }
     logger?.error(
       {
