@@ -158,17 +158,25 @@ function parseEntryCapture(notification: string): unknown {
   return JSON.parse(notification.slice(prefix.length));
 }
 
-async function loadPaseoExtensionListeners(
+interface PaseoExtensionProbe {
+  listeners: Map<string, PaseoExtensionListener>;
+  providers: Array<{ name: string; config: unknown }>;
+}
+
+async function loadPaseoExtension(
   extensionPath: string,
   registerMcpServer: (name: string, config: unknown) => void = () => undefined,
-): Promise<Map<string, PaseoExtensionListener>> {
+  registerProvider: (name: string, config: unknown) => void = () => undefined,
+): Promise<PaseoExtensionProbe> {
   const listeners = new Map<string, PaseoExtensionListener>();
+  const providers: Array<{ name: string; config: unknown }> = [];
   const extension = (await import(pathToFileURL(extensionPath).href)) as {
     default: (piApi: {
       on: (event: string, listener: PaseoExtensionListener) => void;
       events: { on: () => void };
       registerCommand: () => void;
       registerMcpServer: (name: string, config: unknown) => void;
+      registerProvider: (name: string, config: unknown) => void;
     }) => void;
   };
   extension.default({
@@ -176,8 +184,25 @@ async function loadPaseoExtensionListeners(
     events: { on: () => undefined },
     registerCommand: () => undefined,
     registerMcpServer,
+    registerProvider: (name, config) => {
+      providers.push({ name, config });
+      registerProvider(name, config);
+    },
   });
-  return listeners;
+  return { listeners, providers };
+}
+
+async function loadPaseoExtensionListeners(
+  extensionPath: string,
+  registerMcpServer: (name: string, config: unknown) => void = () => undefined,
+): Promise<Map<string, PaseoExtensionListener>> {
+  return (await loadPaseoExtension(extensionPath, registerMcpServer)).listeners;
+}
+
+async function readRegisteredProviders(
+  extensionPath: string,
+): Promise<Array<{ name: string; config: unknown }>> {
+  return (await loadPaseoExtension(extensionPath)).providers;
 }
 
 async function readRegisteredMcpServers(extensionPath: string): Promise<Record<string, unknown>> {
@@ -227,6 +252,103 @@ test("forwards launch-context env to the Pi process launch", async () => {
   expect(pi.recordedLaunches[0]?.env).toEqual({
     CHUNK14_PROBE: "expected",
   });
+
+  await session.close();
+});
+
+function saveIdentityEnv(): Record<string, string | undefined> {
+  return {
+    BIFROST_AGENT_ID: process.env.BIFROST_AGENT_ID,
+    BIFROST_WORKSPACE_ID: process.env.BIFROST_WORKSPACE_ID,
+    BIFROST_PROJECT: process.env.BIFROST_PROJECT,
+    BIFROST_MCP_KEY: process.env.BIFROST_MCP_KEY,
+  };
+}
+
+function restoreIdentityEnv(saved: Record<string, string | undefined>): void {
+  for (const [name, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
+test("redirects the meta provider through Bifrost with session identity", async () => {
+  const pi = new FakePi();
+  const session = await createClient(pi).createSession(createConfig());
+  const extensionPath = pi.recordedLaunches[0]?.extensionPaths[0];
+  expect(extensionPath).toBeDefined();
+  const saved = saveIdentityEnv();
+  process.env.BIFROST_AGENT_ID = "probe-agent";
+  process.env.BIFROST_WORKSPACE_ID = "probe-workspace";
+  process.env.BIFROST_PROJECT = "probe-project";
+  process.env.BIFROST_MCP_KEY = "probe-key";
+  try {
+    await expect(readRegisteredProviders(extensionPath!)).resolves.toEqual([
+      {
+        name: "meta",
+        config: {
+          baseUrl: "https://bifrost.sebbe.cc/v1",
+          apiKey: "$BIFROST_MCP_KEY",
+          headers: {
+            "x-bf-vk": "$BIFROST_MCP_KEY",
+            "x-bf-lh-agent-id": "$BIFROST_AGENT_ID",
+            "x-bf-lh-workspace-id": "$BIFROST_WORKSPACE_ID",
+            "x-bf-lh-project": "$BIFROST_PROJECT",
+          },
+        },
+      },
+    ]);
+  } finally {
+    restoreIdentityEnv(saved);
+  }
+
+  await session.close();
+});
+
+test("omits the project identity header without BIFROST_PROJECT", async () => {
+  const pi = new FakePi();
+  const session = await createClient(pi).createSession(createConfig());
+  const extensionPath = pi.recordedLaunches[0]?.extensionPaths[0];
+  expect(extensionPath).toBeDefined();
+  const saved = saveIdentityEnv();
+  process.env.BIFROST_AGENT_ID = "probe-agent";
+  process.env.BIFROST_WORKSPACE_ID = "probe-workspace";
+  delete process.env.BIFROST_PROJECT;
+  process.env.BIFROST_MCP_KEY = "probe-key";
+  try {
+    await expect(readRegisteredProviders(extensionPath!)).resolves.toEqual([
+      {
+        name: "meta",
+        config: {
+          baseUrl: "https://bifrost.sebbe.cc/v1",
+          apiKey: "$BIFROST_MCP_KEY",
+          headers: {
+            "x-bf-vk": "$BIFROST_MCP_KEY",
+            "x-bf-lh-agent-id": "$BIFROST_AGENT_ID",
+            "x-bf-lh-workspace-id": "$BIFROST_WORKSPACE_ID",
+          },
+        },
+      },
+    ]);
+  } finally {
+    restoreIdentityEnv(saved);
+  }
+
+  await session.close();
+});
+
+test("leaves Pi model routing direct without session identity", async () => {
+  const pi = new FakePi();
+  const session = await createClient(pi).createSession(createConfig());
+  const extensionPath = pi.recordedLaunches[0]?.extensionPaths[0];
+  expect(extensionPath).toBeDefined();
+  const saved = saveIdentityEnv();
+  delete process.env.BIFROST_AGENT_ID;
+  try {
+    await expect(readRegisteredProviders(extensionPath!)).resolves.toEqual([]);
+  } finally {
+    restoreIdentityEnv(saved);
+  }
 
   await session.close();
 });

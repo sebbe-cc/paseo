@@ -679,6 +679,29 @@ function createPiPaseoExtensionFile({
 	  for (const [name, config] of Object.entries(${JSON.stringify(mcpServers)})) {
 	    pi.registerMcpServer(name, config);
 	  }
+	  // Per-session model identity (pa-89is1.14): redirect the meta provider
+	  // through Bifrost with $ENV-expanded identity headers. The session env
+	  // (BIFROST_*) is exported by the zz-bifrost plugin's session_open hook.
+	  // Direct (non-gc) sessions have no BIFROST_AGENT_ID, so their model
+	  // traffic stays direct. Auth mirrors ~/.pi/agent/models.json: apiKey and
+	  // x-bf-vk both resolve the shared Bifrost key.
+	  if (process.env.BIFROST_AGENT_ID) {
+	    const identityHeaders = {
+	      "x-bf-lh-agent-id": "$BIFROST_AGENT_ID",
+	      "x-bf-lh-workspace-id": "$BIFROST_WORKSPACE_ID",
+	    };
+	    if (process.env.BIFROST_PROJECT) {
+	      identityHeaders["x-bf-lh-project"] = "$BIFROST_PROJECT";
+	    }
+	    pi.registerProvider("meta", {
+	      baseUrl: "https://bifrost.sebbe.cc/v1",
+	      apiKey: "$BIFROST_MCP_KEY",
+	      headers: {
+	        "x-bf-vk": "$BIFROST_MCP_KEY",
+	        ...identityHeaders,
+	      },
+	    });
+	  }
 	  const submittedUserMessages = [];
 	  ${piExtensionRuntimeBridge}
 
