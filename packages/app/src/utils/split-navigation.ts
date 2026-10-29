@@ -14,6 +14,8 @@ export interface PaneBounds {
   centerY: number;
 }
 
+export type PaneDirection = "left" | "right" | "up" | "down";
+
 interface PaneCandidate {
   paneId: string;
   primaryDistance: number;
@@ -25,7 +27,7 @@ interface PaneCandidate {
 export function findAdjacentPane(
   root: SplitNode,
   focusedPaneId: string,
-  direction: "left" | "right" | "up" | "down",
+  direction: PaneDirection,
 ): string | null {
   const panes = collectPaneBounds(root, {
     left: ROOT_MIN,
@@ -33,14 +35,24 @@ export function findAdjacentPane(
     right: ROOT_MAX,
     bottom: ROOT_MAX,
   });
-  const focusedPane = panes.find((pane) => pane.paneId === focusedPaneId) ?? null;
+  return findAdjacentBounds(panes, focusedPaneId, direction);
+}
+
+/** Picks the nearest bounds in a direction; `tolerance` absorbs rounding where edges touch. */
+export function findAdjacentBounds(
+  panes: PaneBounds[],
+  fromId: string,
+  direction: PaneDirection,
+  tolerance = FLOAT_TOLERANCE,
+): string | null {
+  const focusedPane = panes.find((pane) => pane.paneId === fromId) ?? null;
   if (!focusedPane) {
     return null;
   }
 
   const candidates = panes
-    .filter((pane) => pane.paneId !== focusedPaneId)
-    .map((pane) => buildCandidate({ pane, focusedPane, direction }))
+    .filter((pane) => pane.paneId !== fromId)
+    .map((pane) => buildCandidate({ pane, focusedPane, direction, tolerance }))
     .filter((candidate): candidate is PaneCandidate => candidate !== null)
     .sort(compareCandidates);
 
@@ -66,12 +78,13 @@ function compareCandidates(left: PaneCandidate, right: PaneCandidate): number {
 function buildCandidate(input: {
   pane: PaneBounds;
   focusedPane: PaneBounds;
-  direction: "left" | "right" | "up" | "down";
+  direction: PaneDirection;
+  tolerance: number;
 }): PaneCandidate | null {
-  const { pane, focusedPane, direction } = input;
+  const { pane, focusedPane, direction, tolerance } = input;
   if (direction === "left") {
     const primaryDistance = focusedPane.left - pane.right;
-    if (primaryDistance < -FLOAT_TOLERANCE) {
+    if (primaryDistance < -tolerance) {
       return null;
     }
     const overlap = getOverlapLength({
@@ -95,7 +108,7 @@ function buildCandidate(input: {
   }
   if (direction === "right") {
     const primaryDistance = pane.left - focusedPane.right;
-    if (primaryDistance < -FLOAT_TOLERANCE) {
+    if (primaryDistance < -tolerance) {
       return null;
     }
     const overlap = getOverlapLength({
@@ -119,7 +132,7 @@ function buildCandidate(input: {
   }
   if (direction === "up") {
     const primaryDistance = focusedPane.top - pane.bottom;
-    if (primaryDistance < -FLOAT_TOLERANCE) {
+    if (primaryDistance < -tolerance) {
       return null;
     }
     const overlap = getOverlapLength({
@@ -143,7 +156,7 @@ function buildCandidate(input: {
   }
 
   const primaryDistance = pane.top - focusedPane.bottom;
-  if (primaryDistance < -FLOAT_TOLERANCE) {
+  if (primaryDistance < -tolerance) {
     return null;
   }
   const overlap = getOverlapLength({
