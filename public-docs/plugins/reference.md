@@ -610,6 +610,16 @@ bypasses that cache. Entries carry `id`, `account.label`, and `fetchedAt`. Faile
 on `server_info.features.usageSources`. The older `provider.usage.list` RPC maps the same reports
 for 0.10 clients and renders problems into its `error` string.
 
+A source can take over a built-in one with `replaces: ["codex"]`: the daemon runs the
+plugin's `discover`/`fetch` instead and shows the results on the native card (same id prefix,
+windows and summary). The account `key` must stay a stable opaque locator, never a credential
+or email, and the same scope rules apply. When two plugins claim the same source, the
+lexicographically first source id wins and the conflict is logged. When the override's
+discovery or fetch fails, the built-in source is used as a fallback and the override's
+errors stay on the card as `loginErrors`. `server.disableUsageSource("codex")` hides a
+built-in source without replacing it; a takeover of the same id re-enables it. Both are
+per-plugin: unloading the plugin restores the built-in cards.
+
 The source icon is a file path with the same rules as a provider icon.
 
 ## Entry point and cleanup

@@ -40,6 +40,12 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
   ): void;
   registerProvider(provider: ProviderRegistration): void;
   registerUsageSource(source: UsageSourceRegistration): void;
+  /**
+   * Hides a built-in usage source without replacing it; its cards disappear
+   * until the plugin unloads. A later `replaces` takeover of the same id
+   * re-enables it through the override. Unknown ids are kept and warn.
+   */
+  disableUsageSource(sourceId: string): void;
 }
 
 export type PluginServerContribution = (server: PluginServerContext) => PluginCleanup;
