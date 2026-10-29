@@ -36,6 +36,7 @@ export interface PluginUsageSourceMetadata {
   id: string;
   label: string;
   icon?: string;
+  replaces?: string[];
 }
 
 export type PluginProcessRequest =
@@ -99,6 +100,7 @@ export type PluginProcessMessage =
       voiceProviders?: Array<{ id: string; label: string }>;
       dictationProviders?: Array<{ id: string; label: string }>;
       usageSources?: PluginUsageSourceMetadata[];
+      disabledUsageSources?: string[];
       hooks?: { events: string[]; before: string[] };
     }
   | { type: "result"; requestId: string; output: unknown }
@@ -142,6 +144,7 @@ const usageSourceMetadataSchema = z
     id: z.string().min(1),
     label: z.string().min(1),
     icon: z.string().optional(),
+    replaces: z.array(z.string().min(1)).optional(),
   })
   .strict();
 const providerConnectRequestSchema = z
@@ -298,6 +301,7 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
           .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
           .optional(),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
+        disabledUsageSources: z.array(z.string().min(1)).optional(),
         hooks: hooksSchema.optional(),
       })
       .strict(),
