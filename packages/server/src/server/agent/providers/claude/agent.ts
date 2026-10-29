@@ -1198,7 +1198,26 @@ interface TimelineMessageState {
   reasoningText: string;
   emittedAssistantLength: number;
   emittedReasoningLength: number;
+  confirmedAssistantText: string;
+  confirmedReasoningText: string;
   stopped: boolean;
+}
+
+interface AbsoluteTextState {
+  text: string;
+  emitted: number;
+  confirmed: string;
+}
+
+// Claude Code sends one assistant message per content block, so a message may carry only the
+// latest block. Place it after the blocks already confirmed before comparing with the stream.
+function applyAbsoluteText(state: AbsoluteTextState, absolute: string): AbsoluteTextState {
+  const confirmed = absolute.startsWith(state.confirmed) ? absolute : state.confirmed + absolute;
+  if (state.text.startsWith(confirmed)) {
+    return { ...state, confirmed };
+  }
+  const emitted = confirmed.startsWith(state.text) ? state.emitted : 0;
+  return { text: confirmed, emitted, confirmed };
 }
 
 class TimelineAssembler {
@@ -1335,16 +1354,30 @@ class TimelineAssembler {
       .join("");
 
     if (assistantText.length > 0) {
-      if (!assistantText.startsWith(state.assistantText)) {
-        state.emittedAssistantLength = 0;
-      }
-      state.assistantText = assistantText;
+      const next = applyAbsoluteText(
+        {
+          text: state.assistantText,
+          emitted: state.emittedAssistantLength,
+          confirmed: state.confirmedAssistantText,
+        },
+        assistantText,
+      );
+      state.assistantText = next.text;
+      state.emittedAssistantLength = next.emitted;
+      state.confirmedAssistantText = next.confirmed;
     }
     if (reasoningText.length > 0) {
-      if (!reasoningText.startsWith(state.reasoningText)) {
-        state.emittedReasoningLength = 0;
-      }
-      state.reasoningText = reasoningText;
+      const next = applyAbsoluteText(
+        {
+          text: state.reasoningText,
+          emitted: state.emittedReasoningLength,
+          confirmed: state.confirmedReasoningText,
+        },
+        reasoningText,
+      );
+      state.reasoningText = next.text;
+      state.emittedReasoningLength = next.emitted;
+      state.confirmedReasoningText = next.confirmed;
     }
     return this.emitNewContent(state);
   }
@@ -1399,6 +1432,8 @@ class TimelineAssembler {
       reasoningText: "",
       emittedAssistantLength: 0,
       emittedReasoningLength: 0,
+      confirmedAssistantText: "",
+      confirmedReasoningText: "",
       stopped: false,
     };
     this.messages.set(messageId, created);
