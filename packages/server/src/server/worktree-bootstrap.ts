@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import { randomUUID } from "node:crypto";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
 import {
@@ -28,6 +29,15 @@ import {
   refreshWorkspaceServicePort,
 } from "./workspace-service-port-registry.js";
 import type { PaseoServicePortAllocation } from "@getpaseo/protocol/paseo-config-schema";
+import {
+  ensureTmuxSocketDir,
+  persistentSessionName,
+  resolveTmuxBinary,
+  tmuxKillSession,
+  tmuxSocketPath,
+  type PersistentTerminalBinding,
+} from "../terminal/tmux.js";
+import { recordPersistentTerminal, removePersistentTerminal } from "./persistent-terminals.js";
 
 const MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES = 64 * 1024;
 const WORKTREE_SETUP_TRUNCATION_MARKER = "\n...<output truncated in the middle>...\n";
@@ -381,6 +391,12 @@ export interface SpawnWorkspaceScriptOptions {
   globalServicePorts?: PaseoServicePortAllocation;
   logger?: Logger;
   onLifecycleChanged?: () => void;
+  /**
+   * PASEO_HOME for the persistent-terminal journal (pa-bhkn0). When set, the
+   * script's terminal is tmux-backed and journaled, so it survives daemon
+   * restarts with the same PIDs. Requires tmux on PATH.
+   */
+  persistenceDir?: string;
 }
 
 interface ServiceScriptSetupResult {
@@ -500,6 +516,10 @@ async function acquireWorkspaceScriptTerminal(params: {
   workspaceId: string;
   scriptName: string;
   env: Record<string, string> | undefined;
+  /** tmux persistence for the new terminal; null keeps the legacy PTY. */
+  resolvePersistentBinding: ((terminalId: string) => PersistentTerminalBinding | null) | null;
+  /** Pre-generated id for a new terminal, so the journal can name the session. */
+  newTerminalId: string;
 }): Promise<{ terminal: TerminalSession; reusableTerminal: TerminalSession | null }> {
   const {
     serviceScript,
@@ -509,20 +529,26 @@ async function acquireWorkspaceScriptTerminal(params: {
     workspaceId,
     scriptName,
     env,
+    resolvePersistentBinding,
+    newTerminalId,
   } = params;
   let reusableTerminal: TerminalSession | null = null;
   if (!serviceScript && existingRuntimeEntry?.terminalId) {
     reusableTerminal = terminalManager.getTerminal(existingRuntimeEntry.terminalId) ?? null;
   }
-  const terminal =
-    reusableTerminal ??
-    (await terminalManager.createTerminal({
-      cwd: repoRoot,
-      workspaceId,
-      name: scriptName,
-      title: scriptName,
-      env,
-    }));
+  if (reusableTerminal) {
+    return { terminal: reusableTerminal, reusableTerminal };
+  }
+  const persistent = resolvePersistentBinding?.(newTerminalId) ?? null;
+  const terminal = await terminalManager.createTerminal({
+    id: newTerminalId,
+    cwd: repoRoot,
+    workspaceId,
+    name: scriptName,
+    title: scriptName,
+    env,
+    ...(persistent ? { persistent } : {}),
+  });
   return { terminal, reusableTerminal };
 }
 
@@ -544,7 +570,28 @@ export async function spawnWorkspaceScript(
     globalServicePorts,
     logger,
     onLifecycleChanged,
+    persistenceDir,
   } = options;
+  // Persistent tmux terminals (pa-bhkn0): resolve once per spawn. Without
+  // tmux the lab cannot survive restarts, so fail loudly instead of silently
+  // starting a killable terminal.
+  let resolvePersistentBinding: ((terminalId: string) => PersistentTerminalBinding | null) | null =
+    null;
+  if (persistenceDir !== undefined) {
+    const tmuxBin = resolveTmuxBinary();
+    if (!tmuxBin) {
+      throw new Error(
+        "Workspace scripts need tmux on PATH so their terminals survive daemon restarts (pa-bhkn0)",
+      );
+    }
+    const socketPath = tmuxSocketPath(persistenceDir);
+    ensureTmuxSocketDir(socketPath);
+    resolvePersistentBinding = (terminalId: string): PersistentTerminalBinding => ({
+      tmuxBin,
+      socketPath,
+      sessionName: persistentSessionName(terminalId),
+    });
+  }
   const configResult = readPaseoConfig(repoRoot);
   if (!configResult.ok) {
     throw paseoConfigParseError(configResult);
@@ -562,6 +609,7 @@ export async function spawnWorkspaceScript(
   let runtimeRegistered = false;
   let routeRegistered = false;
   let disposeLifecycleListeners: (() => void) | null = null;
+  let spawnedTerminalId: string | null = null;
 
   try {
     if (runtimeStore.isRunning({ workspaceId, scriptName })) {
@@ -600,6 +648,8 @@ export async function spawnWorkspaceScript(
       workspaceId,
       scriptName,
       env,
+      resolvePersistentBinding,
+      newTerminalId: randomUUID(),
     });
 
     runtimeStore.set({
@@ -611,6 +661,27 @@ export async function spawnWorkspaceScript(
       exitCode: null,
     });
     runtimeRegistered = true;
+    spawnedTerminalId = terminal.id;
+
+    if (persistenceDir !== undefined && !reusableTerminal) {
+      recordPersistentTerminal(persistenceDir, {
+        id: terminal.id,
+        name: terminal.name,
+        cwd: terminal.cwd,
+        workspaceId,
+        ...(terminal.getTitle() ? { title: terminal.getTitle() } : {}),
+        sessionName: persistentSessionName(terminal.id),
+        scriptName,
+        scriptType,
+        ...(hostname ? { serviceHostname: hostname } : {}),
+        ...(port != null ? { servicePort: port } : {}),
+        projectSlug,
+        branchName,
+        command: config.command,
+        ...(env ? { env } : {}),
+        createdAt: new Date().toISOString(),
+      });
+    }
 
     const stopRuntimeIfCurrent = (input: { exitCode: number | null; removeRoute: boolean }) => {
       const current = runtimeStore.get({ workspaceId, scriptName });
@@ -694,6 +765,13 @@ export async function spawnWorkspaceScript(
     }
     if (runtimeRegistered) {
       runtimeStore.remove({ workspaceId, scriptName });
+    }
+    if (persistenceDir !== undefined && spawnedTerminalId) {
+      // A half-spawned tmux session must not linger, and the journal must
+      // not reattach a shell that never got its command.
+      removePersistentTerminal(persistenceDir, spawnedTerminalId);
+      const binding = resolvePersistentBinding?.(spawnedTerminalId);
+      if (binding) tmuxKillSession(binding);
     }
     logger?.error(
       {

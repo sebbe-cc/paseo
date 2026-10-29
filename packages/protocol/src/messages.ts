@@ -3028,6 +3028,11 @@ export const CreateTerminalRequestSchema = z.object({
   agentId: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
+  // Persistent tmux terminal (pa-bhkn0): the session survives daemon restarts
+  // with the same PIDs and is reattached on boot. Optional so old clients
+  // keep working; old daemons strip the unknown key and create a normal
+  // terminal instead.
+  persistent: z.boolean().optional(),
   // Initial PTY size. Added in v0.1.107; the app no longer sends it (the estimate cache that fed
   // it was removed — the pane-focus resize claim sizes the PTY instead). Kept and honored
   // permanently: released v0.1.107 clients still send it, and programmatic callers may pass an

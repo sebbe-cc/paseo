@@ -811,8 +811,9 @@ export function createWorkerTerminalManager(
       return Array.from(terminalIdsByCwd.keys());
     },
 
-    killAll(): void {
-      void sendRequest({ type: "killAll" })
+    killAll(options?: { sparePersistent?: boolean }): void {
+      const sparePersistent = options?.sparePersistent === true;
+      void sendRequest({ type: "killAll", ...(sparePersistent ? { sparePersistent: true } : {}) })
         .catch(() => {
           // no-op
         })
