@@ -8,6 +8,7 @@ import type {
 } from "./audio-engine-types";
 
 import { createPlaybackQueue } from "./playback";
+import { playPcmStream } from "./pcm-stream";
 
 function getAudioContextCtor(): typeof AudioContext | null {
   if (typeof window === "undefined") {
@@ -122,6 +123,24 @@ export function createAudioEngine(
 
   async function playAudio(audio: AudioPlaybackSource, signal: AbortSignal): Promise<number> {
     const context = await ensurePlaybackContext();
+    if (audio.stream) {
+      return playPcmStream(
+        audio.stream,
+        {
+          now: () => context.currentTime,
+          async schedule(chunk, at, chunkSignal) {
+            const bytes = new Uint8Array(await chunk.arrayBuffer());
+            const buffer = pcm16LeToAudioBuffer(
+              context,
+              bytes,
+              parsePcmSampleRate(chunk.type) ?? 24000,
+            );
+            await playBuffer(context, buffer, chunkSignal, at);
+          },
+        },
+        signal,
+      );
+    }
     const arrayBuffer = await audio.arrayBuffer();
     const type = (audio.type || "").toLowerCase();
     const audioBuffer = type.startsWith("audio/pcm")
@@ -132,6 +151,15 @@ export function createAudioEngine(
         )
       : await decodeAudioData(context, arrayBuffer);
 
+    return playBuffer(context, audioBuffer, signal);
+  }
+
+  async function playBuffer(
+    context: AudioContext,
+    audioBuffer: AudioBuffer,
+    signal: AbortSignal,
+    at = 0,
+  ): Promise<number> {
     if (signal.aborted) throw new Error("Playback stopped");
     const durationSec = audioBuffer.duration;
     const source = context.createBufferSource();
@@ -155,7 +183,7 @@ export function createAudioEngine(
         { once: true },
       );
       try {
-        source.start();
+        source.start(at);
       } catch (error) {
         signal.removeEventListener("abort", abort);
         source.disconnect();
