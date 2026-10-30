@@ -1126,6 +1126,7 @@ export class Session {
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
+      persistenceDir: this.paseoHome,
       emit: (msg) => this.emit(msg),
       hasBinaryChannel: () => this.onBinaryMessage !== null,
       isPathWithinRoot: (rootPath, candidatePath) => this.isPathWithinRoot(rootPath, candidatePath),
@@ -1235,6 +1236,7 @@ export class Session {
       assertAutomationAllowed: (workspaceId) =>
         assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
       getGlobalServicePorts: () => this.daemonConfigStore.readServicePorts(),
+      persistenceDir: this.paseoHome,
     });
     this.workspaceDirectory = new WorkspaceDirectory({
       logger: this.sessionLogger,
