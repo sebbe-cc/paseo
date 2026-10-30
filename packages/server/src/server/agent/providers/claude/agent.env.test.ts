@@ -223,4 +223,45 @@ describe("Claude SDK env", () => {
       expect(session.usageSession?.()).toBeNull();
     }
   });
+  test("PreCompact runs launch-context beforeCompact and blocks on skip", async () => {
+    let capturedHooks: ClaudeQueryInput["options"]["hooks"];
+    const beforeCompact = vi.fn(async () => ({ skip: true }));
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedHooks = options.hooks;
+      return createQueryMock([
+        { type: "system", subtype: "init", session_id: "compact-session", model: "opus" },
+        {
+          type: "result",
+          subtype: "success",
+          usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+          total_cost_usd: 0,
+        },
+      ]);
+    });
+    const client = new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    expect(client.capabilities.supportsPreCompactHook).toBe(true);
+    const session = await client.createSession(
+      { provider: "claude", cwd: process.cwd() },
+      { beforeCompact },
+    );
+    try {
+      await session.run("compact check");
+      const hook = capturedHooks?.PreCompact?.[0]?.hooks[0];
+      const signal = new AbortController().signal;
+      const output = await hook?.(
+        { hook_event_name: "PreCompact", trigger: "manual" } as never,
+        undefined,
+        { signal },
+      );
+      expect(beforeCompact).toHaveBeenCalledWith({ reason: "manual" });
+      expect(output).toMatchObject({ decision: "block" });
+      expect(capturedHooks?.PreToolUse).toHaveLength(1);
+    } finally {
+      await session.close();
+    }
+  });
 });
