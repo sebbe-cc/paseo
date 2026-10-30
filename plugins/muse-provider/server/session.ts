@@ -13,6 +13,7 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 import type { z } from "zod";
 import { MspConnection, commandId, type Notification } from "./connection.js";
+import { IdleHost } from "./idle-host.js";
 import { MuseError, actionableError } from "./errors.js";
 import { Timeline, todoItem } from "./timeline.js";
 import { modes, efforts, presentCatalog } from "./catalog.js";
@@ -31,6 +32,7 @@ import {
   notificationSchema,
   persistenceSchema,
   promptResultSchema,
+  sessionReadSchema,
   sessionSchema,
   turnSchema,
   tokenUsageSchema,
@@ -64,7 +66,7 @@ interface Live {
 }
 
 export class Session {
-  private readonly host: MspConnection;
+  private readonly host: IdleHost;
   private liveState: Live | undefined;
   private providerId: string | undefined;
   private config: ProviderSessionConfig;
@@ -85,11 +87,14 @@ export class Session {
 
   constructor(private readonly options: SessionOptions) {
     this.config = options.config;
-    this.host = new MspConnection({
-      launch: { ...options.launch, env: { ...options.launch.env, ...options.config.env } },
-      cwd: options.config.cwd,
-      serveArgs: options.serveArgs,
-    });
+    this.host = new IdleHost(
+      () =>
+        new MspConnection({
+          launch: { ...options.launch, env: { ...options.launch.env, ...options.config.env } },
+          cwd: options.config.cwd,
+          serveArgs: options.serveArgs,
+        }),
+    );
     this.host.onNotification((notification) => {
       if (this.opening) this.buffered.push(notification);
       else this.enqueue(notification);
@@ -101,9 +106,7 @@ export class Session {
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.host.initialize();
-    const mcpServers = Object.fromEntries(
-      Object.entries(this.config.mcpServers).map(([id, server]) => [id, mcpServer(server)]),
-    );
+    const mcpServers = this.mcpServers();
     let response;
     if (input.persistence) {
       if (input.persistence.version !== 1)
@@ -156,7 +159,7 @@ export class Session {
         this.host,
         nativeId,
         response.viewCursor,
-        (event) => this.notify(event),
+        (event) => this.notify(event, "backfill"),
         () => {
           this.notifications = this.notifications
             .then(async () => {
@@ -203,6 +206,39 @@ export class Session {
       requestId: input.requestId,
       sessionId: this.options.id,
     });
+    this.host.arm({ reopen: (host) => this.reattach(host), busy: (host) => this.busy(host) });
+  }
+
+  get awake(): boolean {
+    return this.host.awake;
+  }
+  private mcpServers(): Record<string, SessionMcpServerConfig> {
+    return Object.fromEntries(
+      Object.entries(this.config.mcpServers).map(([id, server]) => [id, mcpServer(server)]),
+    );
+  }
+  // The idle host ran no turn, so the timeline is current; only the view cursor is new.
+  private async reattach(host: MspConnection): Promise<void> {
+    await host.initialize();
+    const response = await host.command(
+      "session/resume",
+      { sessionId: this.live().nativeId, config: { mcpServers: this.mcpServers() } },
+      sessionSchema,
+    );
+    if (response.viewCursor) this.live().recovery.activity(response.viewCursor, false);
+  }
+  private async busy(host: MspConnection): Promise<boolean> {
+    if (this.closing || this.activeTurnIds().length > 0 || this.approvals.size > 0) return true;
+    try {
+      const read = await host.request(
+        "session/read",
+        { sessionId: this.live().nativeId },
+        sessionReadSchema,
+      );
+      return read.session.activeTurnId !== null;
+    } catch {
+      return true;
+    }
   }
 
   private live(): Live {
@@ -356,8 +392,15 @@ export class Session {
     return this.host.request("usage/read", {}, usageSchema);
   }
   async interrupt(): Promise<void> {
-    const turnId = this.activeTurnIds().at(-1);
-    if (!turnId) return;
+    let turnId = this.activeTurnIds().at(-1);
+    if (!turnId) {
+      // Local bookkeeping may have lost a still-running native turn (a
+      // backfilled terminal applied while the live stream was down). Confirm
+      // with the host before giving up: without this the cancel is a silent
+      // no-op and the run continues behind Paseo's back.
+      turnId = (await this.nativeActiveTurnId()) ?? undefined;
+      if (!turnId) return;
+    }
     let timer: ReturnType<typeof setTimeout>;
     const completion = new Promise<void>((resolve, reject) => {
       this.interruptCompletion = { turnId, resolve, reject };
@@ -368,7 +411,10 @@ export class Session {
             "Muse did not confirm cancellation within 10000ms. Reopen the session before sending another prompt.",
           ),
         );
-        void this.host.close();
+        // The interrupt timeout already failed the session; a slow host
+        // shutdown must never surface as an unhandled rejection (it crashed
+        // the daemon). Swallow it here; close() callers still see failures.
+        void this.host.close().catch(() => {});
       }, 10000);
     });
     try {
@@ -403,16 +449,22 @@ export class Session {
     const interrupt = this.interruptCompletion;
     if (interrupt) interrupt.reject(error instanceof Error ? error : new Error(String(error)));
   }
-  private async notify(notification: Notification): Promise<void> {
+  private async notify(
+    notification: Notification,
+    origin: "live" | "backfill" = "live",
+  ): Promise<void> {
     const envelope = notificationSchema.parse(notification.params);
     if (envelope.sessionId && envelope.sessionId !== this.live().nativeId) {
       await this.live().children.notify(envelope.sessionId, notification);
       return;
     }
-    await this.processNotification(notification);
+    await this.processNotification(notification, origin);
     this.live().recovery.activity(envelope.viewCursor, this.activeTurnIds().length > 0);
   }
-  private async processNotification(notification: Notification): Promise<void> {
+  private async processNotification(
+    notification: Notification,
+    origin: "live" | "backfill" = "live",
+  ): Promise<void> {
     switch (notification.method) {
       case "view/gap":
         // The gap lower bound remains authoritative even if a later live event arrived first.
@@ -462,7 +514,7 @@ export class Session {
         this.startTurn(notification.params);
         break;
       case "turn/completed":
-        this.completeTurn(notification.params);
+        await this.completeTurn(notification.params, origin);
         break;
       case "session/tokenUsage": {
         const params = tokenUsageSchema.parse(notification.params);
@@ -510,9 +562,42 @@ export class Session {
   private activeTurnIds(): string[] {
     return [...this.turns].filter(([, state]) => state === "active").map(([id]) => id);
   }
-  private completeTurn(input: unknown): void {
+  private async nativeActiveTurnId(): Promise<string | null> {
+    if (!this.liveState || this.closing) return null;
+    try {
+      const read = await this.host.request(
+        "session/read",
+        { sessionId: this.live().nativeId },
+        sessionReadSchema,
+      );
+      return read.session.activeTurnId;
+    } catch {
+      return null;
+    }
+  }
+  private async nativeTurnStillActive(turnId: string): Promise<boolean> {
+    return (await this.nativeActiveTurnId()) === turnId;
+  }
+  private async completeTurn(input: unknown, origin: "live" | "backfill"): Promise<void> {
     const params = turnSchema.parse(input);
-    if (this.turns.get(params.turnId) !== "active") return;
+    if (this.turns.get(params.turnId) !== "active") {
+      // A live terminal always owns the run it names: release a racing
+      // interrupt even when local bookkeeping already lost the turn.
+      if (origin === "live" && this.interruptCompletion?.turnId === params.turnId)
+        this.interruptCompletion.resolve();
+      return;
+    }
+    if (origin === "backfill" && (await this.nativeTurnStillActive(params.turnId))) {
+      // The silence/gap repair replayed a terminal for a run the host still
+      // considers active. Accepting it would fail the turn while Muse keeps
+      // working and lose the run for later interrupts (phantom
+      // "Muse turn failed"). Keep the turn active; the live terminal will
+      // complete it when the run really ends.
+      console.warn(
+        `[muse-provider] ignoring backfilled turn/completed for still-active native turn ${params.turnId}: ${JSON.stringify(params)}`,
+      );
+      return;
+    }
     this.turns.set(params.turnId, "completed");
     let state: "completed" | "canceled" | "failed" = "completed";
     let error;
