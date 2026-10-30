@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  classifyForBatch,
   classifyForResolution,
   fetchDaemonResolution,
   getAssistantFileLinkToken,
@@ -457,5 +458,44 @@ describe("getAssistantFileLinkToken", () => {
         sourceType: "inline-code",
       }),
     ).toBe("workspace-git-service.ts:1553");
+  });
+});
+
+describe("classifyForBatch", () => {
+  it("keeps relative inline-code tokens unresolved", () => {
+    expect(
+      classifyForBatch(
+        { href: "task-pa-9-summary.md", text: "task-pa-9-summary.md", sourceType: "inline-code" },
+        CONTEXT,
+      ),
+    ).toEqual({ kind: "file", candidate: "task-pa-9-summary.md" });
+  });
+
+  it("keeps relative authored links unresolved with line numbers", () => {
+    expect(classifyForBatch({ href: "docs/guide.md#L4-L6" }, CONTEXT)).toEqual({
+      kind: "file",
+      candidate: "docs/guide.md",
+      lineStart: 4,
+      lineEnd: 6,
+    });
+  });
+
+  it("passes absolute paths through", () => {
+    expect(classifyForBatch({ href: "/abs/a.md", text: "/abs/a.md" }, CONTEXT)).toEqual({
+      kind: "file",
+      candidate: "/abs/a.md",
+    });
+  });
+
+  it("marks external links", () => {
+    expect(classifyForBatch({ href: "https://example.com/x.md" }, CONTEXT)).toEqual({
+      kind: "external",
+      url: "https://example.com/x.md",
+    });
+  });
+
+  it("ignores non-file tokens", () => {
+    expect(classifyForBatch({ href: "", text: "" }, CONTEXT)).toEqual({ kind: "ignored" });
+    expect(classifyForBatch({ href: "just some words" }, CONTEXT)).toEqual({ kind: "ignored" });
   });
 });
