@@ -68,7 +68,11 @@ import {
   type SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
-import { useSidebarViewStore, type SidebarGroupMode } from "@/stores/sidebar-view-store";
+import {
+  hasActiveSidebarLabelFilter,
+  useSidebarViewStore,
+  type SidebarGroupMode,
+} from "@/stores/sidebar-view-store";
 import { useShowShortcutBadges } from "@/hooks/use-show-shortcut-badges";
 import {
   ContextMenu,
@@ -154,10 +158,22 @@ import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
+import {
+  ProjectContainerMenuTrigger,
+  useProjectContainerMenuPages,
+} from "@/project-containers/picker";
+import { projectContainerErrorMessage, useMergedProjectContainers } from "@/project-containers";
+import { assignRepository } from "@/project-containers/actions";
+import {
+  buildProjectListItems,
+  resolveProjectListDrop,
+  type ProjectListItem,
+} from "@/project-containers/layout";
+import { ProjectContainerHeaderRow } from "@/components/sidebar/project-container-header-row";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
-const projectViewKeyExtractor = (project: SidebarProjectEntry) => project.viewKey;
+const projectListItemKeyExtractor = (item: ProjectListItem<SidebarProjectEntry>) => item.key;
 
 const WORKSPACE_STATUS_DOT_WIDTH = 14;
 const ThemedExternalLink = withUnistyles(ExternalLink);
@@ -403,6 +419,7 @@ const prBadgeStyles = StyleSheet.create((theme) => ({
 }));
 
 function ProjectRowTrailingActions({
+  project,
   projectViewKey,
   displayName,
   worktreeTarget,
@@ -415,6 +432,7 @@ function ProjectRowTrailingActions({
   onRemoveProject,
   removeProjectStatus,
 }: {
+  project: SidebarProjectEntry;
   projectViewKey: string;
   displayName: string;
   worktreeTarget: SidebarProjectHostTarget | null;
@@ -445,6 +463,7 @@ function ProjectRowTrailingActions({
           pointerEvents={actionsVisible ? "auto" : "none"}
         >
           <ProjectKebabMenu
+            project={project}
             projectViewKey={projectViewKey}
             settingsTarget={settingsTarget}
             projectPath={projectPath}
@@ -473,12 +492,14 @@ function renderKebabTriggerIcon({ hovered }: { hovered?: boolean }) {
 }
 
 function ProjectKebabMenu({
+  project,
   projectViewKey,
   settingsTarget,
   projectPath,
   onRemoveProject,
   removeProjectStatus,
 }: {
+  project: SidebarProjectEntry;
   projectViewKey: string;
   settingsTarget: { serverId: string; projectId: string } | null;
   projectPath: string;
@@ -486,6 +507,7 @@ function ProjectKebabMenu({
   removeProjectStatus: "idle" | "pending" | "success";
 }) {
   const { t } = useTranslation();
+  const pages = useProjectContainerMenuPages(project);
   return (
     <DropdownMenu compactMode="sheet">
       <DropdownMenuTrigger
@@ -497,9 +519,15 @@ function ProjectKebabMenu({
       >
         {renderKebabTriggerIcon}
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" width={220} sheetTitle={t("sidebar.project.actions.menu")}>
+      <DropdownMenuContent
+        align="end"
+        width={220}
+        sheetTitle={t("sidebar.project.actions.menu")}
+        pages={pages}
+      >
         <ProjectMenuItems
           surface="dropdown"
+          project={project}
           projectViewKey={projectViewKey}
           settingsTarget={settingsTarget}
           projectPath={projectPath}
@@ -528,6 +556,7 @@ function ProjectMenuItem({
 
 function ProjectMenuItems({
   surface,
+  project,
   projectViewKey,
   settingsTarget,
   projectPath,
@@ -535,6 +564,7 @@ function ProjectMenuItems({
   removeProjectStatus,
 }: {
   surface: ProjectMenuSurface;
+  project: SidebarProjectEntry;
   projectViewKey: string;
   settingsTarget: { serverId: string; projectId: string } | null;
   projectPath: string;
@@ -581,6 +611,7 @@ function ProjectMenuItems({
           {t("sidebar.project.actions.openNewWindow")}
         </ProjectMenuItem>
       ) : null}
+      <ProjectContainerMenuTrigger repository={project} />
       <OpenInFileManagerMenuItem
         surface={surface}
         path={projectPath}
@@ -874,6 +905,7 @@ function ProjectHeaderRow({
   const [isHovered, setIsHovered] = useState(false);
   const [isPressed, setIsPressed] = useState(false);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const contextMenuPages = useProjectContainerMenuPages(onRemoveProject ? project : null);
   const isMobileBreakpoint = useIsCompactFormFactor();
   const localDaemonServerId = useLocalDaemonServerId();
   const projectPath = resolveSidebarProjectLocalPath(project, localDaemonServerId);
@@ -963,6 +995,7 @@ function ProjectHeaderRow({
         </View>
       </View>
       <ProjectRowTrailingActions
+        project={project}
         projectViewKey={project.viewKey}
         displayName={displayName}
         worktreeTarget={worktreeTarget}
@@ -1034,10 +1067,12 @@ function ProjectHeaderRow({
       <ContextMenuContent
         align="start"
         width={220}
+        pages={contextMenuPages}
         testID={`sidebar-project-context-menu-${project.viewKey}`}
       >
         <ProjectMenuItems
           surface="context"
+          project={project}
           projectViewKey={project.viewKey}
           settingsTarget={settingsTarget}
           projectPath={projectPath}
@@ -2164,6 +2199,17 @@ function ProjectModeList({
 }) {
   const { t } = useTranslation();
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
+  const hasActiveLabelFilter = useSidebarViewStore((state) =>
+    hasActiveSidebarLabelFilter(state.labelFilter),
+  );
+  const toast = useToast();
+  const projectContainerList = useMergedProjectContainers();
+  const collapsedProjectContainerKeys = useSidebarCollapsedSectionsStore(
+    (state) => state.collapsedProjectContainerKeys,
+  );
+  const toggleProjectContainerCollapsed = useSidebarCollapsedSectionsStore(
+    (state) => state.toggleProjectContainerCollapsed,
+  );
   const [creatingWorkspaceIds, setCreatingWorkspaceIds] = useState<Set<string>>(() => new Set());
   const creatingWorkspaceTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
@@ -2253,9 +2299,38 @@ function ProjectModeList({
     });
   }, [creatingWorkspaceIds, projects]);
 
+  const projectListItems = useMemo(
+    () =>
+      buildProjectListItems({
+        repositories: unpinnedProjects,
+        containers: projectContainerList,
+        collapsedContainerKeys: collapsedProjectContainerKeys,
+        filterActive: hasActiveHostFilter || hasActiveProjectFilter || hasActiveLabelFilter,
+      }),
+    [
+      collapsedProjectContainerKeys,
+      hasActiveHostFilter,
+      hasActiveLabelFilter,
+      hasActiveProjectFilter,
+      projectContainerList,
+      unpinnedProjects,
+    ],
+  );
+
+  // A drop under a project header assigns the repository to it on every host it lives on; the
+  // repository order itself stays in the client order store as before.
   const handleProjectDragEnd = useCallback(
-    (reorderedProjects: SidebarProjectEntry[]) => {
-      const reorderedProjectKeys = reorderedProjects.map((project) => project.viewKey);
+    (reorderedItems: ProjectListItem<SidebarProjectEntry>[]) => {
+      const drop = resolveProjectListDrop({ previous: projectListItems, next: reorderedItems });
+      if (!drop) return;
+      if (drop.toContainerKey !== drop.fromContainerKey) {
+        const container =
+          projectContainerList.find((candidate) => candidate.key === drop.toContainerKey) ?? null;
+        void assignRepository({ repository: drop.repository, container }).catch((cause: unknown) =>
+          toast.error(projectContainerErrorMessage(cause)),
+        );
+      }
+      const reorderedProjectKeys = drop.order;
       const currentProjectOrder = getProjectOrder();
       if (
         !hasVisibleOrderChanged({
@@ -2273,7 +2348,7 @@ function ProjectModeList({
         }),
       );
     },
-    [getProjectOrder, setProjectOrder],
+    [getProjectOrder, projectContainerList, projectListItems, setProjectOrder, toast],
   );
 
   const handleWorkspaceReorder = useCallback(
@@ -2390,9 +2465,40 @@ function ProjectModeList({
   );
 
   const renderProject = useCallback(
-    ({ item, drag, isActive, dragHandleProps }: DraggableRenderItemInfo<SidebarProjectEntry>) =>
-      renderProjectBlock(item, { drag, isDragging: isActive, dragHandleProps }),
-    [renderProjectBlock],
+    ({
+      item,
+      drag,
+      isActive,
+      dragHandleProps,
+    }: DraggableRenderItemInfo<ProjectListItem<SidebarProjectEntry>>) => {
+      if (item.kind === "container") {
+        return (
+          <ProjectContainerHeaderRow
+            container={item.container}
+            containers={projectContainerList}
+            members={item.members}
+            collapsed={item.collapsed}
+            onToggle={toggleProjectContainerCollapsed}
+          />
+        );
+      }
+      const block = renderProjectBlock(item.repository, {
+        drag,
+        isDragging: isActive,
+        dragHandleProps,
+      });
+      if (item.containerKey === null) return block;
+      return (
+        <View
+          role="group"
+          style={styles.projectContainerMember}
+          testID={`sidebar-project-container-rows-${item.containerKey}-${item.key}`}
+        >
+          {block}
+        </View>
+      );
+    },
+    [projectContainerList, renderProjectBlock, toggleProjectContainerCollapsed],
   );
 
   const renderPinnedChat = useCallback(
@@ -2447,8 +2553,8 @@ function ProjectModeList({
     ) : (
       <DraggableList
         testID="sidebar-project-list"
-        data={unpinnedProjects}
-        keyExtractor={projectViewKeyExtractor}
+        data={projectListItems}
+        keyExtractor={projectListItemKeyExtractor}
         renderItem={renderProject}
         onDragEnd={handleProjectDragEnd}
         extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
@@ -2557,6 +2663,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   projectListContainer: {
     width: "100%",
+  },
+  // One rail in: a member's leading visual lines up with its project header's title.
+  projectContainerMember: {
+    paddingLeft: theme.spacing[4],
   },
   pinnedSection: {
     marginBottom: theme.spacing[1],
