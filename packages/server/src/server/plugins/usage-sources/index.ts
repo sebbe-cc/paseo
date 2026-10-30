@@ -595,13 +595,18 @@ export class UsageSourceRegistry {
    * Discovers all sources, redoing the whole pass once when an event retired
    * part of it mid-flight. A discovery that spans a turnover (for example a
    * silent host swap while a sibling source stalls) must not install the
-   * retired login and hand it a fresh fetch token: when a watched source
-   * epoch or the structural generation moved during the awaits, the pass
-   * runs once more so the installation and the later token capture see the
-   * current context. The re-pass only re-reads; it evicts nothing, so
-   * unrelated sources keep their pending fetches (no global invalidation).
-   * A second event during the single re-pass is accepted; that event's own
-   * push already triggers a fresh re-read which converges.
+   * retired login and hand it a fresh fetch token: when a source epoch or
+   * the structural generation moved during the awaits, the pass runs once
+   * more so the installation and the later token capture see the current
+   * context. The re-pass only re-reads; it evicts nothing, so unrelated
+   * sources keep their pending fetches (no global invalidation).
+   *
+   * Every pass is revalidated, including the last one: when the single
+   * re-pass budget is exhausted and a source epoch still moved under it,
+   * that source's reports are excluded fail-closed instead of installing
+   * their stale logins with a fresh fetch token. Genuinely unrelated
+   * sources keep their reports, and the next read — including the push the
+   * retiring event already triggered — rediscovers the retired contexts.
    */
   private async discover(
     scope: UsageScope,
@@ -611,17 +616,29 @@ export class UsageSourceRegistry {
       const epochsBefore = new Map(this.sourceEpoch);
       const generationBefore = this.generation;
       const merged = await this.discoverOnce(scope, previous);
-      if (attempt > 0) return merged;
-      let retired = this.generation !== generationBefore;
-      if (!retired) {
-        for (const [id, epoch] of this.sourceEpoch) {
-          if ((epochsBefore.get(id) ?? 0) !== epoch) {
-            retired = true;
-            break;
-          }
+      const retired = new Set<string>();
+      for (const [id, epoch] of this.sourceEpoch) {
+        if ((epochsBefore.get(id) ?? 0) !== epoch) retired.add(id);
+      }
+      const structural = this.generation !== generationBefore;
+      if (retired.size === 0 && !structural) return merged;
+      if (attempt === 0) continue;
+      // The retry budget is spent and this final pass still raced a
+      // retirement: never re-authorize the retired contexts with a new
+      // fetch token. Drop only the reports owned by, taken over from, or
+      // served through an allowed fallback of a retired source; everything
+      // unrelated survives, and structural mutations keep their existing
+      // merge-time guards (source identity, reportStillLive).
+      for (const [id, report] of merged) {
+        if (
+          retired.has(report.source.id) ||
+          (report.overriddenId !== undefined && retired.has(report.overriddenId)) ||
+          (report.fallback !== undefined && retired.has(report.fallback.source.id))
+        ) {
+          merged.delete(id);
         }
       }
-      if (!retired) return merged;
+      return merged;
     }
   }
 
