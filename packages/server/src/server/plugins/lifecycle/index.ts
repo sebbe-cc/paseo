@@ -37,6 +37,8 @@ export const lifecycleEventNames = [
   "agent.closed",
   "agent.turn_started",
   "agent.turn_ended",
+  "agent.tool_call_started",
+  "agent.tool_call_ended",
   "agent.permission_requested",
   "agent.permission_resolved",
   "agent.archived",
