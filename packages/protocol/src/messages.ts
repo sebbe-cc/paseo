@@ -6386,6 +6386,11 @@ const AvailableUsageReportSchema = z.object({
   windows: z.array(ProviderUsageWindowSchema),
   balances: z.array(ProviderUsageBalanceSchema).optional(),
   details: z.array(ProviderUsageDetailSchema).optional(),
+  // Verified account identity whose credentials were read for this response
+  // (`vendor:rest`). The usage registry only serves a taken-over card from a
+  // native login whose attested identity equals the expected one; anything
+  // else fails closed. Optional: older sources omit it.
+  accountIdentity: z.string().optional(),
 });
 export const UsageReportSchema = z.discriminatedUnion("status", [
   AvailableUsageReportSchema,

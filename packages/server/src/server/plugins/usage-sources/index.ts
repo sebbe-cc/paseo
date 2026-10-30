@@ -40,6 +40,8 @@ export interface UsageSource {
 interface Login {
   input: unknown;
   harness: string;
+  /** Verified account identity attested at discovery, if any. Never a locator hash. */
+  identity?: string;
 }
 
 interface KnownReport {
@@ -48,8 +50,12 @@ interface KnownReport {
   overriddenId?: string;
   logins: [Login, ...Login[]];
   label?: string;
-  /** Built-in logins tried when the override yields nothing usable. */
-  fallback?: { source: UsageSource; logins: [Login, ...Login[]] };
+  /**
+   * Built-in logins tried when the override yields nothing usable. `identity`
+   * is the verified account identity both sides proved at discovery; a
+   * fallback fetch only serves when it attests this exact string.
+   */
+  fallback?: { source: UsageSource; logins: [Login, ...Login[]]; identity: string };
 }
 
 export interface AgentUsageLookup {
@@ -83,6 +89,13 @@ export class UsageSourceRegistry {
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
   private readonly pending = new Map<string, Promise<UsageReportEntry>>();
+  /**
+   * Bumped on every override/liveness mutation (register, unregister,
+   * disable, enable). In-flight fetches capture it and refuse to start
+   * native fallback or publish cache entries once it moved: a retired
+   * request must never start a native host or publish a ghost card.
+   */
+  private generation = 0;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -139,6 +152,7 @@ export class UsageSourceRegistry {
       }
     }
     const next = new Map<string, string>();
+    this.generation++;
     for (const [target, ids] of claimants) {
       if (!this.sources.has(target)) continue;
       const sorted = [...ids].sort((a, b) => a.localeCompare(b));
@@ -292,12 +306,7 @@ export class UsageSourceRegistry {
           continue;
         }
         mergeLogins(known, report.logins);
-        if (report.fallback) {
-          const fallback = known.fallback;
-          if (fallback && fallback.source === report.fallback.source) {
-            mergeLogins(fallback, report.fallback.logins);
-          } else known.fallback = report.fallback;
-        }
+        if (report.fallback) mergeFallback(known, report.fallback);
       }
     }
     // Fetch freshness expires independently of successful snapshots. Retain only live identities.
@@ -335,6 +344,13 @@ export class UsageSourceRegistry {
         z.object({
           key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
           label: z.string().optional(),
+          // Vendor-scoped verified account identity (`vendor:rest`). Only an
+          // explicitly verified identity may appear here; a locator hash or
+          // unknown identity omits the field and fails closed at match time.
+          identity: z
+            .string()
+            .regex(/^[a-z0-9-]{1,32}:\S{1,200}$/)
+            .optional(),
           harness: z.string().min(1).optional(),
           input: z.json(),
         }),
@@ -345,18 +361,38 @@ export class UsageSourceRegistry {
   private addAccount(
     reports: Map<string, KnownReport>,
     id: string,
-    account: { key: string; label?: string; harness?: string; input: unknown },
+    account: {
+      key: string;
+      label?: string;
+      identity?: string;
+      harness?: string;
+      input: unknown;
+    },
     source: UsageSource,
     overriddenId?: string,
     fallback?: KnownReport["fallback"],
   ): void {
     const reportId = `${id}:${account.key}`;
     // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
-    const login = { input: account.input, harness: account.harness ?? source.label };
+    const login: Login = {
+      input: account.input,
+      harness: account.harness ?? source.label,
+      ...(account.identity !== undefined ? { identity: account.identity } : {}),
+    };
     const known = reports.get(reportId);
     if (known) {
       mergeLogins(known, [login]);
-      if (fallback && !known.fallback) known.fallback = fallback;
+      if (fallback) {
+        // Logins from different scopes must prove the same identity; a
+        // conflicting match fails closed instead of mixing quotas.
+        const current = known.fallback;
+        if (!current) known.fallback = fallback;
+        else if (current.source === fallback.source && current.identity === fallback.identity) {
+          mergeLogins(current, fallback.logins);
+        } else if (current.identity !== fallback.identity) {
+          known.fallback = undefined;
+        }
+      }
     } else {
       reports.set(reportId, { source, overriddenId, logins: [login], label: account.label, fallback });
     }
@@ -449,7 +485,10 @@ export class UsageSourceRegistry {
           }
           return reports;
         }
-        const targetByKey = new Map<string, { input: unknown; harness?: string }[]>();
+        const targetByKey = new Map<
+          string,
+          { input: unknown; harness?: string; identity?: string }[]
+        >();
         if (targetAccounts.ok) {
           for (const account of targetAccounts.accounts) {
             const list = targetByKey.get(account.key) ?? [];
@@ -458,19 +497,28 @@ export class UsageSourceRegistry {
           }
         }
         for (const account of winnerAccounts.accounts) {
-          // Fallback needs a provable same-account match: only built-in
-          // logins discovered under this account's own key may serve its
-          // card. An unknown or mismatched identity keeps the override's
-          // own error (or its last successful snapshot with its age).
-          const matched = targetByKey.get(account.key) ?? [];
+          // Fallback needs a proven same-account match: both sides must
+          // carry an explicitly verified identity in a shared vendor
+          // namespace, and the strings must be exactly equal. A locator
+          // hash, key equality alone, or an unknown identity on either side
+          // is not proof and fails closed: the override keeps its own error
+          // (or its last successful snapshot with its age). The card key
+          // only groups cards; it never authorizes quota movement.
+          const candidates = targetByKey.get(account.key) ?? [];
+          const matched =
+            account.identity !== undefined
+              ? candidates.filter((native) => native.identity === account.identity)
+              : [];
           const fallback =
             matched.length > 0
               ? {
                   source: target,
+                  identity: account.identity!,
                   logins: matched.map((match) => ({
                     // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
                     input: match.input,
                     harness: match.harness ?? target.label,
+                    identity: match.identity,
                   })) as [Login, ...Login[]],
                 }
               : undefined;
@@ -519,9 +567,16 @@ export class UsageSourceRegistry {
       return Promise.resolve(cached.entry);
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
+    const generation = this.generation;
+    // False once an override/liveness mutation retired this request. A
+    // retired request never starts native fallback and never publishes:
+    // after unregister/disable or a new opt-out winner, the old primary's
+    // quota must not start a native host or reappear as a ghost card.
+    const isLive = () =>
+      this.generation === generation && this.sources.get(known.source.id) === known.source;
     const request = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
-      const outcome = await this.fetchWithFallback(known);
+      const outcome = await this.fetchWithFallback(known, isLive);
       const completedAt = new Date(this.now()).toISOString();
       // Taken-over cards keep the native identity: same id prefix, label and
       // icon as the built-in source they replace.
@@ -541,6 +596,7 @@ export class UsageSourceRegistry {
         entry.lastSuccessful = this.successful.get(cacheKey);
       }
       if (
+        isLive() &&
         this.sources.get(known.source.id) === known.source &&
         this.activeCacheKeys().has(cacheKey)
       ) {
@@ -599,22 +655,72 @@ export class UsageSourceRegistry {
 
   private async fetchWithFallback(
     known: KnownReport,
+    isLive: () => boolean,
   ): Promise<Pick<UsageReportEntry, "report" | "loginErrors">> {
     const primary = await this.fetchLogins(known.source, known.logins);
     if (primary.available) return { report: primary.available };
-    if (!known.fallback) {
+    const failed = (): Pick<UsageReportEntry, "report" | "loginErrors"> => ({
       // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
       // Keep the final single report so older apps still parse and display failed accounts.
-      return {
-        report: primary.loginErrors[primary.loginErrors.length - 1]!.report,
-        loginErrors: primary.loginErrors,
-      };
-    }
-    const fallback = await this.fetchLogins(known.fallback.source, known.fallback.logins);
+      report: primary.loginErrors[primary.loginErrors.length - 1]!.report,
+      loginErrors: primary.loginErrors,
+    });
+    if (!known.fallback) return failed();
+    // A retired request never touches native sources: after unregister,
+    // disable, or a new opt-out winner, the old primary's failure must not
+    // start a native host (e.g. a transient muse serve) just to fail.
+    if (!isLive()) return failed();
+    const fallback = await this.fetchFallbackLogins(
+      known.fallback.source,
+      known.fallback.logins,
+      known.fallback.identity,
+    );
     const loginErrors = [...primary.loginErrors, ...fallback.loginErrors];
     if (fallback.available) return { report: fallback.available, loginErrors };
+    // The card keeps the override's own error; native failures (including a
+    // discarded identity mismatch) stay visible in `loginErrors` only, so a
+    // rotation can never replace A's error with another account's values.
     // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
-    return { report: loginErrors[loginErrors.length - 1]!.report, loginErrors };
+    return { report: primary.loginErrors[primary.loginErrors.length - 1]!.report, loginErrors };
+  }
+
+  /**
+   * Native fallback bound to the verified identity both sides proved at
+   * discovery AND to the credentials actually read for the quota request.
+   * A new discovery alone does not close the rotation race (the login file
+   * may change between discovery and fetch, and targeted refreshes skip
+   * discovery entirely), so each available native result must attest the
+   * expected identity. Anything else — a mismatch, or an available result
+   * with no attestation — is discarded with a provenance error and the
+   * override keeps its own error (or its last successful snapshot).
+   */
+  private async fetchFallbackLogins(
+    source: UsageSource,
+    logins: readonly Login[],
+    expectedIdentity: string,
+  ): Promise<{ available: UsageReport | null; loginErrors: NonNullable<UsageReportEntry["loginErrors"]> }> {
+    const attempts = logins.map((login) => this.fetchBeforeDeadline(source, login.input));
+    const loginErrors: NonNullable<UsageReportEntry["loginErrors"]> = [];
+    for (const [index, login] of logins.entries()) {
+      const report = await attempts[index]!;
+      if (report.status !== "available") {
+        loginErrors.push({ harness: login.harness, report });
+        continue;
+      }
+      if (report.accountIdentity === expectedIdentity) {
+        return { available: report, loginErrors };
+      }
+      loginErrors.push({
+        harness: login.harness,
+        report: {
+          status: "error",
+          error:
+            `Native login identity ${report.accountIdentity ?? "unknown"} does not match ` +
+            `the override account's verified identity; its quota is not served under this card.`,
+        },
+      });
+    }
+    return { available: null, loginErrors };
   }
 
   private async fetchLogin(source: UsageSource, input: unknown): Promise<UsageReport> {
@@ -648,6 +754,25 @@ function legacyError(report: UsageReport, now: number): string | null {
   if (report.status === "error") return report.error;
   if (report.status === "unavailable") return legacyProblem(report.problem, now);
   return null;
+}
+
+/**
+ * Merges a fallback discovered in another scope into a known card. Logins
+ * from different scopes must prove the same verified identity; a
+ * conflicting match fails closed instead of mixing quotas.
+ */
+function mergeFallback(into: KnownReport, from: NonNullable<KnownReport["fallback"]>): void {
+  const current = into.fallback;
+  if (!current) {
+    into.fallback = from;
+    return;
+  }
+  if (current.source !== from.source) {
+    into.fallback = from;
+    return;
+  }
+  if (current.identity !== from.identity) into.fallback = undefined;
+  else mergeLogins(current, from.logins);
 }
 
 // Inputs are opaque JSON locators. Canonical equality deduplicates discovery across scopes.

@@ -603,9 +603,11 @@ metadata or JWT claims. Pi and OMP logins remain discoverable when expired. OMP 
 `node:sqlite`.
 
 `usage.list_reports` discovers accounts when called without IDs. With IDs, it refreshes known
-accounts without rediscovering identity. If a store switches accounts, the existing card shows the
-new login's quota until the next discovery. Reports are cached for five minutes; `forceRefresh`
-bypasses that cache. Entries carry `id`, `account.label`, and `fetchedAt`. Failed accounts also carry optional
+accounts without rediscovering identity. If a store switches accounts, the existing card keeps the
+previous account's own error (or its last successful snapshot with its age) instead of showing the
+new login's quota: fallback reads must attest the verified identity they were discovered with.
+Reports are cached for five minutes; `forceRefresh` bypasses that cache. Entries carry `id`,
+`account.label`, and `fetchedAt`. Failed accounts also carry optional
 `loginErrors` entries with `harness` and each login's failed `report`. Clients gate the feature
 on `server_info.features.usageSources`. The older `provider.usage.list` RPC maps the same reports
 for 0.10 clients and renders problems into its `error` string.
@@ -620,10 +622,18 @@ errors stay on the card as `loginErrors`. `server.disableUsageSource("codex")` h
 built-in source without replacing it; a takeover of the same id re-enables it. Both are
 per-plugin: unloading the plugin restores the built-in cards.
 
-Fallback needs a provable same-account match: only built-in logins discovered under the
-override account's own `key` may serve its card, so one account's failure can never show
-another account's quota. A source whose keys can never match the native identities — or
-whose native fetch would start a host just to fail, such as a CPA-backed Muse source —
+Fallback needs a proven same-account match: both the override account and the built-in
+login must carry the same explicitly verified `identity` (`vendor:rest`, e.g.
+`claude:{accountUuid}.{organizationUuid}` or `codex:{accountId}`), proven at discovery time,
+and each native quota read must attest that identity back. Key equality alone — or a locator
+hash, or an unknown identity on either side — is never proof and fails closed, so one
+account's failure can never show another account's quota. The card `key` stays a stable
+opaque locator for grouping cards; only `identity` authorizes quota movement. A rotated
+login file that changes the credentials between discovery and fetch (or a targeted refresh
+that skips discovery) is discarded with a provenance error instead of serving the new
+account's values. A source whose accounts can never carry a verified native identity — or
+whose native fetch would start a host just to fail, such as a CPA-backed Muse source
+(Muse logins have no verified identity at all) —
 sets `skipNativeFallback: true`: the daemon then never calls the taken-over sources'
 `discover`/`fetch`, and a failing override reports its own error (or its last successful
 snapshot with its age) instead of built-in values. The same policy covers discovery

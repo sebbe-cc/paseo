@@ -832,7 +832,9 @@ test("failed discovery preserves history until discovery confirms account remova
 function nativeSource(input: {
   id: string;
   label: string;
-  discover?: () => Promise<Array<{ key: string; label?: string; input: unknown }>>;
+  discover?: () => Promise<
+    Array<{ key: string; label?: string; identity?: string; input: unknown }>
+  >;
   fetch?: (value: unknown) => Promise<unknown>;
   replaces?: string[];
   skipNativeFallback?: boolean;
@@ -889,9 +891,12 @@ test("a failing takeover falls back to the built-in source with its errors kept"
     nativeSource({
       id: "codex",
       label: "Codex",
-      discover: async () => [{ key: "shared", input: { origin: "builtin" } }],
+      discover: async () => [
+        { key: "shared", identity: "test:shared", input: { origin: "builtin" } },
+      ],
       fetch: async () => ({
         status: "available",
+        accountIdentity: "test:shared",
         windows: [{ id: "builtin", label: "Builtin", usedPct: 11 }],
       }),
     }),
@@ -901,7 +906,9 @@ test("a failing takeover falls back to the built-in source with its errors kept"
       id: "cliproxy",
       label: "CLIProxy",
       replaces: ["codex"],
-      discover: async () => [{ key: "shared", input: { origin: "override" } }],
+      discover: async () => [
+        { key: "shared", identity: "test:shared", input: { origin: "override" } },
+      ],
       fetch: async () => {
         throw new Error("proxy down");
       },
@@ -1020,7 +1027,7 @@ test("a takeover whose discovery fails keeps the built-in card", async () => {
 
 function countedNative(
   id: string,
-  accounts: Array<{ key: string; usedPct: number }>,
+  accounts: Array<{ key: string; usedPct: number; identity?: string }>,
   calls: { discover: number; fetch: unknown[] },
 ) {
   return nativeSource({
@@ -1028,13 +1035,18 @@ function countedNative(
     label: id,
     discover: async () => {
       calls.discover++;
-      return accounts.map(({ key }) => ({ key, input: { account: key } }));
+      return accounts.map(({ key, identity }) => ({
+        key,
+        ...(identity !== undefined ? { identity } : {}),
+        input: { account: key },
+      }));
     },
     fetch: async (input) => {
       calls.fetch.push(input);
       const account = accounts.find(({ key }) => key === (input as { account: string }).account);
       return {
         status: "available",
+        ...(account?.identity !== undefined ? { accountIdentity: account.identity } : {}),
         windows: [{ id: "native", label: "Native", usedPct: account?.usedPct ?? -1 }],
       };
     },
@@ -1044,7 +1056,7 @@ function countedNative(
 test("a mismatched override failure never shows another account's quota", async () => {
   const calls = { discover: 0, fetch: [] as unknown[] };
   const registry = new UsageSourceRegistry();
-  registry.register(countedNative("local", [{ key: "c", usedPct: 7 }], calls));
+  registry.register(countedNative("local", [{ key: "c", usedPct: 7, identity: "test:c" }], calls));
   registry.register(
     nativeSource({
       id: "cpa",
@@ -1083,14 +1095,16 @@ test("a mismatched override failure never shows another account's quota", async 
 test("a matched fallback serves the same account and keeps the override error", async () => {
   const calls = { discover: 0, fetch: [] as unknown[] };
   const registry = new UsageSourceRegistry();
-  registry.register(countedNative("local", [{ key: "shared", usedPct: 11 }], calls));
+  registry.register(
+    countedNative("local", [{ key: "shared", usedPct: 11, identity: "test:shared" }], calls),
+  );
   registry.register(
     nativeSource({
       id: "cpa",
       label: "CPA",
       replaces: ["local"],
       discover: async () => [
-        { key: "shared", input: { account: "shared" } },
+        { key: "shared", identity: "test:shared", input: { account: "shared" } },
         { key: "other", input: { account: "other" } },
       ],
       fetch: async (input) => {
@@ -1345,4 +1359,205 @@ test("unregistering the winner restores native cards without leftovers", async (
   expect(reenabled[0]?.report.windows).toEqual([
     { id: "session", label: "Override", usedPct: 42 },
   ]);
+});
+
+test("equal keys without a verified identity on either side never fall back", async () => {
+  for (const [winnerIdentity, nativeIdentity] of [
+    [undefined, "test:a"],
+    ["test:a", undefined],
+    [undefined, undefined],
+  ] as Array<[string | undefined, string | undefined]>) {
+    const calls = { discover: 0, fetch: [] as unknown[] };
+    const registry = new UsageSourceRegistry();
+    registry.register(
+      countedNative(
+        "local",
+        [{ key: "a", usedPct: 7, ...(nativeIdentity ? { identity: nativeIdentity } : {}) }],
+        calls,
+      ),
+    );
+    registry.register(
+      nativeSource({
+        id: "cpa",
+        label: "CPA",
+        replaces: ["local"],
+        discover: async () => [
+          {
+            key: "a",
+            ...(winnerIdentity ? { identity: winnerIdentity } : {}),
+            input: { account: "a" },
+          },
+        ],
+        fetch: async () => {
+          throw new Error("A store down");
+        },
+      }),
+    );
+    const [entry] = await registry.listReports();
+    expect(entry?.id).toBe("local:a");
+    expect(entry?.report).toEqual({ status: "error", error: "A store down" });
+    expect(JSON.stringify(entry)).not.toContain("Native");
+    // No verified match, so the native login is never even tried.
+    expect(calls.fetch).toEqual([]);
+  }
+});
+
+test("equal keys with different verified identities never fall back", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    countedNative("local", [{ key: "shared", usedPct: 7, identity: "test:b" }], calls),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [
+        { key: "shared", identity: "test:a", input: { account: "a" } },
+      ],
+      fetch: async () => {
+        throw new Error("A store down");
+      },
+    }),
+  );
+  const [entry] = await registry.listReports();
+  expect(entry?.id).toBe("local:shared");
+  expect(entry?.report).toEqual({ status: "error", error: "A store down" });
+  // A locator hash would look identical here; only the verified identity decides.
+  expect(JSON.stringify(entry)).not.toContain("Native");
+  expect(calls.fetch).toEqual([]);
+});
+
+test("a rotated native login cannot rescue the override, even on targeted refresh", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const backing = { identity: "test:a", usedPct: 11 };
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "Local",
+      discover: async () => {
+        calls.discover++;
+        return [{ key: "shared", identity: backing.identity, input: { slot: "n" } }];
+      },
+      fetch: async (input) => {
+        calls.fetch.push(input);
+        // Reads the login store afresh, like the real sources do: a rotation
+        // between discovery and fetch changes what is attested.
+        return {
+          status: "available",
+          accountIdentity: backing.identity,
+          windows: [{ id: "native", label: "Native", usedPct: backing.usedPct }],
+        };
+      },
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [
+        { key: "shared", identity: "test:a", input: { account: "a" } },
+      ],
+      fetch: async () => {
+        throw new Error("proxy down");
+      },
+    }),
+  );
+  const [matched] = await registry.listReports();
+  if (matched?.report.status !== "available") throw new Error("Expected matched fallback usage");
+  expect(matched.report.windows).toEqual([{ id: "native", label: "Native", usedPct: 11 }]);
+  // The login file now belongs to C under the same locator. A targeted
+  // refresh skips discovery, so only the fetch-time attestation can stop it.
+  backing.identity = "test:c";
+  backing.usedPct = 99;
+  const [rotated] = await registry.listReports({
+    reportIds: ["local:shared"],
+    forceRefresh: true,
+  });
+  expect(rotated?.report).toEqual({ status: "error", error: "proxy down" });
+  // C's quota value never appears; its identity only shows up inside the
+  // provenance error explaining why the read was discarded.
+  expect(JSON.stringify(rotated)).not.toContain("99");
+  expect(
+    rotated?.loginErrors?.some(
+      (login) =>
+        login.harness === "Local" &&
+        login.report.status === "error" &&
+        login.report.error.includes("does not match"),
+    ),
+  ).toBe(true);
+  // A fresh discovery sees the same locator with C's identity and no longer
+  // matches the override either: still A's own error, never C's values.
+  const [rediscovered] = await registry.listReports();
+  expect(rediscovered?.report).toEqual({ status: "error", error: "proxy down" });
+  expect(JSON.stringify(rediscovered)).not.toContain("99");
+  expect(calls.fetch).toHaveLength(2);
+});
+
+test("a pending primary cannot start native fallback or publish after reload and opt-out", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  let primaryStarted = false;
+  let releasePrimary!: (error: Error) => void;
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    countedNative("local", [{ key: "shared", usedPct: 11, identity: "test:a" }], calls),
+  );
+  const failingWinner = () =>
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [
+        { key: "shared", identity: "test:a", input: { account: "a" } },
+      ],
+      fetch: async () => {
+        primaryStarted = true;
+        return new Promise<never>((_, reject) => {
+          releasePrimary = reject;
+        });
+      },
+    });
+  registry.register(failingWinner());
+  const pending = registry.listReports();
+  // Fixture discovery and the primary fetch invocation are microtask-only,
+  // so flushing macrotasks guarantees the primary is in flight below.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(primaryStarted).toBe(true);
+  // Reload while the primary is in flight: unregister, then re-register the
+  // same id with a native opt-out, then disable and re-enable it.
+  registry.unregister("cpa");
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      skipNativeFallback: true,
+      discover: async () => [{ key: "b", identity: "test:b", input: { account: "b" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "override", label: "Override", usedPct: 42 }],
+      }),
+    }),
+  );
+  registry.disable("cpa");
+  registry.enable("cpa");
+  releasePrimary(new Error("old primary down"));
+  const [stale] = await pending;
+  // The retired request resolves with the old primary's own error: no native
+  // fetch ran (which could have started a native host), and there is no
+  // provenance from another account.
+  expect(stale?.id).toBe("local:shared");
+  expect(stale?.report).toEqual({ status: "error", error: "old primary down" });
+  expect(calls.fetch).toEqual([]);
+  // Nothing was published: the next discovery shows only the new winner's
+  // card, and the retired card is gone entirely.
+  const after = await registry.listReports();
+  expect(after.map((entry) => entry.id)).toEqual(["local:b"]);
+  if (after[0]?.report.status !== "available") throw new Error("Expected new winner usage");
+  expect(after[0].report.windows).toEqual([{ id: "override", label: "Override", usedPct: 42 }]);
+  expect(await registry.listReports({ reportIds: ["local:shared"] })).toEqual([]);
 });
