@@ -79,6 +79,7 @@ import { useToast } from "@/contexts/toast-context";
 import { openDesktopTarget, useDesktopOpenTargets } from "@/workspace/desktop-open-targets";
 import { useWorkspaceFields } from "@/stores/session-store-hooks";
 import { useOpenDirectoryInEditor } from "@/workspace/open-in-editor/directory";
+import { NAV_ROW_DATASET, NAV_ROW_LIST_DATASET } from "@/keyboard/nav-row-markers";
 
 const SORT_OPTIONS: { value: SortOption }[] = [
   { value: "name" },
@@ -351,6 +352,8 @@ function TreeRowItem({
         onHoverOut={hideNameHover}
         accessibilityState={accessibilityState}
         aria-selected={isSelected}
+        aria-expanded={isDirectory ? isExpanded : undefined}
+        dataSet={NAV_ROW_DATASET}
         testID={testID}
       >
         <View ref={dragSourceRef} style={styles.entryInfo}>
@@ -1333,6 +1336,7 @@ function FileExplorerPaneContent(props: FileExplorerPaneContentProps) {
               data={listRows}
               renderItem={renderTreeRow}
               keyExtractor={listRowKeyExtractor}
+              dataSet={NAV_ROW_LIST_DATASET}
               testID="file-explorer-tree-scroll"
               contentContainerStyle={styles.entriesContent}
               onLayout={scrollbar.onLayout}
