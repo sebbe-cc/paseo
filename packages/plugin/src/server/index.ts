@@ -27,3 +27,14 @@ export { spawnProcess, execCommand, terminateProcess } from "./process.js";
 
 export { defineAgentTool } from "./agent-tools.js";
 export type { AgentToolDefinition, AgentToolResult, AgentToolContext } from "./agent-tools.js";
+
+export { VoiceProviderEventSchema, VoiceProviderCommandSchema } from "./voice.js";
+export type {
+  VoiceProviderEvent,
+  VoiceProviderRegistration,
+  VoiceProviderSession,
+  VoiceProviderStartContext,
+  VoiceProviderSelection,
+  PluginVoiceHost,
+  VoiceProviderCommand,
+} from "./voice.js";
