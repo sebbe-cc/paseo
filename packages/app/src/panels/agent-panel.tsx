@@ -1,3 +1,4 @@
+import { useMakeVoiceTarget } from "@/contexts/global-voice-context";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -1545,8 +1546,14 @@ function ActiveAgentComposer({
     [isCompactFormFactor, openInSidePane, serverId, workspaceId],
   );
 
+  const makeVoiceTarget = useMakeVoiceTarget(serverId);
   const handleClientSlashCommand = useCallback(
     async (command: ClientSlashCommand) => {
+      if (command.kind === "make-voice-target") {
+        if (!makeVoiceTarget) throw new Error("Global voice is unavailable");
+        await makeVoiceTarget(agentId);
+        return;
+      }
       const agent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
       if (!agent) {
         throw new Error("Agent not found");
@@ -1572,6 +1579,7 @@ function ActiveAgentComposer({
     },
     [
       agentId,
+      makeVoiceTarget,
       archiveAgent,
       closeWorkspaceTab,
       hideWorkspaceAgent,
