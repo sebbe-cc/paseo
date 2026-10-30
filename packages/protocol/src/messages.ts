@@ -1706,6 +1706,8 @@ export const DictationStreamStartMessageSchema = z.object({
   type: z.literal("dictation_stream_start"),
   dictationId: z.string(),
   format: z.string(), // e.g. "audio/pcm;rate=16000;bits=16"
+  // Lets a plugin dictation provider use the chat's vocabulary.
+  agentId: z.string().optional(),
 });
 
 export const DictationStreamChunkMessageSchema = z.object({
@@ -3610,6 +3612,7 @@ export const ServerCapabilityStateSchema = z.object({
 
 export const ServerVoiceCapabilitiesSchema = z.object({
   provider: z.object({ pluginId: z.string(), providerId: z.string() }).optional(),
+  dictationProvider: z.object({ pluginId: z.string(), providerId: z.string() }).optional(),
   dictation: ServerCapabilityStateSchema,
   voice: ServerCapabilityStateSchema,
 });
@@ -3684,6 +3687,7 @@ export const ServerInfoStatusPayloadSchema = z
         hostMultiplexing: z.boolean().optional(),
         usageSources: z.boolean().optional(),
         pluginVoiceProviders: z.boolean().optional(),
+        pluginDictationProviders: z.boolean().optional(),
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
         providersSnapshotCwd: z.boolean().optional(),
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
