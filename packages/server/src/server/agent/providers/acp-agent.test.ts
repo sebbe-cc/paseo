@@ -4726,3 +4726,106 @@ describe("custom ACP provider with configured models", () => {
     expect((await created.getRuntimeInfo()).model).toBe("advertised-default");
   });
 });
+
+function completedTurnEvents(events: AgentStreamEvent[]): AgentStreamEvent[] {
+  return events.filter((event) => event.type === "turn_completed");
+}
+
+describe("queued foreground turns", () => {
+  function createQueuedSession() {
+    const session = createSession();
+    const resolvers: Array<(value: PromptResponse) => void> = [];
+    const prompt = vi.fn(
+      () =>
+        new Promise<PromptResponse>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const internals = asInternals<ACPSessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.connection = { prompt };
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    return { session, internals, prompt, resolvers, events };
+  }
+
+  function completeNext(
+    resolvers: Array<(value: PromptResponse) => void>,
+    stopReason: PromptResponse["stopReason"] = "end_turn",
+  ): void {
+    const resolve = resolvers.shift();
+    if (!resolve) {
+      throw new Error("no pending ACP prompt to complete");
+    }
+    resolve({ stopReason });
+  }
+
+  test("queues messages sent while a turn is active and delivers them in order", async () => {
+    const { session, internals, prompt, resolvers, events } = createQueuedSession();
+
+    try {
+      const first = await session.startTurn("first");
+      const queued = await session.startTurn("second");
+      const queuedAgain = await session.startTurn("third");
+      expect(queued.turnId).not.toBe(first.turnId);
+      expect(queuedAgain.turnId).not.toBe(first.turnId);
+      expect(queuedAgain.turnId).not.toBe(queued.turnId);
+      expect(prompt).toHaveBeenCalledOnce();
+
+      completeNext(resolvers);
+      await vi.waitFor(() => {
+        expect(prompt).toHaveBeenCalledTimes(2);
+      });
+      completeNext(resolvers);
+      await vi.waitFor(() => {
+        expect(prompt).toHaveBeenCalledTimes(3);
+      });
+      completeNext(resolvers);
+      await vi.waitFor(() => {
+        expect(completedTurnEvents(events)).toHaveLength(3);
+      });
+
+      const completedIds = events
+        .filter((event) => event.type === "turn_completed")
+        .map((event) => ("turnId" in event ? event.turnId : undefined));
+      expect(completedIds).toEqual([first.turnId, queued.turnId, queuedAgain.turnId]);
+      expect(internals.activeForegroundTurnId).toBeNull();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("resume sweep clears a turn stranded by a dead connection, then three messages deliver", async () => {
+    const { session, internals, prompt, resolvers, events } = createQueuedSession();
+
+    try {
+      const doomed = await session.startTurn("doomed");
+      expect(prompt).toHaveBeenCalledOnce();
+
+      // The transport died without a terminal event.
+      (internals as { connection: null }).connection = null;
+      const cleared = session.clearStuckTurn?.("resume");
+      expect(cleared).toBe(doomed.turnId);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "turn_failed", turnId: doomed.turnId }),
+      );
+
+      const livePrompt = vi.fn(async () => ({ stopReason: "end_turn" }) as PromptResponse);
+      internals.connection = { prompt: livePrompt };
+      for (const text of ["one", "two", "three"]) {
+        const started = await session.startTurn(text);
+        await vi.waitFor(() => {
+          expect(completedTurnEvents(events)).toContainEqual(
+            expect.objectContaining({ turnId: started.turnId }),
+          );
+        });
+      }
+      // The doomed prompt stays pending by design: the sweep failed its
+      // turn, and nothing may deliver on a dead connection.
+      expect(resolvers).toHaveLength(1);
+      expect(livePrompt).toHaveBeenCalledTimes(3);
+    } finally {
+      await session.close();
+    }
+  });
+});

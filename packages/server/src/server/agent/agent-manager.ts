@@ -1522,11 +1522,13 @@ export class AgentManager {
       currentResumeOptions,
     );
     await this.requireExternalMcpSupport(session, providerLaunchConfig, launchContext);
-    return this.registerSession(session, storedConfig, resolvedAgentId, {
+    const resumed = await this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
       persistence: handle,
       restoring: true,
     });
+    this.sweepResumedStuckTurn(resumed, "resume");
+    return resumed;
   }
 
   importProviderSession(input: {
@@ -1634,17 +1636,56 @@ export class AgentManager {
     );
   }
 
+  /**
+   * Settle the live run before a reload, or clear a stuck turn both sides
+   * when the provider refused the interrupt. Anything else aborts the reload.
+   */
+  private async cancelRunForReload(agentId: string): Promise<ActiveManagedAgent> {
+    const existing = this.requireSessionAgent(agentId);
+    if (!this.hasInFlightRun(agentId)) {
+      return existing;
+    }
+    try {
+      await this.cancelAgentRunBefore(agentId, "reload");
+    } catch (error) {
+      if (!(error instanceof AgentRunCancellationError)) {
+        throw error;
+      }
+      const clearedTurnId = existing.session.clearStuckTurn?.("reload") ?? null;
+      if (clearedTurnId === null) {
+        throw error;
+      }
+      this.logger.warn(
+        { agentId, clearedTurnId },
+        "agent.manager.reload proceeds after clearing a stuck turn the provider could not interrupt",
+      );
+    }
+    return this.requireSessionAgent(agentId);
+  }
+
+  /**
+   * Fail and clear a turn stranded by a daemon restart. Fresh sessions report
+   * nothing stuck; the provider's own terminal event finalizes the daemon
+   * side when something is cleared.
+   */
+  private sweepResumedStuckTurn(agent: ManagedAgent, reason: string): void {
+    const clearedTurnId = agent.session?.clearStuckTurn?.(reason) ?? null;
+    if (clearedTurnId === null) {
+      return;
+    }
+    this.logger.warn(
+      { agentId: agent.id, clearedTurnId },
+      "agent.manager.resume cleared a hanging turn",
+    );
+  }
+
   private async reloadAgentSessionInternal(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    let existing = this.requireSessionAgent(agentId);
-    if (this.hasInFlightRun(agentId)) {
-      await this.cancelAgentRunBefore(agentId, "reload");
-      existing = this.requireSessionAgent(agentId);
-    }
+    let existing = await this.cancelRunForReload(agentId);
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
     const preservedHistoryPrimed = existing.historyPrimed;
     const preservedLastUsage = existing.lastUsage;
