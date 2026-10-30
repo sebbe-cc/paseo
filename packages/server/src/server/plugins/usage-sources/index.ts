@@ -15,6 +15,24 @@ export interface UsageSource {
   id: string;
   label: string;
   icon?: string;
+  /**
+   * Source ids this source takes over. While the takeover is active the
+   * named sources' own discovery is replaced by this source's, and the
+   * results publish under the taken-over id so cards keep their native
+   * place. First claimant (by source id) wins; conflicts are logged.
+   */
+  replaces?: readonly string[];
+  /**
+   * Opt out of the built-in discovery/fetch fallback for taken-over
+   * sources. With no provable same-account match the registry never shows
+   * another account's quota under this source's cards, but a source whose
+   * accounts cannot match native identities at all — or whose native fetch
+   * would start a host just to fail, such as a CPA-backed Muse source —
+   * sets this to skip the taken-over sources' discovery and fetch calls
+   * entirely. A failing override then reports its own error (or its last
+   * successful snapshot with its age) instead of built-in values.
+   */
+  skipNativeFallback?: boolean;
   discover(scope: UsageScope): Promise<unknown>;
   fetch(input: unknown): Promise<unknown>;
 }
@@ -22,12 +40,22 @@ export interface UsageSource {
 interface Login {
   input: unknown;
   harness: string;
+  /** Verified account identity attested at discovery, if any. Never a locator hash. */
+  identity?: string;
 }
 
 interface KnownReport {
   source: UsageSource;
+  /** Taken-over source id when this report publishes under a native card. */
+  overriddenId?: string;
   logins: [Login, ...Login[]];
   label?: string;
+  /**
+   * Built-in logins tried when the override yields nothing usable. `identity`
+   * is the verified account identity both sides proved at discovery; a
+   * fallback fetch only serves when it attests this exact string.
+   */
+  fallback?: { source: UsageSource; logins: [Login, ...Login[]]; identity: string };
 }
 
 export interface AgentUsageLookup {
@@ -57,19 +85,24 @@ export interface UsageSourceInvalidated {
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
+  private readonly disabled = new Set<string>();
+  private activeOverrides = new Map<string, string>();
+  private warnedConflicts = new Set<string>();
   private readonly known = new Map<string, KnownReport>();
   private defaults = new Map<string, KnownReport>();
   private readonly byAgent = new Map<string, AgentReports>();
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
-  private readonly pending = new Map<string, Promise<UsageReportEntry>>();
-
+  // Pending values are nullable: a fetch retired while in flight resolves
+  // null and is dropped by listReports before any callback or return.
+  private readonly pending = new Map<string, Promise<UsageReportEntry | null>>();
   /**
-   * Bumped on every freshness invalidation. In-flight fetches capture it and
-   * refuse to publish once it moved: a retired request must never overwrite
-   * the event's newer data with the older quota it started with. Same
-   * generation idiom as the override pending guard (pa-91k7j); the two must
-   * stay one counter at integration.
+   * Bumped on every override/liveness mutation (register, unregister,
+   * disable, enable) and every freshness invalidation. In-flight fetches
+   * capture it and refuse to publish once it moved: a retired request must
+   * never start a native host, overwrite an event's newer data, or publish
+   * a ghost card. One shared counter for the override guard (pa-91k7j) and
+   * the event guard (pa-l1bv4).
    */
   private generation = 0;
 
@@ -126,22 +159,118 @@ export class UsageSourceRegistry {
 
   register(source: UsageSource): void {
     if (this.sources.has(source.id)) throw new Error(`Duplicate usage source: ${source.id}`);
+    const affected = [...(source.replaces ?? [])];
     this.sources.set(source.id, source);
+    this.recomputeOverrides();
+    // A new takeover must replace already-cached native cards at once.
+    for (const store of [this.cache, this.successful, this.pending]) {
+      for (const key of store.keys()) {
+        if (affected.some((prefix) => key.startsWith(`${prefix}:`))) store.delete(key);
+      }
+    }
+  }
+
+  /** Hides a source without replacing it; an override of the same id re-enables it. */
+  disable(id: string): void {
+    const affected = this.mentionedTargets(id);
+    if (!this.sources.has(id)) this.logger.warn({ sourceId: id }, "Disabling unknown usage source");
+    this.disabled.add(id);
+    this.recomputeOverrides();
+    this.evictSourceKeys(id, affected);
+  }
+
+  enable(id: string): void {
+    if (!this.disabled.delete(id)) return;
+    const affected = this.mentionedTargets(id);
+    this.recomputeOverrides();
+    this.evictSourceKeys(id, affected);
+  }
+
+  /** Active takeovers: taken-over source id -> winning override source id. */
+  overrides(): ReadonlyMap<string, string> {
+    return this.activeOverrides;
+  }
+
+  private recomputeOverrides(): void {
+    const claimants = new Map<string, string[]>();
+    for (const source of this.sources.values()) {
+      if (this.disabled.has(source.id)) continue;
+      for (const target of source.replaces ?? []) {
+        if (target === source.id) continue;
+        const list = claimants.get(target) ?? [];
+        list.push(source.id);
+        claimants.set(target, list);
+      }
+    }
+    const next = new Map<string, string>();
+    this.generation++;
+    for (const [target, ids] of claimants) {
+      if (!this.sources.has(target)) continue;
+      const sorted = [...ids].sort((a, b) => a.localeCompare(b));
+      const winner = sorted[0]!;
+      next.set(target, winner);
+      if (sorted.length > 1) {
+        const key = `${target}:${sorted.join(",")}`;
+        if (!this.warnedConflicts.has(key)) {
+          this.warnedConflicts.add(key);
+          this.logger.warn(
+            { target, winner, ignored: sorted.filter((id) => id !== winner) },
+            "Usage source takeover conflict; first source wins",
+          );
+        }
+      }
+    }
+    this.activeOverrides = next;
+  }
+
+  /** Every taken-over id that mentions `id`, before or after a mutation. */
+  private mentionedTargets(id: string): string[] {
+    const targets = new Set<string>();
+    for (const [target, winner] of this.activeOverrides) {
+      if (winner === id || target === id) targets.add(target);
+    }
+    for (const source of this.sources.values()) {
+      for (const target of source.replaces ?? []) {
+        if (source.id === id || target === id) targets.add(target);
+      }
+    }
+    return [...targets];
+  }
+
+  private evictSourceKeys(id: string, extraPrefixes: string[] = []): void {
+    const prefixes = [id, ...extraPrefixes];
+    const matches = (key: string, report?: KnownReport) =>
+      prefixes.some((prefix) => key.startsWith(`${prefix}:`)) ||
+      report?.source.id === id ||
+      report?.overriddenId === id ||
+      report?.fallback?.source.id === id;
+    for (const [key, report] of this.known) if (matches(key, report)) this.known.delete(key);
+    for (const key of this.defaults.keys()) {
+      const report = this.defaults.get(key);
+      if (matches(key, report)) this.defaults.delete(key);
+    }
+    for (const [agentId, mapping] of this.byAgent) {
+      if (
+        [...mapping.reports.values()].some(
+          (report) => report.source.id === id || report.overriddenId === id,
+        )
+      )
+        this.byAgent.delete(agentId);
+    }
+    // Fetch freshness expires independently of successful snapshots. Retain only live identities.
+    for (const store of [this.cache, this.successful, this.pending]) {
+      for (const key of store.keys()) {
+        if (prefixes.some((prefix) => key.startsWith(`${prefix}:`))) store.delete(key);
+      }
+    }
   }
 
   unregister(id: string): void {
+    const affected = this.mentionedTargets(id);
     this.sources.delete(id);
-    for (const key of this.defaults.keys()) if (key.startsWith(`${id}:`)) this.defaults.delete(key);
-    // Re-discover on the next session query when a source is replaced.
-    for (const [agentId, mapping] of this.byAgent) {
-      if ([...mapping.reports.values()].some((report) => report.source.id === id))
-        this.byAgent.delete(agentId);
-    }
-    for (const key of this.known.keys()) if (key.startsWith(`${id}:`)) this.known.delete(key);
-    for (const key of this.cache.keys()) if (key.startsWith(`${id}:`)) this.cache.delete(key);
-    for (const key of this.successful.keys())
-      if (key.startsWith(`${id}:`)) this.successful.delete(key);
-    for (const key of this.pending.keys()) if (key.startsWith(`${id}:`)) this.pending.delete(key);
+    this.disabled.delete(id);
+    this.recomputeOverrides();
+    this.evictSourceKeys(id, affected);
   }
 
   async listReports(options: ListUsageReportsOptions = {}): Promise<UsageReportEntry[]> {
@@ -160,18 +289,23 @@ export class UsageSourceRegistry {
       this.mergeKnown();
       ids = [...this.known.keys()];
     }
+    // A fetch retired while in flight resolves null and is dropped here:
+    // retired entries reach neither the per-report callback nor the returned
+    // list, so a reload, disable, opt-out, or event can never publish a
+    // ghost card or an older quota.
     return Promise.all(
       [...new Set(ids)].flatMap((id) => {
         const known = reports.get(id);
         if (!known) return [];
         return [
           this.fetchId(id, known, options.forceRefresh).then((entry) => {
+            if (entry === null) return null;
             options.onReport?.(entry);
             return entry;
           }),
         ];
       }),
-    );
+    ).then((entries) => entries.filter((entry): entry is UsageReportEntry => entry !== null));
   }
 
   private pruneAgents(): void {
@@ -221,15 +355,14 @@ export class UsageSourceRegistry {
     ]) {
       for (const [id, report] of reports) {
         if (this.sources.get(report.source.id) !== report.source) continue;
+        if (!this.reportStillLive(id, report)) continue;
         const known = this.known.get(id);
         if (!known) {
           this.known.set(id, { ...report, logins: [...report.logins] });
           continue;
         }
-        for (const login of report.logins) {
-          if (!known.logins.some((existing) => loginKey(existing) === loginKey(login)))
-            known.logins.push(login);
-        }
+        mergeLogins(known, report.logins);
+        if (report.fallback) mergeFallback(known, report.fallback);
       }
     }
     // Fetch freshness expires independently of successful snapshots. Retain only live identities.
@@ -248,47 +381,214 @@ export class UsageSourceRegistry {
     );
   }
 
+  /** False when an override or disable has retired this card since discovery. */
+  private reportStillLive(id: string, report: KnownReport): boolean {
+    const prefix = id.split(":")[0]!;
+    const winner = this.activeOverrides.get(prefix);
+    if (winner !== undefined) {
+      if (report.overriddenId === prefix) return report.source.id === winner;
+      // A failed takeover falls back to plain built-in cards for the same prefix.
+      return report.source.id === prefix && this.sources.get(prefix) === report.source;
+    }
+    if (this.disabled.has(prefix)) return false;
+    return report.overriddenId === undefined;
+  }
+
+  private parseAccounts(raw: unknown) {
+    return z
+      .array(
+        z.object({
+          key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
+          label: z.string().optional(),
+          // Vendor-scoped verified account identity (`vendor:rest`). Only an
+          // explicitly verified identity may appear here; a locator hash or
+          // unknown identity omits the field and fails closed at match time.
+          identity: z
+            .string()
+            .regex(/^[a-z0-9-]{1,32}:\S{1,200}$/)
+            .optional(),
+          harness: z.string().min(1).optional(),
+          input: z.json(),
+        }),
+      )
+      .parse(raw);
+  }
+
+  private addAccount(
+    reports: Map<string, KnownReport>,
+    id: string,
+    account: {
+      key: string;
+      label?: string;
+      identity?: string;
+      harness?: string;
+      input: unknown;
+    },
+    source: UsageSource,
+    overriddenId?: string,
+    fallback?: KnownReport["fallback"],
+  ): void {
+    const reportId = `${id}:${account.key}`;
+    // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
+    const login: Login = {
+      input: account.input,
+      harness: account.harness ?? source.label,
+      ...(account.identity !== undefined ? { identity: account.identity } : {}),
+    };
+    const known = reports.get(reportId);
+    if (known) {
+      mergeLogins(known, [login]);
+      if (fallback) {
+        // Logins from different scopes must prove the same identity; a
+        // conflicting match fails closed instead of mixing quotas.
+        const current = known.fallback;
+        if (!current) known.fallback = fallback;
+        else if (current.source === fallback.source && current.identity === fallback.identity) {
+          mergeLogins(current, fallback.logins);
+        } else if (current.identity !== fallback.identity) {
+          known.fallback = undefined;
+        }
+      }
+    } else {
+      reports.set(reportId, {
+        source,
+        overriddenId,
+        logins: [login],
+        label: account.label,
+        fallback,
+      });
+    }
+  }
+
+  private previousFor(
+    reports: Map<string, KnownReport>,
+    previous: ReadonlyMap<string, KnownReport>,
+    predicate: (report: KnownReport) => boolean,
+  ): void {
+    for (const [id, report] of previous) {
+      if (predicate(report) && this.reportStillLive(id, report)) reports.set(id, report);
+    }
+  }
+
   private async discover(
     scope: UsageScope,
     previous: ReadonlyMap<string, KnownReport> = new Map(),
   ): Promise<Map<string, KnownReport>> {
+    const winners = new Set(this.activeOverrides.values());
+    const overridden = new Set(this.activeOverrides.keys());
+    const ordinary = [...this.sources.values()].filter(
+      (source) =>
+        !winners.has(source.id) && !overridden.has(source.id) && !this.disabled.has(source.id),
+    );
     const discovered = await Promise.all(
-      [...this.sources.values()].map(async (source) => {
+      ordinary.map(async (source) => {
         const reports = new Map<string, KnownReport>();
         try {
-          const accounts = z
-            .array(
-              z.object({
-                key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
-                label: z.string().optional(),
-                harness: z.string().min(1).optional(),
-                input: z.json(),
-              }),
-            )
-            .parse(await source.discover(scope));
-          for (const account of accounts) {
-            const id = `${source.id}:${account.key}`;
-            const known = reports.get(id);
-            // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
-            const login = { input: account.input, harness: account.harness ?? source.label };
-            if (known) {
-              if (!known.logins.some((existing) => loginKey(existing) === loginKey(login)))
-                known.logins.push(login);
-            } else reports.set(id, { source, logins: [login], label: account.label });
-          }
+          const accounts = this.parseAccounts(await source.discover(scope));
+          for (const account of accounts) this.addAccount(reports, source.id, account, source);
         } catch (error) {
           this.logger.warn({ sourceId: source.id, err: error }, "Usage source discovery failed");
           // A failed store read does not confirm removal. Session discovery has no previous
           // mapping because a resumed agent may use a different launch environment.
-          for (const [id, report] of previous) {
-            if (report.source === source) reports.set(id, report);
+          this.previousFor(reports, previous, (report) => report.source === source);
+        }
+        return reports;
+      }),
+    );
+    const takeovers = await Promise.all(
+      [...this.activeOverrides].map(async ([targetId, winnerId]) => {
+        const reports = new Map<string, KnownReport>();
+        const winner = this.sources.get(winnerId)!;
+        const target = this.sources.get(targetId)!;
+        // An opted-out winner never touches the taken-over source: no
+        // discovery call (which a native source could answer with another
+        // account's identity) and no fetch call (which could start a host
+        // just to fail, e.g. a transient muse serve).
+        const skipNative = winner.skipNativeFallback === true;
+        const [winnerAccounts, targetAccounts] = await Promise.all([
+          winner
+            .discover(scope)
+            .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
+            .catch((err: unknown) => ({ ok: false as const, err })),
+          skipNative
+            ? Promise.resolve({ ok: true as const, accounts: [] })
+            : target
+                .discover(scope)
+                .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
+                .catch((err: unknown) => ({ ok: false as const, err })),
+        ]);
+        if (!winnerAccounts.ok) {
+          if (skipNative) {
+            this.logger.warn(
+              { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
+              "Usage source takeover failed; native fallback disabled",
+            );
+            // Keep only this winner's own previous cards (stale). Restoring
+            // the taken-over source's cards would reintroduce native cards
+            // in a provider the winner owns.
+            this.previousFor(reports, previous, (report) => report.overriddenId === targetId);
+            return reports;
           }
+          this.logger.warn(
+            { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
+            "Usage source takeover failed; falling back to built-in source",
+          );
+          if (targetAccounts.ok) {
+            for (const account of targetAccounts.accounts)
+              this.addAccount(reports, targetId, account, target);
+          } else {
+            this.previousFor(
+              reports,
+              previous,
+              (report) => report.overriddenId === targetId || report.source === target,
+            );
+          }
+          return reports;
+        }
+        const targetByKey = new Map<
+          string,
+          { input: unknown; harness?: string; identity?: string }[]
+        >();
+        if (targetAccounts.ok) {
+          for (const account of targetAccounts.accounts) {
+            const list = targetByKey.get(account.key) ?? [];
+            list.push(account);
+            targetByKey.set(account.key, list);
+          }
+        }
+        for (const account of winnerAccounts.accounts) {
+          // Fallback needs a proven same-account match: both sides must
+          // carry an explicitly verified identity in a shared vendor
+          // namespace, and the strings must be exactly equal. A locator
+          // hash, key equality alone, or an unknown identity on either side
+          // is not proof and fails closed: the override keeps its own error
+          // (or its last successful snapshot with its age). The card key
+          // only groups cards; it never authorizes quota movement.
+          const candidates = targetByKey.get(account.key) ?? [];
+          const matched =
+            account.identity !== undefined
+              ? candidates.filter((native) => native.identity === account.identity)
+              : [];
+          const fallback =
+            matched.length > 0
+              ? {
+                  source: target,
+                  identity: account.identity!,
+                  logins: matched.map((match) => ({
+                    // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
+                    input: match.input,
+                    harness: match.harness ?? target.label,
+                    identity: match.identity,
+                  })) as [Login, ...Login[]],
+                }
+              : undefined;
+          this.addAccount(reports, targetId, account, winner, targetId, fallback);
         }
         return reports;
       }),
     );
     const merged = new Map<string, KnownReport>();
-    for (const reports of discovered) {
+    for (const reports of [...discovered, ...takeovers]) {
       for (const [id, report] of reports) merged.set(id, report);
     }
     return merged;
@@ -319,7 +619,11 @@ export class UsageSourceRegistry {
     };
   }
 
-  private fetchId(id: string, known: KnownReport, forceRefresh = false): Promise<UsageReportEntry> {
+  private fetchId(
+    id: string,
+    known: KnownReport,
+    forceRefresh = false,
+  ): Promise<UsageReportEntry | null> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
     const cached = this.cache.get(cacheKey);
@@ -328,23 +632,33 @@ export class UsageSourceRegistry {
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
     const generation = this.generation;
-    const request = (async () => {
+    // False once an override, disable, unregister, reload, opt-out, or event
+    // invalidation retired this request. A retired request never starts
+    // native fallback and never publishes: after unregister/disable or a new
+    // opt-out winner, the old primary's quota must not start a native host
+    // or reappear as a ghost card — and after an event, its older quota must
+    // not overwrite the event's newer data. One shared counter retires both.
+    const isLive = () =>
+      this.generation === generation && this.sources.get(known.source.id) === known.source;
+    const request: Promise<UsageReportEntry | null> = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
-      const outcome = await this.fetchWithFallback(known);
-      if (this.generation !== generation) {
-        // An event retired this fetch while it was in flight: its older
-        // quota must never overwrite the event's newer data. Re-read as a
-        // normal (non-forced) read so the caller gets what the event
-        // announced — usually a fresh cache hit, or a join on the fetch the
-        // event triggered — instead of starting yet another fetch.
-        return this.fetchId(id, known);
+      const outcome = await this.fetchWithFallback(known, isLive);
+      if (!isLive()) {
+        // Retired while in flight: publish nothing anywhere — no callback,
+        // no return, no cache, no last-success. A freshness retire converges
+        // through the re-read the invalidation's push already triggered; an
+        // override retire has no live card left to serve.
+        return null;
       }
       const completedAt = new Date(this.now()).toISOString();
+      // Taken-over cards keep the native identity: same id prefix, label and
+      // icon as the built-in source they replace.
+      const native = known.overriddenId ? this.sources.get(known.overriddenId) : undefined;
       const entry: UsageReportEntry = {
         id,
-        sourceId: known.source.id,
-        sourceLabel: known.source.label,
-        icon: known.source.icon,
+        sourceId: native?.id ?? known.source.id,
+        sourceLabel: native?.label ?? known.source.label,
+        icon: native?.icon ?? known.source.icon,
         account: { label: known.label },
         fetchedAt,
         ...outcome,
@@ -355,6 +669,7 @@ export class UsageSourceRegistry {
         entry.lastSuccessful = this.successful.get(cacheKey);
       }
       if (
+        isLive() &&
         this.sources.get(known.source.id) === known.source &&
         this.activeCacheKeys().has(cacheKey)
       ) {
@@ -398,23 +713,90 @@ export class UsageSourceRegistry {
     }
   }
 
-  private async fetchWithFallback(
-    known: KnownReport,
-  ): Promise<Pick<UsageReportEntry, "report" | "loginErrors">> {
+  private async fetchLogins(source: UsageSource, logins: readonly Login[]) {
     // Start each login within the same deadline window, then prefer discovery order.
     // Sequential deadlines can exceed the client's RPC timeout before all errors arrive.
-    const attempts = known.logins.map((login) =>
-      this.fetchBeforeDeadline(known.source, login.input),
-    );
+    const attempts = logins.map((login) => this.fetchBeforeDeadline(source, login.input));
     const loginErrors: NonNullable<UsageReportEntry["loginErrors"]> = [];
-    for (const [index, login] of known.logins.entries()) {
+    for (const [index, login] of logins.entries()) {
       const report = await attempts[index]!;
-      if (report.status === "available") return { report };
+      if (report.status === "available") return { available: report as UsageReport, loginErrors };
       loginErrors.push({ harness: login.harness, report });
     }
+    return { available: null as UsageReport | null, loginErrors };
+  }
+
+  private async fetchWithFallback(
+    known: KnownReport,
+    isLive: () => boolean,
+  ): Promise<Pick<UsageReportEntry, "report" | "loginErrors">> {
+    const primary = await this.fetchLogins(known.source, known.logins);
+    if (primary.available) return { report: primary.available };
+    const failed = (): Pick<UsageReportEntry, "report" | "loginErrors"> => ({
+      // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
+      // Keep the final single report so older apps still parse and display failed accounts.
+      report: primary.loginErrors[primary.loginErrors.length - 1]!.report,
+      loginErrors: primary.loginErrors,
+    });
+    if (!known.fallback) return failed();
+    // A retired request never touches native sources: after unregister,
+    // disable, or a new opt-out winner, the old primary's failure must not
+    // start a native host (e.g. a transient muse serve) just to fail.
+    if (!isLive()) return failed();
+    const fallback = await this.fetchFallbackLogins(
+      known.fallback.source,
+      known.fallback.logins,
+      known.fallback.identity,
+    );
+    const loginErrors = [...primary.loginErrors, ...fallback.loginErrors];
+    if (fallback.available) return { report: fallback.available, loginErrors };
+    // The card keeps the override's own error; native failures (including a
+    // discarded identity mismatch) stay visible in `loginErrors` only, so a
+    // rotation can never replace A's error with another account's values.
     // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
-    // Keep the final single report so older apps still parse and display failed accounts.
-    return { report: loginErrors[loginErrors.length - 1]!.report, loginErrors };
+    return { report: primary.loginErrors[primary.loginErrors.length - 1]!.report, loginErrors };
+  }
+
+  /**
+   * Native fallback bound to the verified identity both sides proved at
+   * discovery AND to the credentials actually read for the quota request.
+   * A new discovery alone does not close the rotation race (the login file
+   * may change between discovery and fetch, and targeted refreshes skip
+   * discovery entirely), so each available native result must attest the
+   * expected identity. Anything else — a mismatch, or an available result
+   * with no attestation — is discarded with a provenance error and the
+   * override keeps its own error (or its last successful snapshot).
+   */
+  private async fetchFallbackLogins(
+    source: UsageSource,
+    logins: readonly Login[],
+    expectedIdentity: string,
+  ): Promise<{
+    available: UsageReport | null;
+    loginErrors: NonNullable<UsageReportEntry["loginErrors"]>;
+  }> {
+    const attempts = logins.map((login) => this.fetchBeforeDeadline(source, login.input));
+    const loginErrors: NonNullable<UsageReportEntry["loginErrors"]> = [];
+    for (const [index, login] of logins.entries()) {
+      const report = await attempts[index]!;
+      if (report.status !== "available") {
+        loginErrors.push({ harness: login.harness, report });
+        continue;
+      }
+      if (report.accountIdentity === expectedIdentity) {
+        return { available: report, loginErrors };
+      }
+      loginErrors.push({
+        harness: login.harness,
+        report: {
+          status: "error",
+          error:
+            `Native login identity ${report.accountIdentity ?? "unknown"} does not match ` +
+            `the override account's verified identity; its quota is not served under this card.`,
+        },
+      });
+    }
+    return { available: null, loginErrors };
   }
 
   private async fetchLogin(source: UsageSource, input: unknown): Promise<UsageReport> {
@@ -450,7 +832,32 @@ function legacyError(report: UsageReport, now: number): string | null {
   return null;
 }
 
+/**
+ * Merges a fallback discovered in another scope into a known card. Logins
+ * from different scopes must prove the same verified identity; a
+ * conflicting match fails closed instead of mixing quotas.
+ */
+function mergeFallback(into: KnownReport, from: NonNullable<KnownReport["fallback"]>): void {
+  const current = into.fallback;
+  if (!current) {
+    into.fallback = from;
+    return;
+  }
+  if (current.source !== from.source) {
+    into.fallback = from;
+    return;
+  }
+  if (current.identity !== from.identity) into.fallback = undefined;
+  else mergeLogins(current, from.logins);
+}
+
 // Inputs are opaque JSON locators. Canonical equality deduplicates discovery across scopes.
+function mergeLogins(into: { logins: Login[] }, from: readonly Login[]): void {
+  for (const login of from) {
+    if (!into.logins.some((existing) => loginKey(existing) === loginKey(login)))
+      into.logins.push(login);
+  }
+}
 function loginKey(login: Login): string {
   return JSON.stringify(login, (_key, value) =>
     value !== null && typeof value === "object" && !Array.isArray(value)
@@ -461,6 +868,12 @@ function loginKey(login: Login): string {
 
 function cacheIdentity(id: string, known: KnownReport): string {
   return `${id}:${createHash("sha256")
-    .update(JSON.stringify([known.label, known.logins.map(loginKey)]))
+    .update(
+      JSON.stringify([
+        known.label,
+        known.logins.map(loginKey),
+        known.fallback?.logins.map(loginKey) ?? null,
+      ]),
+    )
     .digest("hex")}`;
 }

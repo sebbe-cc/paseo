@@ -465,3 +465,36 @@ test("#6155: real Codex and OpenCode stores share an account but keep agent fail
   });
   expect(agent?.loginErrors).toEqual([host!.loginErrors![0]]);
 });
+
+test("verified discovery carries a codex-namespaced identity; locator fallback omits it", async () => {
+  await writeAuth("verified-identity-token", "verified-account");
+  const accounts = await discover(
+    { kind: "global" },
+    { home: fixtureHome, env: { CODEX_HOME: fixtureHome }, platform: "linux" },
+  );
+  const account = accounts.find(
+    (candidate) => JSON.stringify(candidate.input) === JSON.stringify(authInput(fixtureHome)),
+  );
+  expect(account).toMatchObject({ key: "verified-account", identity: "codex:verified-account" });
+  await writeAuth("opaque-token");
+  const locator = await discover(
+    { kind: "global" },
+    { home: fixtureHome, env: { CODEX_HOME: fixtureHome }, platform: "linux" },
+  );
+  const unattested = locator.find(
+    (candidate) => JSON.stringify(candidate.input) === JSON.stringify(authInput(fixtureHome)),
+  );
+  expect(unattested?.key).toMatch(/^[a-f0-9]{64}$/);
+  expect(unattested?.identity).toBeUndefined();
+});
+
+test("fetchUsage attests the verified identity whose credentials it read", async () => {
+  await writeAuth("fixture-attested-fetch", "attested-account");
+  const report = await fetchUsage(authInput(fixtureHome), (_url, init) =>
+    response(init?.headers ?? {}, "attested-account"),
+  );
+  expect(report).toMatchObject({
+    status: "available",
+    accountIdentity: "codex:attested-account",
+  });
+});

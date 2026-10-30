@@ -29,6 +29,8 @@ export interface PluginUsageSourceMetadata {
   id: string;
   label: string;
   icon?: string;
+  replaces?: string[];
+  skipNativeFallback?: boolean;
 }
 
 export type PluginProcessRequest =
@@ -86,6 +88,7 @@ export type PluginProcessMessage =
       methods: string[];
       providers: PluginProviderMetadata[];
       usageSources?: PluginUsageSourceMetadata[];
+      disabledUsageSources?: string[];
       hooks?: { events: string[]; before: string[] };
     }
   | { type: "result"; requestId: string; output: unknown }
@@ -129,6 +132,8 @@ const usageSourceMetadataSchema = z
     id: z.string().min(1),
     label: z.string().min(1),
     icon: z.string().optional(),
+    replaces: z.array(z.string().min(1)).optional(),
+    skipNativeFallback: z.boolean().optional(),
   })
   .strict();
 const providerConnectRequestSchema = z
@@ -277,6 +282,7 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
         methods: z.array(z.string()),
         providers: z.array(providerMetadataSchema),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
+        disabledUsageSources: z.array(z.string().min(1)).optional(),
         hooks: hooksSchema.optional(),
       })
       .strict(),
