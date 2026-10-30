@@ -43,6 +43,23 @@ export type UsageProblem =
   | { kind: "rejected"; status: number; refreshedBy?: string }
   | { kind: "no_quota"; detail: string };
 
+/**
+ * Source-owned historical quota snapshot (pa-vtgw9 R1). A failing source
+ * whose backend still holds a fresh validated vendor observation attaches
+ * its last-known quota here so the card can show the error WITH its recent
+ * history — including after a restart, when the registry has no local
+ * snapshot. The current error status always stays visible; history is never
+ * live quota. Same shape as the available report's quota fields.
+ */
+export interface UsageHistorySnapshot {
+  /** Last successful validated vendor observation (RFC3339 UTC), never poll time. */
+  observedAt: string;
+  windows: UsageWindow[];
+  planLabel?: string;
+  balances?: UsageBalance[];
+  details?: UsageDetail[];
+}
+
 export type UsageReport =
   | {
       status: "available";
@@ -68,8 +85,8 @@ export type UsageReport =
        */
       observedAt?: string;
     }
-  | { status: "unavailable"; problem: UsageProblem }
-  | { status: "error"; error: string };
+  | { status: "unavailable"; problem: UsageProblem; history?: UsageHistorySnapshot }
+  | { status: "error"; error: string; history?: UsageHistorySnapshot };
 
 /**
  * Builds a vendor-scoped verified account identity for `UsageAccount.identity`

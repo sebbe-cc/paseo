@@ -217,7 +217,9 @@ function observedAtOf(report: UsageReport): number | null {
 }
 
 function isFreshObservation(observedAt: number | null, now: number): boolean {
-  return observedAt === null || now - observedAt <= MAX_OBSERVED_AGE_MS;
+  // R2: a future observation is never fresh. Clamping it to "just now" would
+  // keep quota alive past its real observation on skewed clocks.
+  return observedAt === null || (observedAt <= now && now - observedAt <= MAX_OBSERVED_AGE_MS);
 }
 
 /**
@@ -297,7 +299,24 @@ export function resolveUsageReport(entry: UsageReportEntry, t: TFunction) {
     ),
     retained: snapshot !== null,
     messages,
+    observedAt: resolveObservedAt(liveObservedAt, snapshot),
   };
+}
+
+/**
+ * R4: the source-owned observation as render input. Non-null only when a
+ * source actually sent one (live or retained); legacy poll-time entries
+ * stay null so the card never invents an expiry for them.
+ */
+function resolveObservedAt(
+  liveObservedAt: number | null,
+  snapshot: UsageReportEntry["lastSuccessful"],
+): string | null {
+  if (liveObservedAt !== null) return new Date(liveObservedAt).toISOString();
+  if (!snapshot) return null;
+  const snapshotObservedAt = observedAtOf(snapshot.report);
+  if (snapshotObservedAt === null) return null;
+  return new Date(snapshotObservedAt).toISOString();
 }
 
 function usageProblemText(report: UsageReport, t: TFunction): string {

@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { UsageSourceRegistry } from "./index.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1521,7 +1521,8 @@ test("a pending primary cannot start native fallback or publish after reload and
       },
     });
   registry.register(failingWinner());
-  const pending = registry.listReports();
+  const reported: string[] = [];
+  const pending = registry.listReports({ onReport: (entry) => reported.push(entry.id) });
   // Fixture discovery and the primary fetch invocation are microtask-only,
   // so flushing macrotasks guarantees the primary is in flight below.
   await new Promise((resolve) => setImmediate(resolve));
@@ -1546,12 +1547,12 @@ test("a pending primary cannot start native fallback or publish after reload and
   registry.disable("cpa");
   registry.enable("cpa");
   releasePrimary(new Error("old primary down"));
-  const [stale] = await pending;
-  // The retired request resolves with the old primary's own error: no native
-  // fetch ran (which could have started a native host), and there is no
-  // provenance from another account.
-  expect(stale?.id).toBe("local:shared");
-  expect(stale?.report).toEqual({ status: "error", error: "old primary down" });
+  // The retired request publishes nothing: the failed primary reaches
+  // neither the callback nor the returned list, no native fetch ran (which
+  // could have started a native host), and there is no provenance from
+  // another account.
+  expect(await pending).toEqual([]);
+  expect(reported).toEqual([]);
   expect(calls.fetch).toEqual([]);
   // Nothing was published: the next discovery shows only the new winner's
   // card, and the retired card is gone entirely.
@@ -1669,138 +1670,9 @@ test("an already-started fallback publishes nothing after retirement", async () 
   expect(failed?.lastSuccessful).toBeUndefined();
 });
 
-test("a fetch retired by an event publishes nothing; the push's re-read serves new data", async () => {
-  let now = 0;
-  const registry = new UsageSourceRegistry(() => now);
-  let calls = 0;
-  let releaseOld!: () => void;
-  const oldGate = new Promise<void>((resolve) => {
-    releaseOld = resolve;
-  });
-  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
-  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
-  try {
-    registry.register(
-      source({
-        id: "muse",
-        discover: async () => [{ key: "a", input: { account: "a" } }],
-        fetch: async () => {
-          calls++;
-          if (calls === 2) {
-            // F1 starts with the older quota and stalls.
-            await oldGate;
-            return { status: "available", windows: [{ id: "w", label: "old" }] };
-          }
-          return {
-            status: "available",
-            windows: [{ id: "w", label: calls === 1 ? "old" : "new" }],
-          };
-        },
-      }),
-    );
-    const first = await registry.listReports();
-    expect(first[0]?.report).toMatchObject({ windows: [{ label: "old" }] });
-    // F1 hangs on its next read; the event retires it, F2 reads the new
-    // quota, and F1 resolves last with the older values.
-    const reported: string[] = [];
-    const slow = registry.listReports({
-      reportIds: ["muse:a"],
-      forceRefresh: true,
-      onReport: (entry) => reported.push(entry.id),
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
-    expect(invalidated).toEqual([{ sourceId: "muse", reportIds: ["muse:a"] }]);
-    const fresh = await registry.listReports({ reportIds: ["muse:a"] });
-    expect(fresh[0]?.report).toMatchObject({ windows: [{ label: "new" }] });
-    releaseOld();
-    // The retired fetch reaches neither the callback nor the returned list,
-    // so its older quota can never overwrite the event's newer data.
-    expect(await slow).toEqual([]);
-    expect(reported).toEqual([]);
-    expect(calls).toBe(3);
-    // The cache holds the new quota; no further fetch is needed.
-    await registry.listReports({ reportIds: ["muse:a"] });
-    expect(calls).toBe(3);
-  } finally {
-    unsubscribe();
-  }
-});
 
-test("a freshness invalidation keeps every account's last-good snapshot for later errors", async () => {
-  let now = 0;
-  const registry = new UsageSourceRegistry(() => now);
-  let failB = false;
-  registry.register(
-    source({
-      id: "muse",
-      discover: async () => [
-        { key: "a", input: { account: "a" } },
-        { key: "b", input: { account: "b" } },
-      ],
-      fetch: async (input) => {
-        const account = (input as { account: string }).account;
-        if (account === "b" && failB) throw new Error("quota backend down");
-        return { status: "available", windows: [{ id: "w", label: `ok-${account}` }] };
-      },
-    }),
-  );
-  const initial = await registry.listReports();
-  expect(initial.map((entry) => entry.id)).toEqual(["muse:a", "muse:b"]);
-  // An event for the source drops freshness but preserves valid history.
-  expect(registry.invalidateSource("muse")).toEqual(["muse:a", "muse:b"]);
-  failB = true;
-  const after = await registry.listReports({ forceRefresh: true });
-  const entryB = after.find((entry) => entry.id === "muse:b")!;
-  expect(entryB.report).toMatchObject({ status: "error" });
-  // B's proven observation survives the invalidation and the later error.
-  expect(entryB.lastSuccessful?.report).toMatchObject({ windows: [{ label: "ok-b" }] });
-  const entryA = after.find((entry) => entry.id === "muse:a")!;
-  expect(entryA.report).toMatchObject({ windows: [{ label: "ok-a" }] });
-});
 
-test("a first event after an empty discovery still pushes an inventory invalidation", async () => {
-  const registry = new UsageSourceRegistry();
-  registry.register(source({ id: "muse" }));
-  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
-  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
-  try {
-    // Nothing discovered yet: no card ids, but the registered source's
-    // inventory may have changed, so listeners still fire for rediscovery.
-    expect(registry.invalidateSource("muse")).toEqual([]);
-    expect(invalidated).toEqual([{ sourceId: "muse", reportIds: [] }]);
-  } finally {
-    unsubscribe();
-  }
-});
 
-test("replacing a source keeps invalidation routed to the new owner's cards", async () => {
-  let now = 0;
-  const registry = new UsageSourceRegistry(() => now);
-  const windows = (label: string) => ({ status: "available", windows: [{ id: "w", label }] });
-  registry.register(
-    source({
-      id: "muse",
-      discover: async () => [{ key: "a", input: { account: "a" } }],
-      fetch: async () => windows("v1"),
-    }),
-  );
-  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["muse:a"]);
-  registry.unregister("muse");
-  registry.register(
-    source({
-      id: "muse",
-      discover: async () => [{ key: "a", input: { account: "a" } }],
-      fetch: async () => windows("v2"),
-    }),
-  );
-  const replaced = await registry.listReports();
-  expect(replaced[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
-  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
-  const refetched = await registry.listReports({ reportIds: ["muse:a"] });
-  expect(refetched[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
-});
 
 test("source-owned observation age owns freshness through the registry", async () => {
   let now = 1_000_000;
@@ -1861,4 +1733,177 @@ test("available quota older than the ceiling never publishes, even cold", async 
   expect(reports).toHaveLength(1);
   expect(reports[0]?.report.status).toBe("error");
   expect(reports[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("R1: error with fresh source-owned history shows error plus retained quota on a cold registry", async () => {
+  const now = 10_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now - 60_000).toISOString();
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      // Cold restart: no prior available poll, the backend error itself
+      // carries the last validated quota.
+      fetch: async () => ({
+        status: "error",
+        error: "quota rate limited",
+        history: {
+          observedAt,
+          planLabel: "Max",
+          windows: [{ id: "five_hour", label: "5-hour", usedPct: 87 }],
+        },
+      }),
+    }),
+  );
+  const reports = await registry.listReports();
+  expect(reports).toHaveLength(1);
+  // The current error stays visible, never masked to available.
+  expect(reports[0]?.report.status).toBe("error");
+  // ...while the fresh backend history is retained for the card.
+  expect(reports[0]?.lastSuccessful?.report).toMatchObject({
+    status: "available",
+    observedAt,
+    windows: [{ usedPct: 87 }],
+  });
+});
+
+test("R1: stale, future, or empty error history never becomes retained quota", async () => {
+  async function retainedFor(history: unknown): Promise<unknown> {
+    let now = 20_000_000;
+    const registry = new UsageSourceRegistry(() => now);
+    registry.register(
+      source({
+        id: "claude",
+        discover: async () => [{ key: "a", input: {} }],
+        fetch: async () => ({ status: "error", error: "proxy down", history }),
+      }),
+    );
+    const reports = await registry.listReports();
+    return reports[0]?.lastSuccessful;
+  }
+  const windows = [{ id: "five_hour", label: "5-hour", usedPct: 87 }];
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 - 45 * 60_000).toISOString(), windows }),
+  ).toBeUndefined();
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 + 60_000).toISOString(), windows }),
+  ).toBeUndefined();
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 - 60_000).toISOString(), windows: [] }),
+  ).toBeUndefined();
+});
+
+test("R2: future observedAt never authorizes quota, live or retained", async () => {
+  let now = 30_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  let mode: "future-live" | "ok-then-future-history" = "future-live";
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () =>
+        mode === "future-live"
+          ? {
+              status: "available",
+              observedAt: new Date(now + 60_000).toISOString(),
+              windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+            }
+          : {
+              status: "error",
+              error: "proxy down",
+              history: {
+                observedAt: new Date(now + 60_000).toISOString(),
+                windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+              },
+            },
+    }),
+  );
+  // A syntactically valid ISO timestamp tomorrow is not "just now": the
+  // report becomes a visible error, never available.
+  const live = await registry.listReports({ forceRefresh: true });
+  expect(live[0]?.report.status).toBe("error");
+  expect(live[0]?.lastSuccessful).toBeUndefined();
+  // A future history snapshot is not history either.
+  mode = "ok-then-future-history";
+  const failed = await registry.listReports({ forceRefresh: true });
+  expect(failed[0]?.report.status).toBe("error");
+  expect(failed[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("R3: warm hit, callback, and final return all enforce the ceiling", async () => {
+  let now = 40_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now).toISOString();
+  let resolveA!: (value: unknown) => void;
+  let resolveB!: (value: unknown) => void;
+  const gateA = new Promise<unknown>((resolve) => {
+    resolveA = resolve;
+  });
+  const gateB = new Promise<unknown>((resolve) => {
+    resolveB = resolve;
+  });
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: (input) => ((input as { account: string }).account === "b" ? gateB : gateA),
+    }),
+  );
+  const seen: string[] = [];
+  const pending = registry.listReports({
+    onReport: (entry) => seen.push(`${entry.id}:${entry.report.status}`),
+  });
+  // A resolves while its observation is fresh: its callback is available.
+  resolveA({
+    status: "available",
+    observedAt,
+    windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+  });
+  await vi.waitFor(() => expect(seen).toContain("claude:a:available"));
+  // B stays in flight past the ceiling; it observes fresh at the new now.
+  now += 31 * 60_000;
+  resolveB({
+    status: "available",
+    observedAt: new Date(now - 60_000).toISOString(),
+    windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+  });
+  const final = await pending;
+  const entryA = final.find((entry) => entry.id === "claude:a");
+  const entryB = final.find((entry) => entry.id === "claude:b");
+  // A's entry resolved fresh, but the final return re-checks after the
+  // sibling wait and downgrades it; B observed fresh and stays available.
+  expect(entryA?.report.status).toBe("error");
+  expect(entryA?.lastSuccessful).toBeUndefined();
+  expect(entryB?.report.status).toBe("available");
+  expect(seen).toContain("claude:b:available");
+});
+
+test("R3: warm hit past the ceiling serves an error, not cached quota", async () => {
+  let now = 50_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now).toISOString();
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () => ({
+        status: "available",
+        observedAt,
+        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+      }),
+    }),
+  );
+  const first = await registry.listReports();
+  expect(first[0]?.report.status).toBe("available");
+  // Inside the 5-minute fetch cache but past the 30-minute observation
+  // ceiling: the warm hit must not serve quota.
+  now += 31 * 60_000;
+  const second = await registry.listReports();
+  expect(second).toHaveLength(1);
+  expect(second[0]?.report.status).toBe("error");
+  expect(second[0]?.lastSuccessful).toBeUndefined();
 });

@@ -354,6 +354,9 @@ it("resolves retained usage and successful time without inventing old-daemon his
     successfulAt: success.fetchedAt,
     retained: true,
     messages: ["Rate limited"],
+    // R4: legacy fixtures carry no source-owned observation, so the card
+    // schedules no expiry for them.
+    observedAt: null,
   });
   expect(resolveUsageReport({ ...failure, lastSuccessful: undefined }, i18n.t)).toEqual({
     windows: [],
@@ -363,6 +366,7 @@ it("resolves retained usage and successful time without inventing old-daemon his
     successfulAt: null,
     retained: false,
     messages: ["Rate limited"],
+    observedAt: null,
   });
   expect(resolveUsageReport(success, i18n.t)).toEqual({
     windows: success.report.status === "available" ? success.report.windows : [],
@@ -372,6 +376,7 @@ it("resolves retained usage and successful time without inventing old-daemon his
     successfulAt: success.fetchedAt,
     retained: false,
     messages: [],
+    observedAt: null,
   });
 });
 
@@ -458,4 +463,63 @@ it("serves retained history only while its own observation is fresh", () => {
   const stale = resolveUsageReport(failureWith(staleObservedAt), i18n.t);
   expect(stale.windows).toEqual([]);
   expect(stale.retained).toBe(false);
+});
+
+it("R2: future observations never authorize quota, live or retained", () => {
+  const futureObservedAt = new Date(Date.now() + 60_000).toISOString();
+  const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
+  if (live.report.status !== "available") throw new Error("fixture must be available");
+  const futureLive: UsageReportEntry = {
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    report: { ...live.report, observedAt: futureObservedAt },
+  };
+  const resolved = resolveUsageReport(futureLive, i18n.t);
+  expect(resolved.windows).toEqual([]);
+  expect(resolved.messages).toHaveLength(1);
+
+  const futureRetained: UsageReportEntry = {
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    report: { status: "error", error: "proxy down" },
+    lastSuccessful: {
+      fetchedAt: new Date().toISOString(),
+      report: { ...live.report, observedAt: futureObservedAt },
+    },
+  };
+  const retained = resolveUsageReport(futureRetained, i18n.t);
+  expect(retained.windows).toEqual([]);
+  expect(retained.retained).toBe(false);
+});
+
+it("R4: resolve exposes the source-owned observation as render input", () => {
+  const freshObservedAt = new Date(Date.now() - 60_000).toISOString();
+  const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
+  if (live.report.status !== "available") throw new Error("fixture must be available");
+
+  // Live source-owned observation passes through for the card expiry timer.
+  const withObserved: UsageReportEntry = {
+    ...live,
+    report: { ...live.report, observedAt: freshObservedAt },
+  };
+  expect(resolveUsageReport(withObserved, i18n.t).observedAt).toBe(freshObservedAt);
+
+  // Legacy entries without an observation expose null: the card schedules
+  // no expiry for them.
+  expect(resolveUsageReport(live, i18n.t).observedAt).toBeNull();
+
+  // A retained snapshot's observation is exposed so the mounted card can
+  // expire it without a new poll.
+  const failure: UsageReportEntry = {
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    report: { status: "error", error: "proxy down" },
+    lastSuccessful: {
+      fetchedAt: new Date().toISOString(),
+      report: { ...live.report, observedAt: freshObservedAt },
+    },
+  };
+  const failed = resolveUsageReport(failure, i18n.t);
+  expect(failed.retained).toBe(true);
+  expect(failed.observedAt).toBe(freshObservedAt);
 });

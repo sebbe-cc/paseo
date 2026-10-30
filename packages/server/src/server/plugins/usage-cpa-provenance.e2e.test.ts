@@ -36,6 +36,7 @@ const CLAUDE_A = quotaV1("claude", "acc-aaaaaaaa-0001", "org-11111111-0001");
 const CLAUDE_B = quotaV1("claude", "acc-bbbbbbbb-0002", "org-22222222-0002");
 const CODEX_A = quotaV1("codex", "chatgpt-acct-aaa");
 const CODEX_B = quotaV1("codex", "chatgpt-acct-bbb");
+const CODEX_C = quotaV1("codex", "chatgpt-acct-ccc");
 
 type ApiMode = "fresh" | "aged" | "forbidden";
 
@@ -123,6 +124,29 @@ function accountsPayload(now: number, mode: ApiMode) {
         checked_at: checkedAt,
         retry_at: null,
         windows: [],
+      },
+      {
+        // R1: a failing account whose backend still holds the last
+        // validated quota. The plugin forwards it as history alongside the
+        // visible error; the registry bridges it to lastSuccessful so the
+        // native card shows error + retained quota after a cold restart.
+        account_id: CODEX_C,
+        provider: "codex",
+        plan: "Plus",
+        status: "rate_limited",
+        detail: "http-429",
+        observed_at: observedAt,
+        checked_at: checkedAt,
+        retry_at: checkedAt,
+        windows: [
+          {
+            id: "primary",
+            used_percent: 61,
+            window_seconds: 18_000,
+            resets_at: new Date(now + 1_800_000).toISOString(),
+            scope: null,
+          },
+        ],
       },
     ],
   };
@@ -283,6 +307,7 @@ test("real daemon subprocess serves CPA quotas as native cards with observed_at 
             `claude:${CLAUDE_B}`,
             `codex:${CODEX_A}`,
             `codex:${CODEX_B}`,
+            `codex:${CODEX_C}`,
           ].sort(),
         );
         for (const entry of first.reports) {
@@ -323,6 +348,17 @@ test("real daemon subprocess serves CPA quotas as native cards with observed_at 
           status: "unavailable",
           problem: { kind: "expired", expiresAt: expect.any(String) },
         });
+
+        // R1 over the real RPC: the rate-limited account keeps its visible
+        // error, while its fresh backend quota is bridged to lastSuccessful
+        // — the native card shows error + retained quota on a cold daemon.
+        const codexC = first.reports.find((entry) => entry.id === `codex:${CODEX_C}`);
+        expect(codexC?.report.status).toBe("error");
+        expect(codexC?.lastSuccessful?.report).toMatchObject({
+          status: "available",
+          windows: [{ usedPct: 61 }],
+        });
+        expect(codexC?.lastSuccessful?.report.observedAt).toMatch(/^\d{4}-/);
       } finally {
         await client.close();
         await daemon.close();
@@ -366,6 +402,11 @@ test("real registry never serves quota older than the ceiling, including after a
           expect(claudeA?.report.status).toBe("error");
           expect(JSON.stringify(claudeA?.report)).toContain("stale");
           expect(claudeA).not.toHaveProperty("lastSuccessful");
+          // R1: the rate-limited account's backend history is 45 minutes
+          // old here, so nothing is bridged — error without quota.
+          const codexC = reports.find((entry) => entry.id === `codex:${CODEX_C}`);
+          expect(codexC?.report.status).toBe("error");
+          expect(codexC).not.toHaveProperty("lastSuccessful");
           const withWindows = reports.filter(
             (entry) =>
               entry.report.status === "available" && (entry.report.windows?.length ?? 0) > 0,
