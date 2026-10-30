@@ -103,11 +103,13 @@ export function useMenuState({
   defaultOpen,
   onOpenChange,
   compactMode = "popover",
+  dismissKeyboardOnOpen = true,
 }: {
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   compactMode?: MenuCompactMode;
+  dismissKeyboardOnOpen?: boolean;
 }): MenuContextValue {
   const triggerRef = useRef<View>(null);
   const [anchorRect, setAnchorRect] = useState<Rect | null>(null);
@@ -116,7 +118,7 @@ export function useMenuState({
   const presentation: MenuPresentation = isCompact && compactMode === "sheet" ? "sheet" : "popover";
 
   const [isOpen, setIsOpenState] = useControllableOpenState({ open, defaultOpen, onOpenChange });
-  useDismissKeyboardOnOpen(isOpen);
+  useDismissKeyboardOnOpen(isOpen, dismissKeyboardOnOpen);
 
   // A menu always reopens on its root page, against a freshly measured anchor. Keeping either
   // would reopen the surface three levels deep, or at the coordinates of the last right click.
