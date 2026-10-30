@@ -330,6 +330,7 @@ export function createPluginWorker(options: {
             ? await readPluginProviderIcon(message.pluginDirectory, source.icon)
             : undefined,
           replaces: source.replaces,
+          skipNativeFallback: source.skipNativeFallback,
         })),
     );
     send({

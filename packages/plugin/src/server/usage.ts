@@ -90,6 +90,17 @@ export interface UsageSourceRegistration {
    * taken-over cards, never under its own id.
    */
   replaces?: string[];
+  /**
+   * Skip the taken-over sources' discovery/fetch fallback. Set this when
+   * this source's account keys can never match the native identities, or
+   * when a native fetch would start a host just to fail (e.g. a CPA-backed
+   * Muse source avoiding a transient `muse serve`). The daemon then never
+   * calls the taken-over sources' `discover`/`fetch` for this takeover,
+   * and a failing override reports its own error instead of native values.
+   * Without it, fallback still needs a provable match: only native logins
+   * discovered under the same account key may serve the card.
+   */
+  skipNativeFallback?: boolean;
   /** Accounts for this scope only. The same key in any scope identifies the same account. */
   discover(scope: UsageScope): Promise<UsageAccount[]>;
   /** Re-reads the login store; never writes it. */

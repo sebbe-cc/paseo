@@ -22,6 +22,17 @@ export interface UsageSource {
    * place. First claimant (by source id) wins; conflicts are logged.
    */
   replaces?: readonly string[];
+  /**
+   * Opt out of the built-in discovery/fetch fallback for taken-over
+   * sources. With no provable same-account match the registry never shows
+   * another account's quota under this source's cards, but a source whose
+   * accounts cannot match native identities at all — or whose native fetch
+   * would start a host just to fail, such as a CPA-backed Muse source —
+   * sets this to skip the taken-over sources' discovery and fetch calls
+   * entirely. A failing override then reports its own error (or its last
+   * successful snapshot with its age) instead of built-in values.
+   */
+  skipNativeFallback?: boolean;
   discover(scope: UsageScope): Promise<unknown>;
   fetch(input: unknown): Promise<unknown>;
 }
@@ -393,17 +404,35 @@ export class UsageSourceRegistry {
         const reports = new Map<string, KnownReport>();
         const winner = this.sources.get(winnerId)!;
         const target = this.sources.get(targetId)!;
+        // An opted-out winner never touches the taken-over source: no
+        // discovery call (which a native source could answer with another
+        // account's identity) and no fetch call (which could start a host
+        // just to fail, e.g. a transient muse serve).
+        const skipNative = winner.skipNativeFallback === true;
         const [winnerAccounts, targetAccounts] = await Promise.all([
           winner
             .discover(scope)
             .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
             .catch((err: unknown) => ({ ok: false as const, err })),
-          target
-            .discover(scope)
-            .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
-            .catch((err: unknown) => ({ ok: false as const, err })),
+          skipNative
+            ? Promise.resolve({ ok: true as const, accounts: [] })
+            : target
+                .discover(scope)
+                .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
+                .catch((err: unknown) => ({ ok: false as const, err })),
         ]);
         if (!winnerAccounts.ok) {
+          if (skipNative) {
+            this.logger.warn(
+              { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
+              "Usage source takeover failed; native fallback disabled",
+            );
+            // Keep only this winner's own previous cards (stale). Restoring
+            // the taken-over source's cards would reintroduce native cards
+            // in a provider the winner owns.
+            this.previousFor(reports, previous, (report) => report.overriddenId === targetId);
+            return reports;
+          }
           this.logger.warn(
             { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
             "Usage source takeover failed; falling back to built-in source",
@@ -420,19 +449,32 @@ export class UsageSourceRegistry {
           }
           return reports;
         }
-        const fallbackLogins =
-          targetAccounts.ok && targetAccounts.accounts.length > 0
-            ? {
-                source: target,
-                logins: targetAccounts.accounts.map((account) => ({
-                  // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
-                  input: account.input,
-                  harness: account.harness ?? target.label,
-                })) as [Login, ...Login[]],
-              }
-            : undefined;
+        const targetByKey = new Map<string, { input: unknown; harness?: string }[]>();
+        if (targetAccounts.ok) {
+          for (const account of targetAccounts.accounts) {
+            const list = targetByKey.get(account.key) ?? [];
+            list.push(account);
+            targetByKey.set(account.key, list);
+          }
+        }
         for (const account of winnerAccounts.accounts) {
-          this.addAccount(reports, targetId, account, winner, targetId, fallbackLogins);
+          // Fallback needs a provable same-account match: only built-in
+          // logins discovered under this account's own key may serve its
+          // card. An unknown or mismatched identity keeps the override's
+          // own error (or its last successful snapshot with its age).
+          const matched = targetByKey.get(account.key) ?? [];
+          const fallback =
+            matched.length > 0
+              ? {
+                  source: target,
+                  logins: matched.map((match) => ({
+                    // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
+                    input: match.input,
+                    harness: match.harness ?? target.label,
+                  })) as [Login, ...Login[]],
+                }
+              : undefined;
+          this.addAccount(reports, targetId, account, winner, targetId, fallback);
         }
         return reports;
       }),

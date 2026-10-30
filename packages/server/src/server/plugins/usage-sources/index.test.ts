@@ -835,11 +835,13 @@ function nativeSource(input: {
   discover?: () => Promise<Array<{ key: string; label?: string; input: unknown }>>;
   fetch?: (value: unknown) => Promise<unknown>;
   replaces?: string[];
+  skipNativeFallback?: boolean;
 }) {
   return {
     id: input.id,
     label: input.label,
     replaces: input.replaces,
+    skipNativeFallback: input.skipNativeFallback,
     discover: input.discover ?? (async () => []),
     fetch: input.fetch ?? (async () => ({ status: "available", windows: [] })),
   };
@@ -1014,4 +1016,333 @@ test("a takeover whose discovery fails keeps the built-in card", async () => {
         message === "Usage source takeover failed; falling back to built-in source",
     ),
   ).toBe(true);
+});
+
+function countedNative(
+  id: string,
+  accounts: Array<{ key: string; usedPct: number }>,
+  calls: { discover: number; fetch: unknown[] },
+) {
+  return nativeSource({
+    id,
+    label: id,
+    discover: async () => {
+      calls.discover++;
+      return accounts.map(({ key }) => ({ key, input: { account: key } }));
+    },
+    fetch: async (input) => {
+      calls.fetch.push(input);
+      const account = accounts.find(({ key }) => key === (input as { account: string }).account);
+      return {
+        status: "available",
+        windows: [{ id: "native", label: "Native", usedPct: account?.usedPct ?? -1 }],
+      };
+    },
+  });
+}
+
+test("a mismatched override failure never shows another account's quota", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const registry = new UsageSourceRegistry();
+  registry.register(countedNative("local", [{ key: "c", usedPct: 7 }], calls));
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: async (input) => {
+        if ((input as { account: string }).account === "a") throw new Error("A store down");
+        return {
+          status: "available",
+          windows: [{ id: "override", label: "Override", usedPct: 42 }],
+        };
+      },
+    }),
+  );
+  const reports = await registry.listReports();
+  // Both override accounts publish under the taken-over id; the local C
+  // account never becomes a card while the takeover is active.
+  expect(reports.map((entry) => entry.id).sort()).toEqual(["local:a", "local:b"]);
+  const failed = reports.find((entry) => entry.id === "local:a")!;
+  expect(failed.sourceId).toBe("local");
+  expect(failed.report).toEqual({ status: "error", error: "A store down" });
+  // Only the override's own login was tried: no native fetch ran for A.
+  expect(failed.loginErrors).toHaveLength(1);
+  expect(failed.loginErrors?.[0]).toMatchObject({ harness: "CPA" });
+  expect(JSON.stringify(failed)).not.toContain("Native");
+  const healthy = reports.find((entry) => entry.id === "local:b")!;
+  if (healthy?.report.status !== "available") throw new Error("Expected override usage");
+  expect(healthy.report.windows).toEqual([{ id: "override", label: "Override", usedPct: 42 }]);
+  expect(calls.fetch).toEqual([]);
+});
+
+test("a matched fallback serves the same account and keeps the override error", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const registry = new UsageSourceRegistry();
+  registry.register(countedNative("local", [{ key: "shared", usedPct: 11 }], calls));
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [
+        { key: "shared", input: { account: "shared" } },
+        { key: "other", input: { account: "other" } },
+      ],
+      fetch: async (input) => {
+        throw new Error(`proxy down for ${(input as { account: string }).account}`);
+      },
+    }),
+  );
+  const reports = await registry.listReports();
+  const matched = reports.find((entry) => entry.id === "local:shared")!;
+  if (matched?.report.status !== "available") throw new Error("Expected matched fallback usage");
+  expect(matched.report.windows).toEqual([{ id: "native", label: "Native", usedPct: 11 }]);
+  expect(matched.loginErrors).toHaveLength(1);
+  expect(matched.loginErrors?.[0]).toMatchObject({
+    harness: "CPA",
+    report: { status: "error", error: "proxy down for shared" },
+  });
+  // The unknown sibling keeps its own error; the shared native values never leak into it.
+  const unknown = reports.find((entry) => entry.id === "local:other")!;
+  expect(unknown?.report).toEqual({ status: "error", error: "proxy down for other" });
+  expect(JSON.stringify(unknown)).not.toContain("Native");
+  expect(calls.fetch).toEqual([{ account: "shared" }]);
+});
+
+test("a rejected native login cannot rescue a mismatched override", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "Local",
+      discover: async () => [{ key: "c", input: { account: "c" } }],
+      fetch: async () => ({
+        status: "unavailable",
+        problem: { kind: "rejected", status: 401 },
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => {
+        throw new Error("A store down");
+      },
+    }),
+  );
+  const [entry] = await registry.listReports();
+  expect(entry?.id).toBe("local:a");
+  expect(entry?.report).toEqual({ status: "error", error: "A store down" });
+});
+
+test("an unknown identity keeps its own error and last successful snapshot", async () => {
+  let now = 1000;
+  let available = true;
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "Local",
+      discover: async () => [{ key: "c", input: { account: "c" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "native", label: "Native", usedPct: 7 }],
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () =>
+        available
+          ? { status: "available", windows: [{ id: "override", label: "Override", usedPct: 42 }] }
+          : { status: "error", error: "A store down" },
+    }),
+  );
+  const [success] = await registry.listReports();
+  if (success?.report.status !== "available") throw new Error("Expected override usage");
+  now = 2000;
+  available = false;
+  const [failure] = await registry.listReports({ forceRefresh: true });
+  expect(failure?.report).toEqual({ status: "error", error: "A store down" });
+  expect(failure?.lastSuccessful).toEqual({
+    fetchedAt: success?.successfulAt,
+    report: success?.report,
+  });
+});
+
+test("an opted-out takeover makes zero native calls while a model session is active", async () => {
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const sessions = new Map([["muse-agent", { provider: "muse", env: {}, sessionKey: "one" }]]);
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: (id) => sessions.has(id),
+    usageSession: (id) => sessions.get(id) ?? null,
+  });
+  registry.register(countedNative("muse", [{ key: "local-user", usedPct: 7 }], calls));
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["muse"],
+      skipNativeFallback: true,
+      discover: async () => [{ key: "cpa-a", input: { account: "cpa-a" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "override", label: "Override", usedPct: 42 }],
+      }),
+    }),
+  );
+  const global = await registry.listReports();
+  expect(global.map((entry) => entry.id)).toEqual(["muse:cpa-a"]);
+  expect(global[0]).toMatchObject({ sourceId: "muse", sourceLabel: "muse" });
+  const agent = await registry.listReports({ agentId: "muse-agent" });
+  expect(agent.map((entry) => entry.id)).toEqual(["muse:cpa-a"]);
+  // Global and session discovery never touched the native source, so no
+  // native fetch could start a host either.
+  expect(calls).toEqual({ discover: 0, fetch: [] });
+});
+
+test("an opted-out takeover failure reports its own error, never native values", async () => {
+  const warnings: unknown[][] = [];
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, {
+    warn: (...args: unknown[]) => {
+      warnings.push(args);
+    },
+  });
+  registry.register(countedNative("muse", [{ key: "local-user", usedPct: 7 }], calls));
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["muse"],
+      skipNativeFallback: true,
+      discover: async () => [{ key: "cpa-a", input: { account: "cpa-a" } }],
+      fetch: async () => {
+        throw new Error("proxy down");
+      },
+    }),
+  );
+  const [entry] = await registry.listReports();
+  expect(entry?.id).toBe("muse:cpa-a");
+  expect(entry?.report).toEqual({ status: "error", error: "proxy down" });
+  expect(entry?.loginErrors).toHaveLength(1);
+  expect(calls).toEqual({ discover: 0, fetch: [] });
+  expect(
+    warnings.some(
+      ([meta, message]) =>
+        (meta as { target?: string }).target === "muse" &&
+        message === "Usage source takeover failed; native fallback disabled",
+    ),
+  ).toBe(false);
+});
+
+test("an opted-out discovery failure keeps previous winner cards, never native cards", async () => {
+  const warnings: unknown[][] = [];
+  const calls = { discover: 0, fetch: [] as unknown[] };
+  let discoveryFails = false;
+  let fetchFails = false;
+  const registry = new UsageSourceRegistry(Date.now, 300_000, {
+    warn: (...args: unknown[]) => {
+      warnings.push(args);
+    },
+  });
+  registry.register(countedNative("muse", [{ key: "local-user", usedPct: 7 }], calls));
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["muse"],
+      skipNativeFallback: true,
+      discover: async () => {
+        if (discoveryFails) throw new Error("proxy store unreadable");
+        return [{ key: "cpa-a", input: { account: "cpa-a" } }];
+      },
+      fetch: async () => {
+        if (fetchFails) throw new Error("proxy down");
+        return {
+          status: "available",
+          windows: [{ id: "override", label: "Override", usedPct: 42 }],
+        };
+      },
+    }),
+  );
+  const [success] = await registry.listReports();
+  if (success?.report.status !== "available") throw new Error("Expected override usage");
+  discoveryFails = true;
+  fetchFails = true;
+  const [stale] = await registry.listReports({ forceRefresh: true });
+  // The winner's own previous card stays (with its last success and age);
+  // no native card returns for the owned provider.
+  expect(stale?.id).toBe("muse:cpa-a");
+  expect(stale?.report).toEqual({ status: "error", error: "proxy down" });
+  expect(stale?.lastSuccessful?.report).toEqual(success?.report);
+  expect(calls).toEqual({ discover: 0, fetch: [] });
+  expect(
+    warnings.some(
+      ([meta, message]) =>
+        (meta as { target?: string }).target === "muse" &&
+        message === "Usage source takeover failed; native fallback disabled",
+    ),
+  ).toBe(true);
+});
+
+test("unregistering the winner restores native cards without leftovers", async () => {
+  const registry = new UsageSourceRegistry();
+  const override = () =>
+    nativeSource({
+      id: "cliproxy",
+      label: "CLIProxy",
+      replaces: ["codex"],
+      discover: async () => [{ key: "shared", input: { origin: "override" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "session", label: "Override", usedPct: 42 }],
+      }),
+    });
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: { origin: "builtin" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "builtin", label: "Builtin", usedPct: 11 }],
+      }),
+    }),
+  );
+  registry.register(override());
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["codex:shared"]);
+  registry.unregister("cliproxy");
+  const native = await registry.listReports();
+  expect(native.map((entry) => entry.id)).toEqual(["codex:shared"]);
+  if (native[0]?.report.status !== "available") throw new Error("Expected built-in usage");
+  expect(native[0]?.report.windows).toEqual([{ id: "builtin", label: "Builtin", usedPct: 11 }]);
+  expect(native[0]?.lastSuccessful).toBeUndefined();
+  registry.register(override());
+  const taken = await registry.listReports();
+  expect(taken.map((entry) => entry.id)).toEqual(["codex:shared"]);
+  if (taken[0]?.report.status !== "available") throw new Error("Expected override usage");
+  expect(taken[0]?.report.windows).toEqual([{ id: "session", label: "Override", usedPct: 42 }]);
+  registry.disable("cliproxy");
+  const disabled = await registry.listReports();
+  expect(disabled.map((entry) => entry.id)).toEqual(["codex:shared"]);
+  expect(disabled[0]?.report.windows).toEqual([{ id: "builtin", label: "Builtin", usedPct: 11 }]);
+  registry.enable("cliproxy");
+  const reenabled = await registry.listReports();
+  expect(reenabled.map((entry) => entry.id)).toEqual(["codex:shared"]);
+  expect(reenabled[0]?.report.windows).toEqual([
+    { id: "session", label: "Override", usedPct: 42 },
+  ]);
 });

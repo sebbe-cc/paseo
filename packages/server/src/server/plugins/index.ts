@@ -590,6 +590,7 @@ export class PluginService {
           label: source.label,
           icon: source.icon,
           replaces: source.replaces,
+          skipNativeFallback: source.skipNativeFallback,
           discover: async (scope) => {
             const result = await this.runtime.discoverUsage(pluginId, source.id, scope);
             if (!Array.isArray(result))
