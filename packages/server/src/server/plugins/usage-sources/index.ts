@@ -82,6 +82,18 @@ export interface UsageSourceInvalidated {
   reportIds: string[];
 }
 
+/**
+ * Liveness proof for one in-flight or cached card: the shared structural
+ * generation plus the per-source event epoch of every source this card
+ * actually depends on (its owner, the taken-over id, and an allowed
+ * fallback). A retire of any watched source — or any structural mutation —
+ * moves the token, and the card must then publish nothing.
+ */
+interface LivenessToken {
+  generation: number;
+  epochs: Array<{ id: string; epoch: number }>;
+}
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
@@ -95,16 +107,26 @@ export class UsageSourceRegistry {
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
   // Pending values are nullable: a fetch retired while in flight resolves
   // null and is dropped by listReports before any callback or return.
-  private readonly pending = new Map<string, Promise<UsageReportEntry | null>>();
+  private readonly pending = new Map<
+    string,
+    Promise<{ entry: UsageReportEntry; token: LivenessToken } | null>
+  >();
   /**
    * Bumped on every override/liveness mutation (register, unregister,
-   * disable, enable) and every freshness invalidation. In-flight fetches
-   * capture it and refuse to publish once it moved: a retired request must
-   * never start a native host, overwrite an event's newer data, or publish
-   * a ghost card. One shared counter for the override guard (pa-91k7j) and
-   * the event guard (pa-l1bv4).
+   * disable, enable). In-flight fetches capture it and refuse to publish
+   * once it moved: a retired request must never start a native host,
+   * overwrite an event's newer data, or publish a ghost card.
    */
   private generation = 0;
+  /**
+   * Per-source event epoch, bumped only by an authoritative
+   * `invalidateSource` for that source. A card watches exactly the sources
+   * it depends on (owner, taken-over id, allowed fallback), so an event for
+   * one source retires only that source's cards — never an unrelated source's
+   * pending fetch, and never an opted-out override's fetch via a
+   * non-authoritative native event.
+   */
+  private readonly sourceEpoch = new Map<string, number>();
 
   private readonly invalidatedListeners = new Set<(event: UsageSourceInvalidated) => void>();
 
@@ -131,18 +153,36 @@ export class UsageSourceRegistry {
    * cards re-read instead of serving the evicted entries.
    *
    * Ownership follows the actual source object, never an id prefix: a card
-   * a source took over (or one not yet discovered) keeps its own id shape.
-   * Last-good snapshots are deliberately kept — a freshness invalidation
-   * must not destroy the same identity's valid history, or the next read
-   * error would lose an already proven observation. Listeners fire for
-   * every registered source, even with zero known cards, so a first event
-   * after an empty discovery still triggers a rediscovery.
+   * a source took over (or one not yet discovered) keeps its own id shape,
+   * and a card served from an allowed fallback also depends on that
+   * fallback source's events. Last-good snapshots are deliberately kept — a
+   * freshness invalidation must not destroy the same identity's valid
+   * history, or the next read error would lose an already proven
+   * observation. Listeners fire for every registered source, even with zero
+   * known cards, so a first event after an empty discovery still triggers a
+   * rediscovery.
+   *
+   * An event for a taken-over source whose winner opted out of the native
+   * fallback (`skipNativeFallback`) is non-authoritative: it retires and
+   * evicts nothing, but listeners still fire (possibly with an empty
+   * inventory) so clients can rediscover.
    */
   invalidateSource(sourceId: string): string[] {
-    this.generation++;
     const ownedIds = [...this.known]
-      .filter(([, report]) => report.source.id === sourceId)
+      .filter(
+        ([, report]) => report.source.id === sourceId || report.fallback?.source.id === sourceId,
+      )
       .map(([id]) => id);
+    const winnerId = this.activeOverrides.get(sourceId);
+    const winner = winnerId !== undefined ? this.sources.get(winnerId) : undefined;
+    if (winner !== undefined && winner.skipNativeFallback === true) {
+      if (this.sources.has(sourceId)) {
+        const event = { sourceId, reportIds: [...ownedIds] };
+        for (const listener of this.invalidatedListeners) listener(event);
+      }
+      return ownedIds;
+    }
+    this.sourceEpoch.set(sourceId, this.epochOf(sourceId) + 1);
     const owned = new Set(ownedIds);
     const ownedKey = (key: string): boolean => {
       for (const id of owned) if (key === id || key.startsWith(`${id}:`)) return true;
@@ -155,6 +195,47 @@ export class UsageSourceRegistry {
       for (const listener of this.invalidatedListeners) listener(event);
     }
     return ownedIds;
+  }
+
+  private epochOf(id: string): number {
+    return this.sourceEpoch.get(id) ?? 0;
+  }
+
+  /**
+   * Source ids whose events retire this card: its owner, the taken-over id
+   * it publishes under, and an allowed fallback source. Anything else —
+   * an unrelated source, or a non-authoritative native source under
+   * opt-out — never appears here and can never retire this card.
+   */
+  private watchedSourceIds(known: KnownReport): string[] {
+    const ids = [known.source.id];
+    if (known.overriddenId !== undefined) ids.push(known.overriddenId);
+    const fallback = known.fallback?.source.id;
+    if (fallback !== undefined) ids.push(fallback);
+    return [...new Set(ids)];
+  }
+
+  private captureToken(known: KnownReport): LivenessToken {
+    return {
+      generation: this.generation,
+      epochs: this.watchedSourceIds(known).map((id) => ({ id, epoch: this.epochOf(id) })),
+    };
+  }
+
+  /**
+   * False once an override, disable, unregister, reload, opt-out, or
+   * authoritative event retired this card. Time/expiry checks (pa-vtgw9)
+   * apply separately alongside this liveness gate.
+   */
+  private tokenLive(token: LivenessToken, known: KnownReport): boolean {
+    if (this.generation !== token.generation) return false;
+    if (this.sources.get(known.source.id) !== known.source) return false;
+    const watched = this.watchedSourceIds(known);
+    if (watched.length !== token.epochs.length) return false;
+    return watched.every((id, index) => {
+      const snap = token.epochs[index]!;
+      return snap.id === id && this.epochOf(id) === snap.epoch;
+    });
   }
 
   register(source: UsageSource): void {
@@ -292,20 +373,35 @@ export class UsageSourceRegistry {
     // A fetch retired while in flight resolves null and is dropped here:
     // retired entries reach neither the per-report callback nor the returned
     // list, so a reload, disable, opt-out, or event can never publish a
-    // ghost card or an older quota.
+    // ghost card or an older quota. The same liveness token travels with a
+    // warm cache hit and with every finished result, and is rechecked just
+    // before the callback and again before the final return: a retire
+    // between a fast card's completion and a slow card's completion still
+    // filters the fast card out of the returned list (a callback that fired
+    // before the retire stays allowed).
     return Promise.all(
       [...new Set(ids)].flatMap((id) => {
         const known = reports.get(id);
         if (!known) return [];
         return [
-          this.fetchId(id, known, options.forceRefresh).then((entry) => {
-            if (entry === null) return null;
-            options.onReport?.(entry);
-            return entry;
+          this.fetchId(id, known, options.forceRefresh).then((result) => {
+            if (result === null) return null;
+            if (!this.tokenLive(result.token, known)) return null;
+            options.onReport?.(result.entry);
+            return { entry: result.entry, token: result.token, known };
           }),
         ];
       }),
-    ).then((entries) => entries.filter((entry): entry is UsageReportEntry => entry !== null));
+    ).then((results) =>
+      results
+        .filter(
+          (
+            result,
+          ): result is { entry: UsageReportEntry; token: LivenessToken; known: KnownReport } =>
+            result !== null && this.tokenLive(result.token, result.known),
+        )
+        .map((result) => result.entry),
+    );
   }
 
   private pruneAgents(): void {
@@ -623,66 +719,70 @@ export class UsageSourceRegistry {
     id: string,
     known: KnownReport,
     forceRefresh = false,
-  ): Promise<UsageReportEntry | null> {
+  ): Promise<{ entry: UsageReportEntry; token: LivenessToken } | null> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
+    const token = this.captureToken(known);
     const cached = this.cache.get(cacheKey);
-    if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs)
-      return Promise.resolve(cached.entry);
+    if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs) {
+      // A retire (disable, reload, opt-out, event) can land synchronously
+      // between this warm hit and the awaiting caller, so the token is
+      // rechecked in a later microtask, just before delivery.
+      const entry = cached.entry;
+      return Promise.resolve().then(() => (this.tokenLive(token, known) ? { entry, token } : null));
+    }
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
-    const generation = this.generation;
-    // False once an override, disable, unregister, reload, opt-out, or event
-    // invalidation retired this request. A retired request never starts
-    // native fallback and never publishes: after unregister/disable or a new
-    // opt-out winner, the old primary's quota must not start a native host
-    // or reappear as a ghost card — and after an event, its older quota must
-    // not overwrite the event's newer data. One shared counter retires both.
-    const isLive = () =>
-      this.generation === generation && this.sources.get(known.source.id) === known.source;
-    const request: Promise<UsageReportEntry | null> = (async () => {
-      const fetchedAt = new Date(this.now()).toISOString();
-      const outcome = await this.fetchWithFallback(known, isLive);
-      if (!isLive()) {
-        // Retired while in flight: publish nothing anywhere — no callback,
-        // no return, no cache, no last-success. A freshness retire converges
-        // through the re-read the invalidation's push already triggered; an
-        // override retire has no live card left to serve.
-        return null;
-      }
-      const completedAt = new Date(this.now()).toISOString();
-      // Taken-over cards keep the native identity: same id prefix, label and
-      // icon as the built-in source they replace.
-      const native = known.overriddenId ? this.sources.get(known.overriddenId) : undefined;
-      const entry: UsageReportEntry = {
-        id,
-        sourceId: native?.id ?? known.source.id,
-        sourceLabel: native?.label ?? known.source.label,
-        icon: native?.icon ?? known.source.icon,
-        account: { label: known.label },
-        fetchedAt,
-        ...outcome,
-      };
-      if (entry.report.status === "available") {
-        entry.successfulAt = completedAt;
-      } else {
-        entry.lastSuccessful = this.successful.get(cacheKey);
-      }
-      if (
-        isLive() &&
-        this.sources.get(known.source.id) === known.source &&
-        this.activeCacheKeys().has(cacheKey)
-      ) {
-        if (entry.report.status === "available") {
-          this.successful.set(cacheKey, {
-            fetchedAt: completedAt,
-            report: entry.report,
-          });
+    // False once an override, disable, unregister, reload, opt-out, or
+    // authoritative event invalidation retired this request. A retired
+    // request never starts native fallback and never publishes: after
+    // unregister/disable or a new opt-out winner, the old primary's quota
+    // must not start a native host or reappear as a ghost card — and after
+    // an event, its older quota must not overwrite the event's newer data.
+    // The watched-source epochs scope this to the card's actual
+    // owner/override/allowed-fallback relation; unrelated sources keep
+    // their own fetches.
+    const isLive = () => this.tokenLive(token, known);
+    const request: Promise<{ entry: UsageReportEntry; token: LivenessToken } | null> =
+      (async () => {
+        const fetchedAt = new Date(this.now()).toISOString();
+        const outcome = await this.fetchWithFallback(known, isLive);
+        if (!isLive()) {
+          // Retired while in flight: publish nothing anywhere — no callback,
+          // no return, no cache, no last-success. A freshness retire converges
+          // through the re-read the invalidation's push already triggered; an
+          // override retire has no live card left to serve.
+          return null;
         }
-        this.writeCache(cacheKey, entry);
-      }
-      return entry;
-    })();
+        const completedAt = new Date(this.now()).toISOString();
+        // Taken-over cards keep the native identity: same id prefix, label and
+        // icon as the built-in source they replace.
+        const native = known.overriddenId ? this.sources.get(known.overriddenId) : undefined;
+        const entry: UsageReportEntry = {
+          id,
+          sourceId: native?.id ?? known.source.id,
+          sourceLabel: native?.label ?? known.source.label,
+          icon: native?.icon ?? known.source.icon,
+          account: { label: known.label },
+          fetchedAt,
+          ...outcome,
+        };
+        if (entry.report.status === "available") {
+          entry.successfulAt = completedAt;
+        } else {
+          entry.lastSuccessful = this.successful.get(cacheKey);
+        }
+        if (isLive() && this.activeCacheKeys().has(cacheKey)) {
+          if (entry.report.status === "available") {
+            this.successful.set(cacheKey, {
+              fetchedAt: completedAt,
+              report: entry.report,
+            });
+          }
+          this.writeCache(cacheKey, entry);
+        }
+        return { entry, token };
+      })();
     this.pending.set(cacheKey, request);
     void request.finally(() => {
       if (this.pending.get(cacheKey) === request) this.pending.delete(cacheKey);

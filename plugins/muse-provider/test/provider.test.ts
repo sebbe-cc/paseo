@@ -1436,7 +1436,7 @@ for (const usage of [
     expect(account).toEqual({
       key: expect.stringMatching(/^[a-f0-9]{64}$/),
       label: "Muse Code",
-      input: { account: account.key },
+      input: { account: account.key, generation: expect.any(Number) },
     });
     const report = await h.usageSource.fetch(account.input);
     if ("usage" in usage)
@@ -1576,26 +1576,145 @@ test("a replacement host in the same home never inherits the closed host's quota
   });
 });
 
-test("concurrent hosts in one home serve the newest live observation, never a closed host's", async () => {
+test("a deferred read after detach never serves the retired host's result", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/deferred" } };
+  let releaseA!: (value: { usage?: typeof changedUsage }) => void;
+  const gateA = new Promise<{ usage?: typeof changedUsage }>((resolve) => {
+    releaseA = resolve;
+  });
+  const hostA = usage.attach("session-a", launch, () => gateA);
+  // A silent second host stays live in the same home.
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  // A's read is in flight when A detaches; its late result is retired.
+  const pending = usage.registration().fetch({
+    account: hostA.account,
+    generation: hostA.generation,
+  });
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  usage.detach("session-a");
+  expect(changed).toEqual([hostA.account]);
+  releaseA({ usage: { ...changedUsage, observedAtMs: 1700000010000 } });
+  const report = await pending;
+  expect(report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  // The retired result was dropped, never stored: A's generation left no snapshot.
+  expect(usage.snapshot(hostA.account)).toBeUndefined();
+  // B's silent context is honestly unavailable too — never A's quota.
+  const reportB = await usage.registration().fetch({
+    account: hostB.account,
+    generation: hostB.generation,
+  });
+  expect(reportB).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+});
+
+test("observations from generations never attached are rejected", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/forged" } };
+  const attached = usage.attach("session-a", launch, async () => ({}));
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
+  expect(usage.observe(attached.account, attached.generation + 100, fresh)).toBe(false);
+  expect(usage.observe(attached.account, 0, fresh)).toBe(false);
+  expect(usage.snapshot(attached.account)).toBeUndefined();
+  expect(changed).toEqual([]);
+  // The genuinely attached generation still accepts.
+  expect(usage.observe(attached.account, attached.generation, fresh)).toBe(true);
+  expect(changed).toEqual([attached.account]);
+});
+
+test("same-home replacement gets a fresh registry identity with no inherited history", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/registry-turnover" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  registry.register(usage.registration());
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  // Host A lives and reports; the global card warms.
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, changedUsage)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  const cardId = warmed!.id;
+  // A closes, B opens silently in the same home: attach, observe and detach
+  // each push, so the registry re-reads instead of replaying the warm entry.
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  expect(changed).toHaveLength(4);
+  // The global re-read discovers B's distinct context: honestly unavailable,
+  // with no warm hit and no inherited last-success from A.
+  const [current] = await registry.listReports();
+  expect(current?.id).toBe(cardId);
+  expect(current?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(current?.lastSuccessful).toBeUndefined();
+});
+
+test("concurrent hosts in one home never merge: each context serves only its own quota", async () => {
   const { Usage } = await import("../server/usage.js");
   const usage = new Usage();
   const launch = { command: "muse", args: [], env: { HOME: "/usage/pool-home" } };
-  const old = { ...changedUsage, observedAtMs: 1700000005000 };
-  const hostA = usage.attach("session-a", launch, async () => ({ usage: old }));
-  const hostB = usage.attach("session-b", launch, async () => ({}));
+  const quotaA = {
+    ...changedUsage,
+    observedAtMs: 1700000005000,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const quotaB = {
+    ...changedUsage,
+    observedAtMs: 1700000010000,
+    window: { ...changedUsage.window, usedPercent: 90 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({ usage: quotaA }));
+  const hostB = usage.attach("session-b", launch, async () => ({ usage: quotaB }));
   expect(hostB.account).toBe(hostA.account);
-  const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
-  // The event arrives on B's host connection while A still serves old values.
-  expect(usage.observe(hostB.account, hostB.generation, fresh)).toBe(true);
-  const live = await usage.registration().fetch({ account: hostA.account });
-  expect(live).toMatchObject({ status: "available", planLabel: "Pro" });
-  if (live.status !== "available") throw new Error("Expected an available pooled report");
-  expect(live.windows[0]).toMatchObject({ usedPct: 81 });
-  // Closing A must not disturb B's live quota, nor resurrect A's older one.
+  expect(hostB.generation).not.toBe(hostA.generation);
+  // Simultaneous hosts with different quotas: the account-wide fetch fails
+  // closed instead of merging unidentified hosts by timestamp.
+  const ambiguous = await usage.registration().fetch({ account: hostA.account });
+  expect(ambiguous).toEqual({
+    status: "unavailable",
+    problem: {
+      kind: "no_quota",
+      detail: "Multiple live Muse sessions share this config home; quota attribution is ambiguous",
+    },
+  });
+  // Each pinned host context serves exactly its own quota.
+  const reportA = await usage.registration().fetch({
+    account: hostA.account,
+    generation: hostA.generation,
+  });
+  if (reportA.status !== "available") throw new Error("Expected A's own quota");
+  expect(reportA.windows[0]).toMatchObject({ usedPct: 10 });
+  const reportB = await usage.registration().fetch({
+    account: hostB.account,
+    generation: hostB.generation,
+  });
+  if (reportB.status !== "available") throw new Error("Expected B's own quota");
+  expect(reportB.windows[0]).toMatchObject({ usedPct: 90 });
+  // Closing A resolves the ambiguity: the account-wide fetch serves B alone,
+  // never A's older quota.
   usage.detach("session-a");
   const afterDetach = await usage.registration().fetch({ account: hostB.account });
   if (afterDetach.status !== "available") throw new Error("Expected B's quota to survive A");
-  expect(afterDetach.windows[0]).toMatchObject({ usedPct: 81 });
+  expect(afterDetach.windows[0]).toMatchObject({ usedPct: 90 });
 });
 
 test("a cold account with no observation is unavailable without starting a host", async () => {
@@ -1611,22 +1730,29 @@ test("a cold account with no observation is unavailable without starting a host"
   });
 });
 
-test("detach notifies only on the live-to-stale transition", async () => {
+test("attach and detach invalidate whenever the shown context may change", async () => {
   const { Usage } = await import("../server/usage.js");
   const usage = new Usage();
   const launch = { command: "muse", args: [], env: { HOME: "/usage/notify" } };
-  usage.attach("session-a", launch, async () => ({}));
-  usage.attach("session-b", launch, async () => ({}));
   const changed: string[] = [];
   usage.onChanged((account) => changed.push(account));
-  // One host stays live: the card content is unchanged, no push needed.
+  // A new host can change the served context (live, or ambiguous with the
+  // hosts already there), so every attach invalidates.
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(changed).toEqual([hostA.account, hostB.account]);
+  changed.length = 0;
+  // Detaching the host that served the shown values changes the card even
+  // while another host stays live: the remainder may be silent, ambiguous,
+  // or a different quota.
   usage.detach("session-a");
-  expect(changed).toEqual([]);
+  expect(changed).toEqual([hostA.account]);
   // The last host closes: the card turns stale, so clients must re-read.
   usage.detach("session-b");
-  expect(changed).toHaveLength(1);
+  expect(changed).toEqual([hostA.account, hostB.account]);
+  // Unknown ids stay silent.
   usage.detach("session-not-attached");
-  expect(changed).toHaveLength(1);
+  expect(changed).toHaveLength(2);
 });
 
 test("a newer event wins over an older read that resolves later; a failed reader keeps the snapshot", async () => {

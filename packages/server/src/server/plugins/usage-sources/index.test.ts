@@ -1792,3 +1792,206 @@ test("replacing a source keeps invalidation routed to the new owner's cards", as
   const refetched = await registry.listReports({ reportIds: ["muse:a"] });
   expect(refetched[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
 });
+
+test("an event for one source never retires another source's pending fetch", async () => {
+  const registry = new UsageSourceRegistry();
+  let releaseB!: (value: unknown) => void;
+  const gateB = new Promise<unknown>((resolve) => {
+    releaseB = resolve;
+  });
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "b", input: { account: "b" } }],
+      fetch: async () => {
+        await gateB;
+        return { status: "available", windows: [{ id: "w", label: "codex-b" }] };
+      },
+    }),
+  );
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => ({ status: "available", windows: [{ id: "w", label: "muse-a" }] }),
+    }),
+  );
+  const reported: string[] = [];
+  const pending = registry.listReports({ onReport: (entry) => reported.push(entry.id) });
+  // Flush so both fetches are in flight and the fast one has delivered.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(reported).toEqual(["muse:a"]);
+  // An unrelated Muse event retires only Muse's own card — dropping even its
+  // already-delivered callback value from the final return — while the
+  // Codex fetch stays live and publishes.
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+  releaseB(undefined);
+  const entries = await pending;
+  expect(entries.map((entry) => entry.id)).toEqual(["codex:b"]);
+  expect(reported).toEqual(["muse:a", "codex:b"]);
+  expect(entries[0]?.report).toMatchObject({ windows: [{ label: "codex-b" }] });
+});
+
+test("a non-authoritative native event under opt-out retires no override fetch", async () => {
+  const nativeCalls: unknown[] = [];
+  let releasePrimary!: (value: unknown) => void;
+  const primaryGate = new Promise<unknown>((resolve) => {
+    releasePrimary = resolve;
+  });
+  const registry = new UsageSourceRegistry();
+  let primaryStarted = false;
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "local",
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "shared" } }],
+      fetch: async (input) => {
+        nativeCalls.push(input);
+        return { status: "available", windows: [{ id: "native", label: "Native", usedPct: 11 }] };
+      },
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      skipNativeFallback: true,
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "a" } }],
+      fetch: async () => {
+        primaryStarted = true;
+        await primaryGate;
+        return {
+          status: "available",
+          windows: [{ id: "override", label: "Override", usedPct: 42 }],
+        };
+      },
+    }),
+  );
+  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
+  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
+  try {
+    const reported: string[] = [];
+    const pending = registry.listReports({ onReport: (entry) => reported.push(entry.id) });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(primaryStarted).toBe(true);
+    // The native event owns no published card and must not retire the
+    // override's in-flight fetch; listeners still fire with an empty
+    // inventory push.
+    expect(registry.invalidateSource("local")).toEqual([]);
+    expect(invalidated).toEqual([{ sourceId: "local", reportIds: [] }]);
+    releasePrimary(undefined);
+    const entries = await pending;
+    expect(entries.map((entry) => entry.id)).toEqual(["local:shared"]);
+    expect(reported).toEqual(["local:shared"]);
+    expect(entries[0]?.report).toMatchObject({ windows: [{ label: "Override", usedPct: 42 }] });
+    expect(nativeCalls).toEqual([]);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("an allowed fallback source's change evicts cards served from that fallback", async () => {
+  let fallbackLabel = "fallback-v1";
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "local",
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "shared" } }],
+      fetch: async () => ({
+        status: "available",
+        accountIdentity: "test:a",
+        windows: [{ id: "native", label: fallbackLabel }],
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "a" } }],
+      fetch: async () => ({ status: "error", error: "proxy down" }),
+    }),
+  );
+  const first = await registry.listReports();
+  expect(first.map((entry) => entry.id)).toEqual(["local:shared"]);
+  expect(first[0]?.report).toMatchObject({ windows: [{ label: "fallback-v1" }] });
+  // The fallback source's own change retires the override-owned card that
+  // serves fallback values, so the next read serves the new quota.
+  fallbackLabel = "fallback-v2";
+  expect(registry.invalidateSource("local")).toEqual(["local:shared"]);
+  const second = await registry.listReports({ reportIds: ["local:shared"] });
+  expect(second[0]?.report).toMatchObject({ windows: [{ label: "fallback-v2" }] });
+});
+
+test("a warm cache hit publishes nothing after a synchronous disable", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => ({ status: "available", windows: [{ id: "w", label: "cached" }] }),
+    }),
+  );
+  expect((await registry.listReports())[0]?.report).toMatchObject({
+    windows: [{ label: "cached" }],
+  });
+  const reported: string[] = [];
+  const pending = registry.listReports({
+    reportIds: ["muse:a"],
+    onReport: (entry) => reported.push(entry.id),
+  });
+  // Retire synchronously, before the warm hit's delivery microtask runs.
+  registry.disable("muse");
+  expect(await pending).toEqual([]);
+  expect(reported).toEqual([]);
+});
+
+test("a card retired between a fast and a slow fetch leaves the final return", async () => {
+  let releaseSlow!: () => void;
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    source({
+      id: "fast",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => ({ status: "available", windows: [{ id: "w", label: "fast" }] }),
+    }),
+  );
+  // Warm the fast card before the slow source exists, so the retire below
+  // exercises a finished result without ever stalling the warm-up.
+  expect((await registry.listReports())[0]?.report).toMatchObject({
+    windows: [{ label: "fast" }],
+  });
+  registry.register(
+    source({
+      id: "slow",
+      discover: async () => [{ key: "b", input: { account: "b" } }],
+      fetch: async () => {
+        await slowGate;
+        return { status: "available", windows: [{ id: "w", label: "slow" }] };
+      },
+    }),
+  );
+  const reported: string[] = [];
+  const pending = registry.listReports({ onReport: (entry) => reported.push(entry.id) });
+  // Flush macrotasks so the fast card's whole delivery chain — including its
+  // callback — completes while still live; only the slow fetch stays open.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(reported).toEqual(["fast:a"]);
+  // Retire only the fast card while waiting for the slow one: its callback
+  // was allowed, but the final return must filter it out while the slow
+  // card still publishes.
+  expect(registry.invalidateSource("fast")).toEqual(["fast:a"]);
+  releaseSlow();
+  const entries = await pending;
+  expect(entries.map((entry) => entry.id)).toEqual(["slow:b"]);
+  expect(reported).toEqual(["fast:a", "slow:b"]);
+});
