@@ -302,8 +302,8 @@ test("a plugin takeover replaces the codex card and falls back when it throws", 
     `import { z } from 'zod';
 export default function contribute(server) {
   server.registerUsageSource({ id: 'codex', label: 'Codex', input: z.object({}),
-    discover: async () => [{ key: 'shared', input: {} }],
-    fetch: async () => ({ status: 'available', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] }),
+    discover: async () => [{ key: 'shared', identity: 'test:shared', input: {} }],
+    fetch: async () => ({ status: 'available', accountIdentity: 'test:shared', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] }),
   });
   return () => {};
 }`,
@@ -323,7 +323,7 @@ export default function contribute(server) {
   server.registerUsageSource({
     id: 'takeover', label: 'Takeover', input: z.object({ fail: z.boolean() }),
     replaces: ['codex'],
-    discover: async () => [{ key: 'shared', input: { fail: existsSync(flag) } }],
+    discover: async () => [{ key: 'shared', identity: 'test:shared', input: { fail: existsSync(flag) } }],
     fetch: async (input) => {
       if (input.fail) throw new Error('proxy down');
       return { status: 'available', windows: [{ id: 'session', label: 'Override', usedPct: 42 }] };
