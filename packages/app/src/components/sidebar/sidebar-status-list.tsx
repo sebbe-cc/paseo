@@ -80,6 +80,7 @@ import {
   type SidebarWorkspaceTrailing,
 } from "@/components/sidebar/workspace-trailing";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
+import type { SidebarGroupMode } from "@/stores/sidebar-view-store";
 import {
   SidebarWorkspaceContextMenu,
   SidebarWorkspaceMenu,
@@ -137,6 +138,7 @@ function statusWorkspaceKeyExtractor(workspace: SidebarWorkspaceEntry): string {
 
 interface StatusWorkspaceListProps {
   groups: SidebarWorkspaceGroup[];
+  groupMode: SidebarGroupMode;
   pinnedWorkspaces: SidebarWorkspaceEntry[];
   projectIconByProjectViewKey: ReadonlyMap<string, string | null>;
   shortcutIndexByWorkspaceKey: Map<string, number>;
@@ -146,6 +148,8 @@ interface StatusWorkspaceListProps {
   supportsPinningByServerId: ReadonlyMap<string, boolean>;
   onToggleWorkspacePin: ToggleSidebarWorkspacePin;
   onPinnedWorkspaceReorder: (workspaces: SidebarWorkspaceEntry[]) => void;
+  /** Label grouping only: drag-to-reorder the label sections, like the project headers. */
+  onGroupDragEnd?: (groups: SidebarWorkspaceGroup[]) => void;
   listHeaderComponent?: ReactNode;
   /** Swaps the group list for the label filter's empty state. Never the header above it. */
   sidebarFilterEmpty?: boolean;
@@ -155,6 +159,7 @@ interface StatusWorkspaceListProps {
 
 export function SidebarStatusWorkspaceList({
   groups,
+  groupMode,
   pinnedWorkspaces,
   projectIconByProjectViewKey,
   shortcutIndexByWorkspaceKey,
@@ -164,6 +169,7 @@ export function SidebarStatusWorkspaceList({
   supportsPinningByServerId,
   onToggleWorkspacePin,
   onPinnedWorkspaceReorder,
+  onGroupDragEnd,
   listHeaderComponent,
   sidebarFilterEmpty = false,
   parentGestureRef,
@@ -263,6 +269,7 @@ export function SidebarStatusWorkspaceList({
       ) : (
         <StatusGroupList
           groups={groups}
+          groupMode={groupMode}
           collapsedWorkspaceGroupKeys={collapsedWorkspaceGroupKeys}
           projectIconByProjectViewKey={projectIconByProjectViewKey}
           shortcutIndex={statusShortcutIndex}
@@ -271,6 +278,9 @@ export function SidebarStatusWorkspaceList({
           hostBadgeByServerId={hostBadgeByServerId}
           supportsPinningByServerId={supportsPinningByServerId}
           onToggleWorkspacePin={onToggleWorkspacePin}
+          onGroupDragEnd={onGroupDragEnd}
+          parentGestureRef={parentGestureRef}
+          dragGestureHostActive={dragGestureHostActive}
         />
       )}
     </>
@@ -301,8 +311,18 @@ export function SidebarStatusWorkspaceList({
   );
 }
 
+function statusGroupKeyExtractor(group: SidebarWorkspaceGroup): string {
+  return group.key;
+}
+
+/** Unlabelled is the catch-all: it renders last and is never draggable. */
+function isFixedUnlabelledGroup(group: SidebarWorkspaceGroup): boolean {
+  return group.leading.kind === "label" && group.leading.name === null;
+}
+
 function StatusGroupList({
   groups,
+  groupMode,
   collapsedWorkspaceGroupKeys,
   projectIconByProjectViewKey,
   shortcutIndex,
@@ -311,8 +331,12 @@ function StatusGroupList({
   hostBadgeByServerId,
   supportsPinningByServerId,
   onToggleWorkspacePin,
+  onGroupDragEnd,
+  parentGestureRef,
+  dragGestureHostActive,
 }: {
   groups: SidebarWorkspaceGroup[];
+  groupMode: SidebarGroupMode;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
   projectIconByProjectViewKey: ReadonlyMap<string, string | null>;
   shortcutIndex: Map<string, number>;
@@ -321,25 +345,95 @@ function StatusGroupList({
   hostBadgeByServerId: ReadonlyMap<string, HostBadgeModel>;
   supportsPinningByServerId: ReadonlyMap<string, boolean>;
   onToggleWorkspacePin: ToggleSidebarWorkspacePin;
+  onGroupDragEnd?: (groups: SidebarWorkspaceGroup[]) => void;
+  parentGestureRef?: MutableRefObject<GestureType | undefined>;
+  dragGestureHostActive?: boolean;
 }) {
-  return (
-    <>
-      {groups.map((group) => (
-        <StatusGroupRows
-          key={group.key}
-          group={group}
-          collapsed={collapsedWorkspaceGroupKeys.has(group.key)}
-          projectIconByProjectViewKey={projectIconByProjectViewKey}
-          shortcutIndex={shortcutIndex}
-          showShortcutBadges={showShortcutBadges}
-          onWorkspacePress={onWorkspacePress}
-          hostBadgeByServerId={hostBadgeByServerId}
-          supportsPinningByServerId={supportsPinningByServerId}
-          onToggleWorkspacePin={onToggleWorkspacePin}
-        />
-      ))}
-    </>
+  const renderGroup = useCallback(
+    ({
+      item: group,
+      drag,
+      isActive,
+      dragHandleProps,
+    }: DraggableRenderItemInfo<SidebarWorkspaceGroup>) => (
+      <StatusGroupRows
+        group={group}
+        collapsed={collapsedWorkspaceGroupKeys.has(group.key)}
+        projectIconByProjectViewKey={projectIconByProjectViewKey}
+        shortcutIndex={shortcutIndex}
+        showShortcutBadges={showShortcutBadges}
+        onWorkspacePress={onWorkspacePress}
+        hostBadgeByServerId={hostBadgeByServerId}
+        supportsPinningByServerId={supportsPinningByServerId}
+        onToggleWorkspacePin={onToggleWorkspacePin}
+        drag={drag}
+        isDragging={isActive}
+        dragHandleProps={dragHandleProps}
+      />
+    ),
+    [
+      collapsedWorkspaceGroupKeys,
+      hostBadgeByServerId,
+      onToggleWorkspacePin,
+      onWorkspacePress,
+      projectIconByProjectViewKey,
+      shortcutIndex,
+      showShortcutBadges,
+      supportsPinningByServerId,
+    ],
   );
+  const renderStaticGroup = useCallback(
+    (group: SidebarWorkspaceGroup) => (
+      <StatusGroupRows
+        key={group.key}
+        group={group}
+        collapsed={collapsedWorkspaceGroupKeys.has(group.key)}
+        projectIconByProjectViewKey={projectIconByProjectViewKey}
+        shortcutIndex={shortcutIndex}
+        showShortcutBadges={showShortcutBadges}
+        onWorkspacePress={onWorkspacePress}
+        hostBadgeByServerId={hostBadgeByServerId}
+        supportsPinningByServerId={supportsPinningByServerId}
+        onToggleWorkspacePin={onToggleWorkspacePin}
+      />
+    ),
+    [
+      collapsedWorkspaceGroupKeys,
+      hostBadgeByServerId,
+      onToggleWorkspacePin,
+      onWorkspacePress,
+      projectIconByProjectViewKey,
+      shortcutIndex,
+      showShortcutBadges,
+      supportsPinningByServerId,
+    ],
+  );
+
+  // Label sections reorder like the project headers: same drag interaction, same persistence.
+  // Status buckets keep their fixed severity order, and Unlabelled keeps anchoring the end.
+  if (groupMode === "label" && onGroupDragEnd) {
+    const reorderable = groups.filter((group) => !isFixedUnlabelledGroup(group));
+    const fixed = groups.filter(isFixedUnlabelledGroup);
+    return (
+      <>
+        <DraggableList
+          testID="sidebar-label-group-list"
+          data={reorderable}
+          keyExtractor={statusGroupKeyExtractor}
+          renderItem={renderGroup}
+          onDragEnd={onGroupDragEnd}
+          scrollEnabled={false}
+          useDragHandle
+          nestable={platformIsNative}
+          simultaneousGestureRef={parentGestureRef}
+          gestureHostPresented={dragGestureHostActive}
+        />
+        {fixed.map(renderStaticGroup)}
+      </>
+    );
+  }
+
+  return <>{groups.map(renderStaticGroup)}</>;
 }
 
 const STATUS_GROUP_VISIBILITY = {
@@ -357,6 +451,9 @@ function StatusGroupRows({
   hostBadgeByServerId,
   supportsPinningByServerId,
   onToggleWorkspacePin,
+  drag,
+  isDragging,
+  dragHandleProps,
 }: {
   group: SidebarWorkspaceGroup;
   collapsed: boolean;
@@ -367,6 +464,10 @@ function StatusGroupRows({
   hostBadgeByServerId: ReadonlyMap<string, HostBadgeModel>;
   supportsPinningByServerId: ReadonlyMap<string, boolean>;
   onToggleWorkspacePin: ToggleSidebarWorkspacePin;
+  /** Label grouping only: drag-to-reorder wiring. Absent → not draggable. */
+  drag?: () => void;
+  isDragging?: boolean;
+  dragHandleProps?: DraggableListDragHandleProps;
 }) {
   const {
     visibleItems: visibleWorkspaces,
@@ -377,7 +478,14 @@ function StatusGroupRows({
 
   return (
     <View style={collapsed ? undefined : styles.statusGroupBlockExpanded}>
-      <StatusGroupHeader group={group} collapsed={collapsed} onWorkspacePress={onWorkspacePress} />
+      <StatusGroupHeader
+        group={group}
+        collapsed={collapsed}
+        onWorkspacePress={onWorkspacePress}
+        drag={drag}
+        isDragging={isDragging}
+        dragHandleProps={dragHandleProps}
+      />
       {!collapsed ? (
         <View
           style={styles.statusWorkspaceListContainer}
@@ -439,10 +547,17 @@ function StatusGroupHeader({
   group,
   collapsed,
   onWorkspacePress,
+  drag,
+  isDragging,
+  dragHandleProps,
 }: {
   group: SidebarWorkspaceGroup;
   collapsed: boolean;
   onWorkspacePress?: () => void;
+  /** Label grouping only: drag-to-reorder wiring. Absent → not draggable. */
+  drag?: () => void;
+  isDragging?: boolean;
+  dragHandleProps?: DraggableListDragHandleProps;
 }) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
@@ -453,23 +568,52 @@ function StatusGroupHeader({
   const toggleWorkspaceGroupCollapsed = useSidebarCollapsedSectionsStore(
     (state) => state.toggleWorkspaceGroupCollapsed,
   );
+  // Long-press starts the drag on mobile, mirroring the project headers; a long-press that
+  // arms the drag must not also toggle the section.
+  const interaction = useLongPressDragInteraction({ drag, menuController: null });
+  const {
+    role: _dragRole,
+    tabIndex: _dragTabIndex,
+    "aria-roledescription": _dragRoleDescription,
+    ...dragAttributes
+  } = dragHandleProps?.attributes ?? {};
   const handlePress = useCallback(() => {
+    if (interaction.didLongPressRef.current) {
+      interaction.didLongPressRef.current = false;
+      return;
+    }
     toggleWorkspaceGroupCollapsed(group.key);
-  }, [group.key, toggleWorkspaceGroupCollapsed]);
+  }, [group.key, interaction.didLongPressRef, toggleWorkspaceGroupCollapsed]);
+  const handlePressIn = useCallback(
+    (event: GestureResponderEvent) => {
+      interaction.handlePressIn(event);
+    },
+    [interaction],
+  );
+  const handlePressOut = useCallback(() => {
+    interaction.handlePressOut();
+  }, [interaction]);
   const handleHoverIn = useCallback(() => setIsHovered(true), []);
   const handleHoverOut = useCallback(() => setIsHovered(false), []);
   const rowStyle = useCallback(
     ({ pressed }: PressableStateCallbackType) => [
       styles.statusGroupRow,
+      isDragging && styles.statusGroupRowDragging,
       isHovered && styles.statusGroupRowHovered,
       pressed && styles.statusGroupRowPressed,
     ],
-    [isHovered],
+    [isDragging, isHovered],
   );
   const accessibilityState = useMemo(() => ({ expanded: !collapsed }), [collapsed]);
 
   return (
-    <View onPointerEnter={handleHoverIn} onPointerLeave={handleHoverOut}>
+    <View
+      {...dragAttributes}
+      {...dragHandleProps?.listeners}
+      ref={dragHandleProps?.setActivatorNodeRef as unknown as Ref<View>}
+      onPointerEnter={handleHoverIn}
+      onPointerLeave={handleHoverOut}
+    >
       <Pressable
         accessibilityRole={platformIsWeb ? undefined : "button"}
         accessibilityLabel={t("sidebar.statusGroupAccessibility", { label: group.label })}
@@ -477,6 +621,9 @@ function StatusGroupHeader({
         aria-expanded={!collapsed}
         dataSet={NAV_ROW_DATASET}
         style={rowStyle}
+        onPressIn={handlePressIn}
+        onTouchMove={interaction.handleTouchMove}
+        onPressOut={handlePressOut}
         onPress={handlePress}
         testID={`sidebar-status-group-${group.key}`}
       >
@@ -1195,6 +1342,15 @@ const styles = StyleSheet.create((theme) => ({
   },
   statusGroupRowPressed: {
     backgroundColor: theme.colors.surface2,
+  },
+  // Mirrors `projectRowDragging`: the lifted section while a label group drags.
+  statusGroupRowDragging: {
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    transform: [{ scale: 1.02 }],
+    zIndex: 3,
+    ...theme.shadow.md,
   },
   // The same 24px target the project header's New workspace button uses, so the two group
   // headers put their action on one rail.
