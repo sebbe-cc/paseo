@@ -1,4 +1,6 @@
 import {
+  DictationProviderCommandSchema,
+  type DictationProviderCommand,
   VoiceProviderCommandSchema,
   VoiceProviderEventSchema,
   type PluginHookAgent,
@@ -42,6 +44,12 @@ export type PluginProcessRequest =
   | { type: "tool.cancel"; requestId: string }
   | { type: "tools.detach"; agentId: string }
   | { type: "voice.request"; requestId: string; sessionId: string; command: VoiceProviderCommand }
+  | {
+      type: "dictation.request";
+      requestId: string;
+      sessionId: string;
+      command: DictationProviderCommand;
+    }
   | {
       type: "provider.status";
       requestId: string;
@@ -93,6 +101,7 @@ export type PluginProcessMessage =
       methods: string[];
       providers: PluginProviderMetadata[];
       voiceProviders?: Array<{ id: string; label: string }>;
+      dictationProviders?: Array<{ id: string; label: string }>;
       usageSources?: PluginUsageSourceMetadata[];
       hooks?: { events: string[]; before: string[] };
     }
@@ -180,6 +189,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
         requestId: z.string(),
         sessionId: z.string(),
         command: VoiceProviderCommandSchema,
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("dictation.request"),
+        requestId: z.string(),
+        sessionId: z.string(),
+        command: DictationProviderCommandSchema,
       })
       .strict(),
     z
@@ -299,6 +316,9 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
         methods: z.array(z.string()),
         providers: z.array(providerMetadataSchema),
         voiceProviders: z
+          .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
+          .optional(),
+        dictationProviders: z
           .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
           .optional(),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
