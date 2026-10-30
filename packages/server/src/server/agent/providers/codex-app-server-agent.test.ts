@@ -17,6 +17,7 @@ import type {
   AgentSlashCommand,
   AgentStreamEvent,
 } from "../agent-sdk-types.js";
+import { getAgentStreamEventTurnId } from "../agent-sdk-types.js";
 import {
   buildCodexAppServerEnv,
   CodexAppServerAgentClient,
@@ -223,6 +224,14 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function countTurnStartRequests(appServer: FakeCodexAppServer): number {
+  return appServer.requests().filter((request) => request.method === "turn/start").length;
+}
+
+function turnStartParams(appServer: FakeCodexAppServer, index: number): unknown {
+  return appServer.requests().filter((request) => request.method === "turn/start")[index];
 }
 
 describe("Codex active-turn steering admission", () => {
@@ -446,6 +455,91 @@ describe("Codex active-turn steering admission", () => {
       1,
     );
     await session.close();
+  });
+});
+
+describe("Codex queued foreground turns", () => {
+  test("queues a message sent while a turn is active and starts it when the turn completes", async () => {
+    const appServer = createFakeCodexAppServer();
+    const { session, paseoTurnId } = await startPublicSteeringSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const queued = await session.startTurn("queued while busy");
+      expect(queued.turnId).not.toBe(paseoTurnId);
+      expect(
+        appServer.requests().filter((request) => request.method === "turn/start"),
+      ).toHaveLength(1);
+
+      appServer.completeTurn({ threadId: "thread-1" });
+      // waitForTurnStart replays the first recorded request, so read the
+      // second turn/start from the recorded requests instead.
+      await vi.waitFor(() => {
+        expect(countTurnStartRequests(appServer)).toBe(2);
+      });
+      expect(JSON.stringify(turnStartParams(appServer, 1))).toContain("queued while busy");
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-B" });
+      appServer.completeTurn({ threadId: "thread-1" });
+
+      await vi.waitFor(() => {
+        expect(events).toContainEqual(
+          expect.objectContaining({ type: "turn_completed", turnId: queued.turnId }),
+        );
+      });
+      const completedIds = events
+        .filter((event) => event.type === "turn_completed")
+        .map((event) => getAgentStreamEventTurnId(event));
+      expect(completedIds).toEqual([paseoTurnId, queued.turnId]);
+    } finally {
+      await session.close();
+      appServer.assertNoErrors();
+    }
+  });
+
+  test("a disconnect mid-turn fails the turn and the next messages still deliver", async () => {
+    const appServer = createFakeCodexAppServer();
+    const { session } = await startPublicSteeringSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      appServer.disconnect();
+      await vi.waitFor(() => {
+        expect(events).toContainEqual(expect.objectContaining({ type: "turn_failed" }));
+      });
+      // The unexpected-termination path already cleared the slot.
+      expect(session.clearStuckTurn?.("resume")).toBeNull();
+
+      for (const [index, text] of ["one", "two", "three"].entries()) {
+        const started = await session.startTurn(text);
+        // waitForTurnStart replays recorded requests, so wait for the new
+        // turn/start by count instead.
+        await vi.waitFor(() => {
+          expect(countTurnStartRequests(appServer)).toBe(2 + index);
+        });
+        appServer.startsTurn({ threadId: "thread-1", turnId: `native-${text}` });
+        appServer.completeTurn({ threadId: "thread-1" });
+        await vi.waitFor(() => {
+          expect(events).toContainEqual(
+            expect.objectContaining({ type: "turn_completed", turnId: started.turnId }),
+          );
+        });
+      }
+
+      const starts = appServer
+        .requests()
+        .filter((request) => request.method === "turn/start");
+      expect(starts).toHaveLength(4);
+      expect(starts.slice(1).map((request) => JSON.stringify(request.params))).toEqual([
+        expect.stringContaining("one"),
+        expect.stringContaining("two"),
+        expect.stringContaining("three"),
+      ]);
+    } finally {
+      await session.close();
+      appServer.assertNoErrors();
+    }
   });
 });
 
