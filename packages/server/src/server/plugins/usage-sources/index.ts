@@ -75,6 +75,27 @@ interface AgentReports {
   model?: string;
   sessionKey: string;
   reports: Map<string, KnownReport>;
+  /**
+   * False when the discovery budget was spent excluding retired contexts, so
+   * this mapping is a partial delivery — not a proven-complete session view.
+   * The same-scope fast path must not reuse it; the next read rediscovers.
+   */
+  complete: boolean;
+}
+
+/**
+ * One validated discovery pass result plus the provenance it was validated
+ * against. The epochs and structural generation travel with the reports to
+ * the actual mapping installation: a turnover that retires a context after
+ * the wrapper's check but before the awaiting caller installs must still
+ * fail closed instead of handing the retired login a fresh fetch token.
+ */
+interface DiscoveryResult {
+  reports: Map<string, KnownReport>;
+  epochs: Map<string, number>;
+  generation: number;
+  /** True when the final pass already excluded retired contexts. */
+  truncated: boolean;
 }
 
 export interface UsageSourceInvalidated {
@@ -216,6 +237,63 @@ export class UsageSourceRegistry {
 
   private epochOf(id: string): number {
     return this.sourceEpoch.get(id) ?? 0;
+  }
+
+  /** Source ids whose event epoch moved since the validated baseline. */
+  private retiredSince(baseline: Map<string, number>): Set<string> {
+    const retired = new Set<string>();
+    for (const [id, epoch] of this.sourceEpoch) {
+      if ((baseline.get(id) ?? 0) !== epoch) retired.add(id);
+    }
+    return retired;
+  }
+
+  /**
+   * Drops every report owned by, taken over from, or served through an
+   * allowed fallback of a retired source. Returns true when anything was
+   * dropped. Unrelated sources keep their reports.
+   */
+  private excludeRetired(merged: Map<string, KnownReport>, retired: Set<string>): boolean {
+    let dropped = false;
+    for (const [id, report] of merged) {
+      if (
+        retired.has(report.source.id) ||
+        (report.overriddenId !== undefined && retired.has(report.overriddenId)) ||
+        (report.fallback !== undefined && retired.has(report.fallback.source.id))
+      ) {
+        merged.delete(id);
+        dropped = true;
+      }
+    }
+    return dropped;
+  }
+
+  /**
+   * Revalidates a validated discovery result in the same synchronous
+   * continuation that installs it — after the promise-boundary microtasks
+   * that can interleave a turnover between the wrapper's check and the
+   * caller's installation. A retired login is dropped fail-closed before it
+   * can receive a fresh fetch token; a structural mutation since validation
+   * additionally drops reports whose source is gone or no longer live, so a
+   * stale result can never resurrect an evicted mapping. Returns true when
+   * the installed result is partial and must not be cached as complete.
+   */
+  private revalidateInstall(result: DiscoveryResult): boolean {
+    let dropped = result.truncated;
+    const retired = this.retiredSince(result.epochs);
+    if (retired.size > 0) dropped = this.excludeRetired(result.reports, retired) || dropped;
+    if (this.generation !== result.generation) {
+      for (const [id, report] of result.reports) {
+        if (
+          this.sources.get(report.source.id) !== report.source ||
+          !this.reportStillLive(id, report)
+        ) {
+          result.reports.delete(id);
+          dropped = true;
+        }
+      }
+    }
+    return dropped;
   }
 
   /**
@@ -387,11 +465,18 @@ export class UsageSourceRegistry {
       // fetch, callback, or last-successful attachment. A full re-read of an
       // explicitly old report id then finds no live login for it instead of
       // replaying retired history under today's card.
-      this.defaults = await this.discover({ kind: "global" }, this.defaults);
+      const targeted = await this.discover({ kind: "global" }, this.defaults);
+      // The handoff check runs in the same synchronous continuation as the
+      // installation: a turnover interleaved after the wrapper's validation
+      // drops the retired login here instead of receiving a fresh token.
+      this.revalidateInstall(targeted);
+      this.defaults = targeted.reports;
       this.mergeKnown();
       ids = options.reportIds;
     } else {
-      this.defaults = await this.discover({ kind: "global" }, this.defaults);
+      const global = await this.discover({ kind: "global" }, this.defaults);
+      this.revalidateInstall(global);
+      this.defaults = global.reports;
       this.mergeKnown();
       ids = [...this.known.keys()];
     }
@@ -449,8 +534,11 @@ export class UsageSourceRegistry {
       previous?.sessionKey === session.sessionKey &&
       previous.provider === session.provider &&
       previous.model === session.model;
-    if (sameScope) return [...previous.reports.keys()];
-    const reports = await this.discover({
+    // A budget-truncated partial delivery is not a complete session view:
+    // the next read must rediscover instead of reusing it, or a retired
+    // context stays invisible and its replacement never appears.
+    if (sameScope && previous?.complete === true) return [...previous.reports.keys()];
+    const discovered = await this.discover({
       kind: "session",
       provider: session.provider,
       model: session.model,
@@ -458,11 +546,16 @@ export class UsageSourceRegistry {
     });
     // A query that finishes after a resume must not publish the previous launch's mapping.
     if (this.agents.usageSession(agentId)?.sessionKey !== session.sessionKey) return [];
+    // Same handoff invariant as the defaults installation above: validate
+    // the discovery provenance synchronously where the mapping is installed.
+    const incomplete = this.revalidateInstall(discovered);
+    const reports = discovered.reports;
     this.byAgent.set(agentId, {
       sessionKey: session.sessionKey,
       provider: session.provider,
       model: session.model,
       reports,
+      complete: !incomplete,
     });
     this.mergeKnown();
     return [...reports.keys()];
@@ -611,34 +704,36 @@ export class UsageSourceRegistry {
   private async discover(
     scope: UsageScope,
     previous: ReadonlyMap<string, KnownReport> = new Map(),
-  ): Promise<Map<string, KnownReport>> {
+  ): Promise<DiscoveryResult> {
     for (let attempt = 0; ; attempt += 1) {
       const epochsBefore = new Map(this.sourceEpoch);
       const generationBefore = this.generation;
       const merged = await this.discoverOnce(scope, previous);
-      const retired = new Set<string>();
-      for (const [id, epoch] of this.sourceEpoch) {
-        if ((epochsBefore.get(id) ?? 0) !== epoch) retired.add(id);
-      }
+      const retired = this.retiredSince(epochsBefore);
       const structural = this.generation !== generationBefore;
-      if (retired.size === 0 && !structural) return merged;
+      if (retired.size === 0 && !structural)
+        return {
+          reports: merged,
+          epochs: epochsBefore,
+          generation: generationBefore,
+          truncated: false,
+        };
       if (attempt === 0) continue;
       // The retry budget is spent and this final pass still raced a
       // retirement: never re-authorize the retired contexts with a new
       // fetch token. Drop only the reports owned by, taken over from, or
       // served through an allowed fallback of a retired source; everything
       // unrelated survives, and structural mutations keep their existing
-      // merge-time guards (source identity, reportStillLive).
-      for (const [id, report] of merged) {
-        if (
-          retired.has(report.source.id) ||
-          (report.overriddenId !== undefined && retired.has(report.overriddenId)) ||
-          (report.fallback !== undefined && retired.has(report.fallback.source.id))
-        ) {
-          merged.delete(id);
-        }
-      }
-      return merged;
+      // merge-time guards (source identity, reportStillLive). The baseline
+      // travels with the result so the installation can revalidate the
+      // handoff across the remaining promise boundary.
+      const dropped = this.excludeRetired(merged, retired);
+      return {
+        reports: merged,
+        epochs: new Map(this.sourceEpoch),
+        generation: this.generation,
+        truncated: dropped,
+      };
     }
   }
 

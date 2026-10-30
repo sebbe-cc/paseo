@@ -2662,3 +2662,240 @@ test("a second event during the final discovery pass never installs the retired 
     if (entry.id.startsWith("muse:")) expect(entry.lastSuccessful).toBeUndefined();
   }
 });
+
+test("a turnover between discovery validation and mapping installation never publishes the retired login (targeted)", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/handoff-targeted" } };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  registry.register(usage.registration());
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const warmed = await registry.listReports();
+  const card = warmed.find((entry) => entry.id.startsWith("muse:"));
+  expect(card?.report.status).toBe("available");
+  const cardId = card!.id;
+  registry.register({
+    id: "sibling",
+    label: "sibling",
+    discover: async () => [{ key: "s", input: {} }],
+    fetch: async () => ({ status: "available", windows: [{ id: "w", label: "sibling" }] }),
+  });
+  // Queue the only Muse turnover from inside the validation's epoch read, so
+  // it lands after the wrapper's check but before the caller's installation.
+  // Attempt 0 iterates the epochs once for the snapshot and once for the
+  // validation; the turnover fires on the validation read.
+  const epochs = (registry as unknown as { sourceEpoch: Map<string, number> }).sourceEpoch;
+  let iterations = 0;
+  let fired = false;
+  const rawIterator = epochs[Symbol.iterator].bind(epochs);
+  (epochs as unknown as Record<symbol, unknown>)[Symbol.iterator] = function* () {
+    iterations += 1;
+    if (iterations === 2 && !fired) {
+      fired = true;
+      queueMicrotask(() => {
+        usage.detach("session-a");
+        usage.attach("session-b", launch, async () => ({}));
+      });
+    }
+    yield* rawIterator();
+  };
+  const seen: string[] = [];
+  let entries;
+  try {
+    entries = await registry.listReports({
+      reportIds: [cardId],
+      forceRefresh: true,
+      onReport: (entry) => seen.push(entry.id),
+    });
+  } finally {
+    delete (epochs as unknown as Record<symbol, unknown>)[Symbol.iterator];
+  }
+  expect(fired).toBe(true);
+  // The retired A login must never publish: no callback, no return, and no
+  // attached last-successful carrying A's 10% windows.
+  expect(entries).toEqual([]);
+  expect(seen).toEqual([]);
+  // The next read converges: the sibling still delivers and no card carries
+  // A's retired quota or history.
+  const converged = await registry.listReports();
+  expect(converged.map((entry) => entry.id)).toContain("sibling:s");
+  for (const entry of converged) {
+    expect(JSON.stringify(entry.report)).not.toContain('"usedPct":10');
+    expect(entry.lastSuccessful).toBeUndefined();
+  }
+});
+
+test("a turnover between discovery validation and agent mapping installation never publishes the retired login (agent)", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/handoff-agent" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const sessions = new Map([
+    ["muse-agent", { provider: "muse", env: homeEnv, sessionKey: "muse-session" }],
+  ]);
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: (id) => sessions.has(id),
+    usageSession: (id) => sessions.get(id) ?? null,
+  });
+  registry.register(usage.registration());
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  registry.register({
+    id: "sibling",
+    label: "sibling",
+    discover: async () => [{ key: "s", input: {} }],
+    fetch: async () => ({ status: "available", windows: [{ id: "w", label: "sibling" }] }),
+  });
+  // Same handoff placement as the targeted case: the turnover lands after
+  // the wrapper's validation but before the agent mapping is installed.
+  const epochs = (registry as unknown as { sourceEpoch: Map<string, number> }).sourceEpoch;
+  let iterations = 0;
+  let fired = false;
+  const rawIterator = epochs[Symbol.iterator].bind(epochs);
+  (epochs as unknown as Record<symbol, unknown>)[Symbol.iterator] = function* () {
+    iterations += 1;
+    if (iterations === 2 && !fired) {
+      fired = true;
+      queueMicrotask(() => {
+        usage.detach("session-a");
+        usage.attach("session-b", launch, async () => ({}));
+      });
+    }
+    yield* rawIterator();
+  };
+  let entries;
+  try {
+    entries = await registry.listReports({ agentId: "muse-agent" });
+  } finally {
+    delete (epochs as unknown as Record<symbol, unknown>)[Symbol.iterator];
+  }
+  expect(fired).toBe(true);
+  // The unrelated sibling still delivers, but no retired A quota or history
+  // reaches the callback, the return, or an agent mapping.
+  expect(entries.map((entry) => entry.id)).toContain("sibling:s");
+  for (const entry of entries) {
+    expect(JSON.stringify(entry)).not.toContain('"usedPct":10');
+    if (entry.id.startsWith("muse:")) expect(entry.lastSuccessful).toBeUndefined();
+  }
+});
+
+test("a budget-truncated agent mapping is not cached as complete: the next read rediscovers the current context", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/partial-agent" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const sessions = new Map([
+    ["muse-agent", { provider: "muse", env: homeEnv, sessionKey: "muse-session" }],
+  ]);
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: (id) => sessions.has(id),
+    usageSession: (id) => sessions.get(id) ?? null,
+  });
+  const museRegistration = usage.registration();
+  let museDiscovers = 0;
+  const innerDiscover = museRegistration.discover.bind(museRegistration);
+  museRegistration.discover = async (scope) => {
+    museDiscovers += 1;
+    return innerDiscover(scope);
+  };
+  registry.register(museRegistration);
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  // A sibling source whose discovery stalls behind a separate gate per pass;
+  // later passes resolve immediately.
+  const siblingGates: Array<() => void> = [];
+  let siblingCalls = 0;
+  registry.register({
+    id: "sibling",
+    label: "sibling",
+    discover: async () => {
+      siblingCalls += 1;
+      if (siblingCalls <= 2) {
+        await new Promise<void>((resolve) => {
+          siblingGates.push(resolve);
+        });
+      }
+      return [{ key: "s", input: {} }];
+    },
+    fetch: async () => ({ status: "available", windows: [{ id: "w", label: "sibling" }] }),
+  });
+  // The agent read has no mapping yet, so it discovers while the sibling
+  // stalls; the turnover lands during the last allowed pass.
+  museDiscovers = 0;
+  const pending = registry.listReports({ agentId: "muse-agent" });
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (museDiscovers >= 1 && siblingCalls >= 1) break;
+  }
+  expect(museDiscovers).toBeGreaterThanOrEqual(1);
+  expect(siblingCalls).toBe(1);
+  // A sibling freshness event consumes the single re-pass budget while the
+  // first pass is still in flight.
+  registry.invalidateSource("sibling");
+  siblingGates[0]!();
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (museDiscovers >= 2 && siblingCalls >= 2) break;
+  }
+  expect(museDiscovers).toBeGreaterThanOrEqual(2);
+  expect(siblingCalls).toBe(2);
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  // The only Muse turnover lands during the last allowed pass.
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  siblingGates[1]!();
+  const entries = await pending;
+  // No retired A login lodges as the agent mapping: no Muse card may carry
+  // A's quota or history, while the unrelated sibling still delivers.
+  for (const entry of entries) {
+    expect(JSON.stringify(entry)).not.toContain('"usedPct":10');
+    if (entry.id.startsWith("muse:")) expect(entry.lastSuccessful).toBeUndefined();
+  }
+  expect(entries.map((entry) => entry.id)).toContain("sibling:s");
+  // The replacement context now reports; the next same-session read must
+  // rediscover it instead of reusing the partial mapping — never A.
+  const quotaB = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 90 },
+  };
+  expect(usage.observe(hostB.account, hostB.generation, quotaB)).toBe(true);
+  const reconverged = await registry.listReports({ agentId: "muse-agent" });
+  expect(reconverged.map((entry) => entry.id)).toContain("sibling:s");
+  const museCard = reconverged.find((entry) => entry.id.startsWith("muse:"));
+  expect(museCard?.report.status).toBe("available");
+  expect(JSON.stringify(museCard?.report)).toContain('"usedPct":90');
+  for (const entry of reconverged) {
+    // Trailing comma: the weekly "usedPct":106 in every available card must
+    // not prefix-match; only a real 10% window may fail here.
+    expect(JSON.stringify(entry)).not.toContain('"usedPct":10,');
+  }
+});
