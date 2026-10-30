@@ -1,5 +1,5 @@
 import { RotateCw } from "lucide-react-native";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View, type StyleProp, type TextStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -17,7 +17,32 @@ import type { TFunction } from "i18next";
 import { UsageBalanceBar } from "./balance-bar";
 import type { UsageDisplay } from "./display";
 import { formatAgo, formatProviderUsageLabel } from "./format";
-import { resolveUsageReport, type UsageRefresh } from "./model";
+import { MAX_OBSERVED_AGE_MS, resolveUsageReport, type UsageRefresh } from "./model";
+
+/**
+ * R4: the observation ceiling is render input on the mounted card. When the
+ * source-owned observation ages past the ceiling, this re-renders the card
+ * so quota disappears without waiting for a new poll or server event. The
+ * freshness text already ticks on its own inside UsageFreshness; only the
+ * parent content choice needs this timer. Legacy entries without a
+ * source-owned observation, future observations, and already-expired
+ * observations schedule nothing.
+ */
+function useObservationExpiry(observedAt: string | null): void {
+  const [, setExpired] = useState(0);
+  useEffect(() => {
+    if (!observedAt) return undefined;
+    const at = Date.parse(observedAt);
+    if (Number.isNaN(at)) return undefined;
+    const delay = at + MAX_OBSERVED_AGE_MS - Date.now();
+    if (delay <= 0 || at > Date.now()) return undefined;
+    const timer = setTimeout(
+      () => setExpired((count) => count + 1),
+      Math.min(delay, 2_147_483_647),
+    );
+    return () => clearTimeout(timer);
+  }, [observedAt]);
+}
 import { useReportRefresh } from "./queries";
 import { UsageSourceIcon } from "./source-icon";
 import type { UsageReport, UsageReportEntry, UsageWindow } from "./types";
@@ -61,8 +86,10 @@ export function UsageCard({
   const usage = entry.report;
   const status = statusText(usage, t);
   const footer = entry.account.label ?? null;
-  const { windows, balances, details, planLabel, successfulAt, retained, messages } =
+  const { windows, balances, details, planLabel, successfulAt, retained, messages, observedAt } =
     resolveUsageReport(entry, t);
+  // R4: re-render this card when its observation expires; no poll involved.
+  useObservationExpiry(observedAt);
 
   const containerStyle = useMemo(
     () => [styles.container, compact ? styles.containerCompact : styles.containerPadded],

@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { UsageSourceRegistry } from "./index.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1852,4 +1852,177 @@ test("available quota older than the ceiling never publishes, even cold", async 
   expect(reports).toHaveLength(1);
   expect(reports[0]?.report.status).toBe("error");
   expect(reports[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("R1: error with fresh source-owned history shows error plus retained quota on a cold registry", async () => {
+  const now = 10_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now - 60_000).toISOString();
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      // Cold restart: no prior available poll, the backend error itself
+      // carries the last validated quota.
+      fetch: async () => ({
+        status: "error",
+        error: "quota rate limited",
+        history: {
+          observedAt,
+          planLabel: "Max",
+          windows: [{ id: "five_hour", label: "5-hour", usedPct: 87 }],
+        },
+      }),
+    }),
+  );
+  const reports = await registry.listReports();
+  expect(reports).toHaveLength(1);
+  // The current error stays visible, never masked to available.
+  expect(reports[0]?.report.status).toBe("error");
+  // ...while the fresh backend history is retained for the card.
+  expect(reports[0]?.lastSuccessful?.report).toMatchObject({
+    status: "available",
+    observedAt,
+    windows: [{ usedPct: 87 }],
+  });
+});
+
+test("R1: stale, future, or empty error history never becomes retained quota", async () => {
+  async function retainedFor(history: unknown): Promise<unknown> {
+    let now = 20_000_000;
+    const registry = new UsageSourceRegistry(() => now);
+    registry.register(
+      source({
+        id: "claude",
+        discover: async () => [{ key: "a", input: {} }],
+        fetch: async () => ({ status: "error", error: "proxy down", history }),
+      }),
+    );
+    const reports = await registry.listReports();
+    return reports[0]?.lastSuccessful;
+  }
+  const windows = [{ id: "five_hour", label: "5-hour", usedPct: 87 }];
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 - 45 * 60_000).toISOString(), windows }),
+  ).toBeUndefined();
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 + 60_000).toISOString(), windows }),
+  ).toBeUndefined();
+  expect(
+    await retainedFor({ observedAt: new Date(20_000_000 - 60_000).toISOString(), windows: [] }),
+  ).toBeUndefined();
+});
+
+test("R2: future observedAt never authorizes quota, live or retained", async () => {
+  let now = 30_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  let mode: "future-live" | "ok-then-future-history" = "future-live";
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () =>
+        mode === "future-live"
+          ? {
+              status: "available",
+              observedAt: new Date(now + 60_000).toISOString(),
+              windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+            }
+          : {
+              status: "error",
+              error: "proxy down",
+              history: {
+                observedAt: new Date(now + 60_000).toISOString(),
+                windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+              },
+            },
+    }),
+  );
+  // A syntactically valid ISO timestamp tomorrow is not "just now": the
+  // report becomes a visible error, never available.
+  const live = await registry.listReports({ forceRefresh: true });
+  expect(live[0]?.report.status).toBe("error");
+  expect(live[0]?.lastSuccessful).toBeUndefined();
+  // A future history snapshot is not history either.
+  mode = "ok-then-future-history";
+  const failed = await registry.listReports({ forceRefresh: true });
+  expect(failed[0]?.report.status).toBe("error");
+  expect(failed[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("R3: warm hit, callback, and final return all enforce the ceiling", async () => {
+  let now = 40_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now).toISOString();
+  let resolveA!: (value: unknown) => void;
+  let resolveB!: (value: unknown) => void;
+  const gateA = new Promise<unknown>((resolve) => {
+    resolveA = resolve;
+  });
+  const gateB = new Promise<unknown>((resolve) => {
+    resolveB = resolve;
+  });
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: (input) => ((input as { account: string }).account === "b" ? gateB : gateA),
+    }),
+  );
+  const seen: string[] = [];
+  const pending = registry.listReports({
+    onReport: (entry) => seen.push(`${entry.id}:${entry.report.status}`),
+  });
+  // A resolves while its observation is fresh: its callback is available.
+  resolveA({
+    status: "available",
+    observedAt,
+    windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+  });
+  await vi.waitFor(() => expect(seen).toContain("claude:a:available"));
+  // B stays in flight past the ceiling; it observes fresh at the new now.
+  now += 31 * 60_000;
+  resolveB({
+    status: "available",
+    observedAt: new Date(now - 60_000).toISOString(),
+    windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+  });
+  const final = await pending;
+  const entryA = final.find((entry) => entry.id === "claude:a");
+  const entryB = final.find((entry) => entry.id === "claude:b");
+  // A's entry resolved fresh, but the final return re-checks after the
+  // sibling wait and downgrades it; B observed fresh and stays available.
+  expect(entryA?.report.status).toBe("error");
+  expect(entryA?.lastSuccessful).toBeUndefined();
+  expect(entryB?.report.status).toBe("available");
+  expect(seen).toContain("claude:b:available");
+});
+
+test("R3: warm hit past the ceiling serves an error, not cached quota", async () => {
+  let now = 50_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now).toISOString();
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () => ({
+        status: "available",
+        observedAt,
+        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+      }),
+    }),
+  );
+  const first = await registry.listReports();
+  expect(first[0]?.report.status).toBe("available");
+  // Inside the 5-minute fetch cache but past the 30-minute observation
+  // ceiling: the warm hit must not serve quota.
+  now += 31 * 60_000;
+  const second = await registry.listReports();
+  expect(second).toHaveLength(1);
+  expect(second[0]?.report.status).toBe("error");
+  expect(second[0]?.lastSuccessful).toBeUndefined();
 });

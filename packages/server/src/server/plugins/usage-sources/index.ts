@@ -18,10 +18,21 @@ import {
  */
 export const MAX_OBSERVED_AGE_MS = 1_800_000;
 
-function parseObservedAt(value: string | undefined): number | null {
-  if (!value) return null;
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? null : at;
+/**
+ * Source-owned observation state of a report (pa-vtgw9 R2). `absent` means
+ * the source sent no observation and the report keeps legacy poll-time
+ * semantics. `invalid` means the source DID send an observation but it is
+ * unparsable or in the future: it must never authorize quota, and a future
+ * timestamp is never clamped to "just now" — silent skew would keep quota
+ * alive past its real observation. Only `valid` carries quota age.
+ */
+type ObservationState = { kind: "absent" } | { kind: "valid"; at: number } | { kind: "invalid" };
+
+function observationStateOf(report: UsageReport, now: number): ObservationState {
+  if (report.status !== "available" || !report.observedAt) return { kind: "absent" };
+  const at = Date.parse(report.observedAt);
+  if (Number.isNaN(at) || at > now) return { kind: "invalid" };
+  return { kind: "valid", at };
 }
 
 function ageText(ageMs: number): string {
@@ -33,26 +44,38 @@ function ageText(ageMs: number): string {
   return `${Math.floor(hours / 24)} d ago`;
 }
 
-/** Age of the source-owned observation, or null when the source omits it. */
-function observedAgeMsOf(report: UsageReport, now: number): number | null {
-  if (report.status !== "available" || !report.observedAt) return null;
-  const at = parseObservedAt(report.observedAt);
-  return at === null ? null : Math.max(0, now - at);
-}
-
 /**
  * A stored last-successful snapshot stays servable only while its own
  * observation is fresh. Snapshots from sources without `observedAt` keep
  * the previous behavior (always servable); snapshots with an observation
- * older than the ceiling are dropped so repeated failures can never
+ * older than the ceiling — or with a present-but-invalid/future
+ * observation (R2) — are dropped so repeated failures can never
  * reintroduce stale quota after a restart.
  */
 function lastSuccessfulStillFresh(
   snapshot: NonNullable<UsageReportEntry["lastSuccessful"]>,
   now: number,
 ): boolean {
-  const age = observedAgeMsOf(snapshot.report, now);
-  return age === null || age <= MAX_OBSERVED_AGE_MS;
+  const state = observationStateOf(snapshot.report, now);
+  if (state.kind === "absent") return true;
+  if (state.kind === "invalid") return false;
+  return now - state.at <= MAX_OBSERVED_AGE_MS;
+}
+
+/**
+ * A source-owned history snapshot attached to an error report (pa-vtgw9
+ * R1). Usable only with a non-empty window list and a valid, non-future
+ * observation inside the ceiling; anything else is not history.
+ */
+function historyCandidate(
+  history: { observedAt: string; windows: unknown[] } | undefined,
+  now: number,
+): { at: number } | null {
+  if (!history || !Array.isArray(history.windows) || history.windows.length === 0) return null;
+  const at = Date.parse(history.observedAt);
+  if (Number.isNaN(at) || at > now) return null;
+  if (now - at > MAX_OBSERVED_AGE_MS) return null;
+  return { at };
 }
 
 export interface UsageSource {
@@ -337,6 +360,12 @@ export class UsageSourceRegistry {
     // retired entries reach neither the per-report callback nor the returned
     // list, so a reload, disable, opt-out, or event can never publish a
     // ghost card or an older quota.
+    //
+    // R3: every publication passes the same ceiling check — before the
+    // per-report callback and again on the final list after the sibling
+    // wait. A fast entry that ages past the ceiling while a sibling fetch
+    // is still in flight is downgraded before it reaches the client, and
+    // the error status always stays visible.
     return Promise.all(
       [...new Set(ids)].flatMap((id) => {
         const known = reports.get(id);
@@ -344,12 +373,89 @@ export class UsageSourceRegistry {
         return [
           this.fetchId(id, known, options.forceRefresh).then((entry) => {
             if (entry === null) return null;
-            options.onReport?.(entry);
-            return entry;
+            const publishable = this.toPublishable(entry, this.now());
+            options.onReport?.(publishable);
+            return publishable;
           }),
         ];
       }),
-    ).then((entries) => entries.filter((entry): entry is UsageReportEntry => entry !== null));
+    ).then((entries) =>
+      entries
+        .filter((entry): entry is UsageReportEntry => entry !== null)
+        .map((entry) => this.toPublishable(entry, this.now())),
+    );
+  }
+
+  /**
+   * R2 ceiling for one report: an available report with a
+   * present-but-invalid/future observation, or an observation past the
+   * ceiling, becomes a visible error. Anything else passes through —
+   * including legacy reports that never claimed an observation.
+   */
+  private enforceReportCeiling(report: UsageReport, now: number): UsageReport {
+    if (report.status !== "available") return report;
+    const state = observationStateOf(report, now);
+    if (state.kind === "invalid") {
+      return {
+        status: "error",
+        error: `quota observation is invalid (observedAt ${report.observedAt})`,
+      };
+    }
+    if (state.kind === "valid" && now - state.at > MAX_OBSERVED_AGE_MS) {
+      return {
+        status: "error",
+        error: `quota data is stale (last success ${ageText(now - state.at)})`,
+      };
+    }
+    return report;
+  }
+
+  /**
+   * R1 history bridge: prefer the registry's own fresh snapshot; otherwise
+   * bridge a fresh source-owned history attached to this same error, so a
+   * cold restart with valid backend history still shows error + recent
+   * quota instead of error alone. The current error status always stays
+   * visible — history only ever lands in `lastSuccessful`.
+   */
+  private bridgeHistory(
+    report: UsageReport,
+    cacheKey: string,
+    completedAt: string,
+    now: number,
+  ): UsageReportEntry["lastSuccessful"] {
+    const snapshot = this.successful.get(cacheKey);
+    if (snapshot && lastSuccessfulStillFresh(snapshot, now)) return snapshot;
+    if (report.status === "available") return undefined;
+    const history = "history" in report ? report.history : undefined;
+    if (!history || !historyCandidate(history, now)) return undefined;
+    return {
+      fetchedAt: completedAt,
+      report: {
+        status: "available",
+        windows: history.windows,
+        ...(history.planLabel ? { planLabel: history.planLabel } : {}),
+        ...(history.balances ? { balances: history.balances } : {}),
+        ...(history.details ? { details: history.details } : {}),
+        observedAt: history.observedAt,
+      },
+    };
+  }
+
+  /**
+   * R3: re-applies the source-owned observation ceiling to an already-built
+   * entry. Available reports with an invalid/future observation or an
+   * observation past the ceiling become visible errors; a stale or
+   * invalid/future retained snapshot is dropped. Idempotent: safe to apply
+   * at the warm hit, the callback, and the final return.
+   */
+  private toPublishable(entry: UsageReportEntry, now: number): UsageReportEntry {
+    const report = this.enforceReportCeiling(entry.report, now);
+    const lastSuccessful =
+      entry.lastSuccessful && lastSuccessfulStillFresh(entry.lastSuccessful, now)
+        ? entry.lastSuccessful
+        : undefined;
+    if (report === entry.report && lastSuccessful === entry.lastSuccessful) return entry;
+    return { ...entry, report, lastSuccessful };
   }
 
   private pruneAgents(): void {
@@ -671,8 +777,12 @@ export class UsageSourceRegistry {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
     const cached = this.cache.get(cacheKey);
+    // R3: a warm hit is a publication, not a shortcut past the ceiling. The
+    // cached entry is re-checked against the source-owned observation age
+    // before it reaches any callback or return, so quota that aged past
+    // the ceiling while cached is never served from the fast path.
     if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs)
-      return Promise.resolve(cached.entry);
+      return Promise.resolve(this.toPublishable(cached.entry, this.now()));
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
     const generation = this.generation;
@@ -712,21 +822,12 @@ export class UsageSourceRegistry {
       // from poll/fetch time. Quota older than the ceiling is never served
       // as quota, and a repeated failure can never stamp a new observation.
       // Sources without `observedAt` keep the previous poll-time semantics.
+      const now = this.now();
+      entry.report = this.enforceReportCeiling(entry.report, now);
       if (entry.report.status === "available") {
-        const observedAgeMs = observedAgeMsOf(entry.report, this.now());
-        if (observedAgeMs !== null && observedAgeMs > MAX_OBSERVED_AGE_MS) {
-          (entry as { report: UsageReport }).report = {
-            status: "error",
-            error: `quota data is stale (last success ${ageText(observedAgeMs)})`,
-          };
-        } else {
-          entry.successfulAt = entry.report.observedAt ?? completedAt;
-        }
-      }
-      if (entry.report.status !== "available") {
-        const snapshot = this.successful.get(cacheKey);
-        entry.lastSuccessful =
-          snapshot && lastSuccessfulStillFresh(snapshot, this.now()) ? snapshot : undefined;
+        entry.successfulAt = entry.report.observedAt ?? completedAt;
+      } else {
+        entry.lastSuccessful = this.bridgeHistory(entry.report, cacheKey, completedAt, now);
       }
       if (
         isLive() &&
