@@ -287,6 +287,87 @@ export default function contribute(server) {
   }
 }, 60_000);
 
+test("a plugin takeover replaces the codex card and falls back when it throws", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "usage-takeover-"));
+  const flag = path.join(root, "fail");
+  const plugins = path.join(root, "plugins");
+  const builtin = path.join(plugins, "codex-usage-source");
+  await mkdir(builtin, { recursive: true });
+  await writeFile(
+    path.join(builtin, "paseo-plugin.json"),
+    JSON.stringify({ id: "codex-usage-source", requirements: { paseo: ">=0.9.2" } }),
+  );
+  await writeFile(
+    path.join(builtin, "index.server.ts"),
+    `import { z } from 'zod';
+export default function contribute(server) {
+  server.registerUsageSource({ id: 'codex', label: 'Codex', input: z.object({}),
+    discover: async () => [{ key: 'shared', input: {} }],
+    fetch: async () => ({ status: 'available', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] }),
+  });
+  return () => {};
+}`,
+  );
+  const takeover = path.join(root, "takeover");
+  await mkdir(takeover, { recursive: true });
+  await writeFile(
+    path.join(takeover, "paseo-plugin.json"),
+    JSON.stringify({ id: "takeover", requirements: { paseo: ">=0.9.2" } }),
+  );
+  await writeFile(
+    path.join(takeover, "index.server.ts"),
+    `import { z } from 'zod';
+import { existsSync } from 'node:fs';
+const flag = ${JSON.stringify(flag)};
+export default function contribute(server) {
+  server.registerUsageSource({
+    id: 'takeover', label: 'Takeover', input: z.object({ fail: z.boolean() }),
+    replaces: ['codex'],
+    discover: async () => [{ key: 'shared', input: { fail: existsSync(flag) } }],
+    fetch: async (input) => {
+      if (input.fail) throw new Error('proxy down');
+      return { status: 'available', windows: [{ id: 'session', label: 'Override', usedPct: 42 }] };
+    },
+  });
+  return () => {};
+}`,
+  );
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.9.2",
+    pluginsEnabled: false,
+    builtinPlugins: new BuiltinPluginLoader(plugins, ["codex-usage-source"]),
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.9.2" });
+  try {
+    await client.connect();
+    const native = (await client.listUsageReports()).reports;
+    expect(native.map((entry) => entry.id)).toEqual(["codex:shared"]);
+    expect(native[0]?.report.windows?.[0]).toMatchObject({ usedPct: 11 });
+    await client.patchDaemonConfig({ pluginsEnabled: true });
+    await client.installDirectoryPlugin(takeover, "takeover");
+    const taken = (await client.listUsageReports({ forceRefresh: true })).reports;
+    // The override publishes through the native card, never under its own id.
+    expect(taken.map((entry) => entry.id)).toEqual(["codex:shared"]);
+    expect(taken[0]).toMatchObject({ sourceId: "codex", sourceLabel: "Codex" });
+    expect(taken[0]?.report.windows?.[0]).toMatchObject({ label: "Override", usedPct: 42 });
+    // Targeted refresh reuses known logins without discovering again, so the
+    // changed flag needs a global refresh to re-run takeover discovery.
+    await writeFile(flag, "");
+    const fallback = (await client.listUsageReports({ forceRefresh: true })).reports;
+    expect(fallback.map((entry) => entry.id)).toEqual(["codex:shared"]);
+    expect(fallback[0]?.report.windows?.[0]).toMatchObject({ usedPct: 11 });
+    expect(fallback[0]?.loginErrors).toHaveLength(1);
+    expect(fallback[0]?.loginErrors?.[0]).toMatchObject({ harness: "Takeover" });
+    await rm(flag, { force: true });
+    const recovered = (await client.listUsageReports({ forceRefresh: true })).reports;
+    expect(recovered[0]?.report.windows?.[0]).toMatchObject({ usedPct: 42 });
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("a killed discovery subprocess logs kimi once and produces no provider card", async () => {
   const { readFile } = await import("node:fs/promises");
   const { default: pino } = await import("pino");
