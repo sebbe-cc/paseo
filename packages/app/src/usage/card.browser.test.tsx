@@ -35,6 +35,25 @@ function entryWithObservedAt(observedAt: string): UsageReportEntry {
   } as UsageReportEntry;
 }
 
+function retainedEntryWithObservedAt(observedAt: string): UsageReportEntry {
+  return {
+    id: "codex:quota-v1-test",
+    account: {},
+    fetchedAt: new Date(Date.parse(observedAt) + 60_000).toISOString(),
+    sourceId: "codex",
+    sourceLabel: "Codex",
+    report: { status: "error", error: "quota rate limited" },
+    lastSuccessful: {
+      fetchedAt: new Date(Date.parse(observedAt) + 60_000).toISOString(),
+      report: {
+        status: "available",
+        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+        observedAt,
+      },
+    },
+  } as UsageReportEntry;
+}
+
 let root: Root;
 let container: HTMLDivElement;
 let queryClient: QueryClient;
@@ -91,6 +110,74 @@ it("expires mounted quota at the observation ceiling without a new poll", () => 
   });
   expect(container.textContent).not.toContain("5-hour");
   expect(container.textContent).toContain("Quota data is stale and no longer shown.");
+});
+
+it("invalidates exactly past the boundary in separate renders, never stuck", () => {
+  vi.useFakeTimers();
+  const now = Date.parse("2026-10-30T12:00:00.000Z");
+  vi.setSystemTime(now);
+  // Observed 29 minutes ago: fresh now, boundary 60 seconds out.
+  renderCard(entryWithObservedAt(new Date(now - 29 * 60_000).toISOString()));
+  expect(container.textContent).toContain("5-hour");
+  // Exactly on the boundary in its own render: still fresh under the
+  // inclusive ceiling, and the one-shot timer from mount has not fired yet.
+  act(() => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(container.textContent).toContain("5-hour");
+  expect(container.textContent).not.toContain("no longer shown");
+  // 1ms past the boundary: the timer fires and the same mounted card drops
+  // the quota with no new entry and no fetch.
+  act(() => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(container.textContent).not.toContain("5-hour");
+  expect(container.textContent).toContain("Quota data is stale and no longer shown.");
+  // Advancing further never brings the quota back.
+  act(() => {
+    vi.advanceTimersByTime(3_600_000);
+  });
+  expect(container.textContent).not.toContain("5-hour");
+  expect(container.textContent).toContain("Quota data is stale and no longer shown.");
+});
+
+it("mounting exactly on the boundary still expires 1ms later", () => {
+  vi.useFakeTimers();
+  const now = Date.parse("2026-10-30T12:00:00.000Z");
+  vi.setSystemTime(now);
+  // Mount with the observation exactly at the ceiling: the inclusive model
+  // still renders quota, but the mount schedules the +1ms invalidation
+  // instead of no timer at all.
+  renderCard(entryWithObservedAt(new Date(now - 30 * 60_000).toISOString()));
+  expect(container.textContent).toContain("5-hour");
+  act(() => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(container.textContent).not.toContain("5-hour");
+  expect(container.textContent).toContain("Quota data is stale and no longer shown.");
+});
+
+it("expires retained history on the mounted card without a new poll", () => {
+  vi.useFakeTimers();
+  const now = Date.parse("2026-10-30T12:00:00.000Z");
+  vi.setSystemTime(now);
+  // Error with a fresh retained snapshot: the card shows the retained
+  // quota alongside the visible error.
+  renderCard(retainedEntryWithObservedAt(new Date(now - 29 * 60_000).toISOString()));
+  expect(container.textContent).toContain("Primary");
+  expect(container.textContent).toContain("quota rate limited");
+  // Exactly on the boundary in its own render: retained quota still shown.
+  act(() => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(container.textContent).toContain("Primary");
+  // 1ms past the boundary: the retained quota disappears, the error stays,
+  // and no poll or server event was involved.
+  act(() => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(container.textContent).not.toContain("Primary");
+  expect(container.textContent).toContain("quota rate limited");
 });
 
 it("schedules no expiry for legacy entries without an observation", () => {

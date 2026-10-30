@@ -1,0 +1,85 @@
+name: cpa-remote-qa
+
+# Minimal scoped QA for pa-vtgw9 (CPA usage): runs the real plugin/daemon/RPC
+# chain, regenerates the native-card fixture from that same run, renders the
+# actual UsageCard before/after expiry, and uploads screenshots + raw logs +
+# the SHA-bound fixture manifest. Manual dispatch only; no push triggers, so
+# topic pushes never start this workflow on their own.
+#
+# Dispatch (mayor): gh workflow run cpa-remote-qa.yml --ref fix/usage-cpa-provenance-capability
+# Then: gh run watch <id> ; artifacts: cpa-chain-qa (t25/t31 PNGs, entries,
+# manifest, vitest logs with the exact plugin/core SHAs).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  chain-qa:
+    name: chain-qa (server e2e + native card screenshots)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies with retry
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Install Playwright browsers
+        timeout-minutes: 10
+        run: npx playwright install chromium
+
+      - name: Build server dependencies
+        run: npm run build:server-deps
+
+      - name: Build app dependencies
+        run: npm run build:app-deps
+
+      - name: Record exact SHAs
+        run: |
+          git rev-parse HEAD > chain-qa-core-sha.txt
+          node -e "console.log(require('./packages/server/src/server/plugins/fixtures/paseo-cpa-usage/MANIFEST.json').fleet_commit)" > chain-qa-plugin-sha.txt
+          cat chain-qa-core-sha.txt chain-qa-plugin-sha.txt
+
+      - name: Run CPA provenance e2e and dump same-run chain entries
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chain-qa-dump"
+          CPA_CHAIN_DUMP="$GITHUB_WORKSPACE/chain-qa-dump" npx vitest run src/server/plugins/usage-cpa-provenance.e2e.test.ts --maxWorkers=1 2>&1 | tee "$GITHUB_WORKSPACE/chain-qa-e2e.log"
+        working-directory: packages/server
+
+      - name: Refresh card fixture from the same chain run
+        run: |
+          cp chain-qa-dump/chain-entries.json packages/app/src/usage/fixtures/chain-entries.fixture.json
+          cp chain-qa-dump/chain-manifest.json packages/app/src/usage/fixtures/chain-manifest.json
+
+      - name: Run native UsageCard chain test (before/after expiry screenshots)
+        run: npx vitest run --project browser src/usage/cpa-cards-chain.browser.test.tsx 2>&1 | tee chain-qa-chain.log
+        working-directory: packages/app
+
+      - name: Run native UsageCard boundary tests
+        run: npx vitest run --project browser src/usage/card.browser.test.tsx 2>&1 | tee chain-qa-card.log
+        working-directory: packages/app
+
+      - name: Upload QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpa-chain-qa
+          path: |
+            chain-qa-core-sha.txt
+            chain-qa-plugin-sha.txt
+            chain-qa-dump/chain-manifest.json
+            chain-qa-dump/chain-entries.json
+            chain-qa-e2e.log
+            packages/app/chain-qa-chain.log
+            packages/app/chain-qa-card.log
+            packages/app/.vitest-screenshots/cpa-chain/
+          if-no-files-found: error

@@ -1,0 +1,14 @@
+{
+  "dumped_at": "2026-10-30T14:44:56.701Z",
+  "fake_mode": "fresh",
+  "plugin_src": "/home/seb/fork-work/pa-vtgw9-core/packages/server/src/server/plugins/fixtures/paseo-cpa-usage",
+  "plugin_fleet_commit": "4cc55f341ff14c56c83e2aeea45059c4aa428649",
+  "plugin_files": {
+    "index.server.ts": "4f7b765f13c2527090fe5d3a4128289ed6cd0d39a67fbc173a457251291f522c",
+    "paseo-plugin.json": "d242d3c2efde0df0b70372895465f3338a96446be192f5253d35f516afe68b6d",
+    "server/inventory.ts": "5e5afb431a58c8ec13d54c37c12b7a41f5e04e5bc48df0fd4642031a1a9d6e67",
+    "server/sources.ts": "1fe702c1d5c8234d40a80962cea756150426633413e5821a1e08d805b0275bca",
+    "shared/contract.ts": "29e036513bafe715474d3e96381fb6943ab21aef59b64e50eb6666be8548cd54"
+  },
+  "core_commit": "75d7563c92d6b2a1b3e84193698d453fabf9ad8f"
+}

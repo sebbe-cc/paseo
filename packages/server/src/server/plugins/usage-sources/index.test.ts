@@ -1,4 +1,5 @@
 import { expect, test, vi } from "vitest";
+import type { UsageReportEntry } from "@getpaseo/protocol/messages";
 import { UsageSourceRegistry } from "./index.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -2001,28 +2002,159 @@ test("R3: warm hit, callback, and final return all enforce the ceiling", async (
   expect(seen).toContain("claude:b:available");
 });
 
-test("R3: warm hit past the ceiling serves an error, not cached quota", async () => {
-  let now = 50_000_000;
+test("R3: true warm hit past the ceiling serves an error, not cached quota", async () => {
+  // Observation at t0; the fetch (and cache write) happens at t29 while the
+  // observation is still fresh, so the first read shows quota.
+  const t0 = 50_000_000;
+  let now = t0;
+  const observedAt = new Date(t0).toISOString();
+  let fetchCount = 0;
   const registry = new UsageSourceRegistry(() => now);
-  const observedAt = new Date(now).toISOString();
   registry.register(
     source({
       id: "codex",
       discover: async () => [{ key: "a", input: {} }],
-      fetch: async () => ({
-        status: "available",
-        observedAt,
-        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
-      }),
+      fetch: async () => {
+        fetchCount += 1;
+        return {
+          status: "available",
+          observedAt,
+          windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+        };
+      },
     }),
   );
+  now = t0 + 29 * 60_000;
   const first = await registry.listReports();
   expect(first[0]?.report.status).toBe("available");
-  // Inside the 5-minute fetch cache but past the 30-minute observation
-  // ceiling: the warm hit must not serve quota.
-  now += 31 * 60_000;
+  // At t31 the fetch cache (5 min TTL from t29) is still warm, so no new
+  // fetch runs — but the observation aged past the 30-minute ceiling, and
+  // the warm hit must downgrade to an error instead of serving quota.
+  now = t0 + 31 * 60_000;
   const second = await registry.listReports();
+  expect(fetchCount).toBe(1);
   expect(second).toHaveLength(1);
   expect(second[0]?.report.status).toBe("error");
   expect(second[0]?.lastSuccessful).toBeUndefined();
+});
+
+interface WithHistory {
+  history?: unknown;
+}
+
+function historyOf(report: unknown): unknown {
+  return (report as WithHistory).history;
+}
+
+function errorWithHistory(observedAt: string): unknown {
+  return {
+    status: "error",
+    error: "quota rate limited",
+    history: {
+      observedAt,
+      windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+    },
+  };
+}
+
+function onlyEntry(entries: UsageReportEntry[]): UsageReportEntry {
+  expect(entries).toHaveLength(1);
+  const entry = entries[0];
+  if (!entry) throw new Error("expected one entry");
+  return entry;
+}
+
+test("R3: stale history is stripped from report and loginErrors, error kept", async () => {
+  // Observation at t0. The fetch at t29 carries an error with fresh history
+  // (29 min old): the callback and first return keep error + history, and
+  // the bridge retains it as lastSuccessful. A second read at t31 comes
+  // from the warm cache with the observation past the ceiling: every
+  // published history — report and loginErrors — is stripped while the
+  // error status and text stay visible.
+  const t0 = 60_000_000;
+  let now = t0 + 29 * 60_000;
+  const observedAt = new Date(t0).toISOString();
+  let fetchCount = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () => {
+        fetchCount += 1;
+        return errorWithHistory(observedAt);
+      },
+    }),
+  );
+  const first = onlyEntry(await registry.listReports());
+  expect(first.report.status).toBe("error");
+  expect(historyOf(first.report)).toBeDefined();
+  expect(first.loginErrors).toHaveLength(1);
+  const firstLogin = first.loginErrors?.[0];
+  if (!firstLogin) throw new Error("expected one login error");
+  expect(firstLogin.report.status).toBe("error");
+  expect(historyOf(firstLogin.report)).toBeDefined();
+  expect(first.lastSuccessful?.report.status).toBe("available");
+  now = t0 + 31 * 60_000;
+  const second = onlyEntry(await registry.listReports());
+  expect(fetchCount).toBe(1);
+  expect(second.report.status).toBe("error");
+  expect(second.report).toMatchObject({ error: "quota rate limited" });
+  expect(historyOf(second.report)).toBeUndefined();
+  expect(second.loginErrors).toHaveLength(1);
+  const secondLogin = second.loginErrors?.[0];
+  if (!secondLogin) throw new Error("expected one login error");
+  expect(secondLogin.report.status).toBe("error");
+  expect(historyOf(secondLogin.report)).toBeUndefined();
+  expect(second.lastSuccessful).toBeUndefined();
+});
+
+test("R3: callback keeps fresh history, final return strips it after a sibling wait", async () => {
+  // Observation at t0. Account A fetches fast at t29 (history fresh, kept
+  // in the per-report callback); account B stays in flight until t31, so
+  // the final list is assembled after the ceiling passed: A's published
+  // history must be stripped there too, with the error kept.
+  const t0 = 70_000_000;
+  let now = t0 + 29 * 60_000;
+  const observedAt = new Date(t0).toISOString();
+  const registry = new UsageSourceRegistry(() => now);
+  let resolveB!: (value: unknown) => void;
+  const gateB = new Promise<unknown>((resolve) => {
+    resolveB = resolve;
+  });
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: (input) =>
+        (input as { account: string }).account === "b"
+          ? gateB
+          : Promise.resolve(errorWithHistory(observedAt)),
+    }),
+  );
+  const callbacks: Array<{ id: string; history: unknown }> = [];
+  const pending = registry.listReports({
+    onReport: (entry) => callbacks.push({ id: entry.id, history: historyOf(entry.report) }),
+  });
+  await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+  const firstCallback = callbacks[0];
+  if (!firstCallback) throw new Error("expected a callback");
+  expect(firstCallback.id).toBe("codex:a");
+  expect(firstCallback.history).toBeDefined();
+  // B resolves after the ceiling passed; its own history is stale on
+  // arrival and must never publish.
+  now = t0 + 31 * 60_000;
+  resolveB(errorWithHistory(observedAt));
+  const final = await pending;
+  const entryA = final.find((entry) => entry.id === "codex:a");
+  const entryB = final.find((entry) => entry.id === "codex:b");
+  if (!entryA || !entryB) throw new Error("expected both entries");
+  for (const entry of [entryA, entryB]) {
+    expect(entry.report.status).toBe("error");
+    expect(historyOf(entry.report)).toBeUndefined();
+    expect(entry.lastSuccessful).toBeUndefined();
+  }
 });

@@ -1,0 +1,250 @@
+[
+  {
+    "id": "claude:quota-v1-a221ffcb4fdaf6ef3462744ac5c01e73027cb96a90df136690197485a4964101",
+    "sourceId": "claude",
+    "sourceLabel": "Claude",
+    "account": {
+      "label": "Max"
+    },
+    "fetchedAt": "2026-10-30T14:44:56.684Z",
+    "report": {
+      "status": "available",
+      "planLabel": "Max",
+      "windows": [
+        {
+          "id": "five_hour",
+          "label": "5-hour",
+          "shortLabel": "5h",
+          "summary": true,
+          "usedPct": 34,
+          "remainingPct": 66,
+          "resetsAt": "2026-10-30T15:44:56.675Z",
+          "tone": "ok"
+        },
+        {
+          "id": "weekly_scoped:opus:",
+          "label": "7-day · opus",
+          "shortLabel": "7d",
+          "usedPct": 150.75,
+          "remainingPct": 0,
+          "resetsAt": null,
+          "tone": "danger"
+        }
+      ],
+      "details": [],
+      "observedAt": "2026-10-30T14:43:56.675Z"
+    },
+    "successfulAt": "2026-10-30T14:43:56.675Z"
+  },
+  {
+    "id": "claude:quota-v1-f60e7c7428eaaf2e025241e3e3f2a3fa722407829d579a6f5016f3f2cc17777c",
+    "sourceId": "claude",
+    "sourceLabel": "Claude",
+    "account": {},
+    "fetchedAt": "2026-10-30T14:44:56.684Z",
+    "report": {
+      "status": "available",
+      "windows": [
+        {
+          "id": "seven_day",
+          "label": "7-day",
+          "shortLabel": "7d",
+          "summary": true,
+          "usedPct": 12.5,
+          "remainingPct": 87.5,
+          "resetsAt": null,
+          "tone": "ok"
+        }
+      ],
+      "details": [
+        {
+          "id": "status",
+          "label": "Status",
+          "value": "transient-fetch-error",
+          "tone": "warning"
+        }
+      ],
+      "observedAt": "2026-10-30T14:43:56.675Z"
+    },
+    "successfulAt": "2026-10-30T14:43:56.675Z"
+  },
+  {
+    "id": "codex:quota-v1-d76f35dbfd54796b6d4f269f846c79947127ae68555cfab8b447948f66000a29",
+    "sourceId": "codex",
+    "sourceLabel": "Codex",
+    "account": {
+      "label": "Plus"
+    },
+    "fetchedAt": "2026-10-30T14:44:56.685Z",
+    "report": {
+      "status": "available",
+      "planLabel": "Plus",
+      "windows": [
+        {
+          "id": "primary",
+          "label": "5-hour",
+          "shortLabel": "5h",
+          "summary": true,
+          "usedPct": 61,
+          "remainingPct": 39,
+          "resetsAt": "2026-10-30T15:14:56.676Z",
+          "tone": "ok"
+        }
+      ],
+      "details": [],
+      "observedAt": "2026-10-30T14:43:56.676Z"
+    },
+    "successfulAt": "2026-10-30T14:43:56.676Z"
+  },
+  {
+    "id": "codex:quota-v1-b2d92e19fc7c4b96f04d306e99aae613aaf66490a798bd7cdf056a8c8e7db158",
+    "sourceId": "codex",
+    "sourceLabel": "Codex",
+    "account": {},
+    "fetchedAt": "2026-10-30T14:44:56.685Z",
+    "report": {
+      "status": "unavailable",
+      "problem": {
+        "kind": "expired",
+        "expiresAt": "2026-10-30T14:44:56.676Z",
+        "refreshedBy": "CLIProxyAPI auto-refresh"
+      },
+      "history": {
+        "observedAt": "2026-10-30T14:43:56.676Z",
+        "windows": [
+          {
+            "id": "secondary",
+            "label": "7-day",
+            "shortLabel": "7d",
+            "summary": true,
+            "usedPct": 88,
+            "remainingPct": 12,
+            "resetsAt": null,
+            "tone": "warning"
+          }
+        ]
+      }
+    },
+    "loginErrors": [
+      {
+        "harness": "codex",
+        "report": {
+          "status": "unavailable",
+          "problem": {
+            "kind": "expired",
+            "expiresAt": "2026-10-30T14:44:56.676Z",
+            "refreshedBy": "CLIProxyAPI auto-refresh"
+          },
+          "history": {
+            "observedAt": "2026-10-30T14:43:56.676Z",
+            "windows": [
+              {
+                "id": "secondary",
+                "label": "7-day",
+                "shortLabel": "7d",
+                "summary": true,
+                "usedPct": 88,
+                "remainingPct": 12,
+                "resetsAt": null,
+                "tone": "warning"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "lastSuccessful": {
+      "fetchedAt": "2026-10-30T14:44:56.688Z",
+      "report": {
+        "status": "available",
+        "windows": [
+          {
+            "id": "secondary",
+            "label": "7-day",
+            "shortLabel": "7d",
+            "summary": true,
+            "usedPct": 88,
+            "remainingPct": 12,
+            "resetsAt": null,
+            "tone": "warning"
+          }
+        ],
+        "observedAt": "2026-10-30T14:43:56.676Z"
+      }
+    }
+  },
+  {
+    "id": "codex:quota-v1-62623ec825cf99be98f304bf07d781a4dacb2e78e172f94bb1fdcde9561e5b74",
+    "sourceId": "codex",
+    "sourceLabel": "Codex",
+    "account": {
+      "label": "Plus"
+    },
+    "fetchedAt": "2026-10-30T14:44:56.685Z",
+    "report": {
+      "status": "error",
+      "error": "quota rate limited (last verified observation 1 min ago)",
+      "history": {
+        "observedAt": "2026-10-30T14:43:56.676Z",
+        "planLabel": "Plus",
+        "windows": [
+          {
+            "id": "primary",
+            "label": "5-hour",
+            "shortLabel": "5h",
+            "summary": true,
+            "usedPct": 61,
+            "remainingPct": 39,
+            "resetsAt": "2026-10-30T15:14:56.676Z",
+            "tone": "ok"
+          }
+        ]
+      }
+    },
+    "loginErrors": [
+      {
+        "harness": "codex",
+        "report": {
+          "status": "error",
+          "error": "quota rate limited (last verified observation 1 min ago)",
+          "history": {
+            "observedAt": "2026-10-30T14:43:56.676Z",
+            "planLabel": "Plus",
+            "windows": [
+              {
+                "id": "primary",
+                "label": "5-hour",
+                "shortLabel": "5h",
+                "summary": true,
+                "usedPct": 61,
+                "remainingPct": 39,
+                "resetsAt": "2026-10-30T15:14:56.676Z",
+                "tone": "ok"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "lastSuccessful": {
+      "fetchedAt": "2026-10-30T14:44:56.689Z",
+      "report": {
+        "status": "available",
+        "windows": [
+          {
+            "id": "primary",
+            "label": "5-hour",
+            "shortLabel": "5h",
+            "summary": true,
+            "usedPct": 61,
+            "remainingPct": 39,
+            "resetsAt": "2026-10-30T15:14:56.676Z",
+            "tone": "ok"
+          }
+        ],
+        "planLabel": "Plus",
+        "observedAt": "2026-10-30T14:43:56.676Z"
+      }
+    }
+  }
+]

@@ -25,8 +25,9 @@ import { MAX_OBSERVED_AGE_MS, resolveUsageReport, type UsageRefresh } from "./mo
  * so quota disappears without waiting for a new poll or server event. The
  * freshness text already ticks on its own inside UsageFreshness; only the
  * parent content choice needs this timer. Legacy entries without a
- * source-owned observation, future observations, and already-expired
- * observations schedule nothing.
+ * source-owned observation, future observations, and observations already
+ * past the boundary schedule nothing; mounting exactly on the boundary
+ * schedules the +1ms invalidation below.
  */
 function useObservationExpiry(observedAt: string | null): void {
   const [, setExpired] = useState(0);
@@ -35,10 +36,17 @@ function useObservationExpiry(observedAt: string | null): void {
     const at = Date.parse(observedAt);
     if (Number.isNaN(at)) return undefined;
     const delay = at + MAX_OBSERVED_AGE_MS - Date.now();
-    if (delay <= 0 || at > Date.now()) return undefined;
+    // The model treats an age of exactly MAX_OBSERVED_AGE_MS as fresh, so a
+    // timer firing exactly on the boundary would re-render into the same
+    // quota with no follow-up timer and the card would stay stuck. Fire 1ms
+    // past the boundary instead, so the re-render lands provably past the
+    // ceiling. Mounting exactly on the boundary (delay 0) still schedules
+    // that +1ms invalidation; an already-expired observation (delay < 0)
+    // renders stale on this render and needs no timer.
+    if (delay < 0 || at > Date.now()) return undefined;
     const timer = setTimeout(
       () => setExpired((count) => count + 1),
-      Math.min(delay, 2_147_483_647),
+      Math.min(delay + 1, 2_147_483_647),
     );
     return () => clearTimeout(timer);
   }, [observedAt]);

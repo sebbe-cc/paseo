@@ -442,6 +442,37 @@ it("hides quota observed past the ceiling even when the poll is fresh", () => {
   expect(resolved.messages).toHaveLength(1);
 });
 
+it("R4: an observation exactly at the ceiling is still fresh; 1ms later it is not", () => {
+  // Pins the inclusive boundary the mounted card timer relies on: quota at
+  // exactly MAX_OBSERVED_AGE_MS renders, and the +1ms timer invalidation
+  // lands provably past it. Both live and retained paths.
+  const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
+  if (live.report.status !== "available") throw new Error("fixture must be available");
+  const atExactly = (ms: number): UsageReportEntry => ({
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    successfulAt: new Date().toISOString(),
+    report: { ...live.report, observedAt: new Date(Date.now() - ms).toISOString() },
+  });
+  expect(resolveUsageReport(atExactly(1_800_000), i18n.t).windows).toHaveLength(1);
+  const past = resolveUsageReport(atExactly(1_800_001), i18n.t);
+  expect(past.windows).toEqual([]);
+  expect(past.messages).toHaveLength(1);
+  const base = entry({ windows: [{ id: "primary", label: "Primary", usedPct: 61 }] });
+  if (base.report.status !== "available") throw new Error("fixture must be available");
+  const retainedAt = (ms: number): UsageReportEntry => ({
+    ...base,
+    fetchedAt: new Date().toISOString(),
+    report: { status: "error", error: "proxy down" },
+    lastSuccessful: {
+      fetchedAt: new Date().toISOString(),
+      report: { ...base.report, observedAt: new Date(Date.now() - ms).toISOString() },
+    },
+  });
+  expect(resolveUsageReport(retainedAt(1_800_000), i18n.t).windows).toHaveLength(1);
+  expect(resolveUsageReport(retainedAt(1_800_001), i18n.t).windows).toEqual([]);
+});
+
 it("serves retained history only while its own observation is fresh", () => {
   const freshObservedAt = new Date(Date.now() - 120_000).toISOString();
   const staleObservedAt = new Date(Date.now() - 45 * 60_000).toISOString();

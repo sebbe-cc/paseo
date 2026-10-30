@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -24,8 +24,51 @@ import { BuiltinPluginLoader } from "./builtin/index.js";
  * receives here is what the native card receives.
  */
 
-const PLUGIN_SRC = "/home/seb/.paseo/worktrees/32ilzdap/pa-vtgw9/plugins/paseo-cpa-usage";
 const API_KEY = "e2e-management-key";
+
+// H1: the plugin under test is an explicit, SHA-bound artifact. The default
+// is the vendored fixture (fixtures/paseo-cpa-usage + MANIFEST.json, pinned
+// to a fleet commit); CI or local runs may point CPA_PLUGIN_SRC at another
+// exported directory, but only when it carries a verifying MANIFEST.json.
+// No mutable absolute worktree path is ever used silently.
+const FIXTURE_SRC = path.resolve(
+  new URL(".", import.meta.url).pathname,
+  "fixtures/paseo-cpa-usage",
+);
+
+interface PluginManifest {
+  fleet_repo: string;
+  fleet_commit: string;
+  generated_at: string;
+  files: Record<string, string>;
+}
+
+async function resolvePluginSrc(): Promise<{ dir: string; manifest: PluginManifest }> {
+  const dir = process.env.CPA_PLUGIN_SRC ?? FIXTURE_SRC;
+  const manifestPath = path.join(dir, "MANIFEST.json");
+  let manifest: PluginManifest;
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PluginManifest;
+  } catch {
+    throw new Error(
+      `CPA plugin source at ${dir} carries no MANIFEST.json; refusing to test an unattested plugin directory (set CPA_PLUGIN_SRC to an exported artifact with a manifest)`,
+    );
+  }
+  for (const [rel, expected] of Object.entries(manifest.files)) {
+    const actual = createHash("sha256")
+      .update(await readFile(path.join(dir, rel)))
+      .digest("hex");
+    if (actual !== expected) {
+      throw new Error(
+        `CPA plugin artifact mismatch for ${rel}: expected ${expected}, got ${actual} (source ${dir}, fleet commit ${manifest.fleet_commit})`,
+      );
+    }
+  }
+  console.log(
+    `[cpa-qa] plugin artifact verified: fleet_commit=${manifest.fleet_commit} files=${Object.keys(manifest.files).length} src=${dir}`,
+  );
+  return { dir, manifest };
+}
 
 function quotaV1(provider: "claude" | "codex", ...parts: string[]): string {
   const payload = JSON.stringify(["quota-v1", provider, ...parts]);
@@ -115,6 +158,8 @@ function accountsPayload(now: number, mode: ApiMode) {
         ],
       },
       {
+        // R1: the expired grant carries fresh validated windows too, so the
+        // cold chain proves error + retained history for expired as well.
         account_id: CODEX_B,
         provider: "codex",
         plan: null,
@@ -123,7 +168,15 @@ function accountsPayload(now: number, mode: ApiMode) {
         observed_at: observedAt,
         checked_at: checkedAt,
         retry_at: null,
-        windows: [],
+        windows: [
+          {
+            id: "secondary",
+            used_percent: 88,
+            window_seconds: 604_800,
+            resets_at: null,
+            scope: null,
+          },
+        ],
       },
       {
         // R1: a failing account whose backend still holds the last
@@ -194,15 +247,21 @@ async function startFakeApi(mode: {
   };
 }
 
-async function stagePlugin(): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+async function stagePlugin(manifest: PluginManifest): Promise<{
+  dir: string;
+  cleanup: () => Promise<void>;
+}> {
   const root = await mkdtemp(path.join(os.tmpdir(), "cpa-plugin-"));
   const dir = path.join(root, "paseo-cpa-usage");
   await mkdir(dir, { recursive: true });
-  // Only the runtime files: the daemon compiles the plugin itself.
-  await cp(path.join(PLUGIN_SRC, "paseo-plugin.json"), path.join(dir, "paseo-plugin.json"));
-  await cp(path.join(PLUGIN_SRC, "index.server.ts"), path.join(dir, "index.server.ts"));
-  await cp(path.join(PLUGIN_SRC, "server"), path.join(dir, "server"), { recursive: true });
-  await cp(path.join(PLUGIN_SRC, "shared"), path.join(dir, "shared"), { recursive: true });
+  // Only the runtime files the manifest attests: the daemon compiles the
+  // plugin itself.
+  const src = process.env.CPA_PLUGIN_SRC ?? FIXTURE_SRC;
+  for (const rel of Object.keys(manifest.files)) {
+    const dest = path.join(dir, rel);
+    await mkdir(path.dirname(dest), { recursive: true });
+    await cp(path.join(src, rel), dest, { recursive: true });
+  }
   return { dir, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 
@@ -274,10 +333,57 @@ async function withCpaEnv<T>(url: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * H2 support: when CPA_CHAIN_DUMP points at a directory, the fresh-mode test
+ * writes the exact RPC entries it received (plus a provenance manifest) so
+ * the native UsageCard chain test renders entries from this same real
+ * fake-plugin/RPC run instead of a hand-written shape.
+ */
+async function maybeDumpChain(
+  reports: unknown,
+  manifest: PluginManifest,
+  mode: ApiMode,
+): Promise<void> {
+  const dumpDir = process.env.CPA_CHAIN_DUMP;
+  if (!dumpDir || mode !== "fresh") return;
+  await mkdir(dumpDir, { recursive: true });
+  const { execFileSync } = await import("node:child_process");
+  let coreCommit = "unknown";
+  try {
+    coreCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: path.resolve(new URL(".", import.meta.url).pathname, "../../../../.."),
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    // A source export without git still dumps; provenance records the gap.
+  }
+  await writeFile(
+    path.join(dumpDir, "chain-entries.json"),
+    `${JSON.stringify(reports, null, 2)}\n`,
+  );
+  await writeFile(
+    path.join(dumpDir, "chain-manifest.json"),
+    `${JSON.stringify(
+      {
+        dumped_at: new Date().toISOString(),
+        fake_mode: mode,
+        plugin_src: process.env.CPA_PLUGIN_SRC ?? FIXTURE_SRC,
+        plugin_fleet_commit: manifest.fleet_commit,
+        plugin_files: manifest.files,
+        core_commit: coreCommit,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  console.log(`[cpa-qa] chain entries dumped to ${dumpDir}`);
+}
+
 test("real daemon subprocess serves CPA quotas as native cards with observed_at provenance", async () => {
   const mode: { current: ApiMode } = { current: "fresh" };
   const api = await startFakeApi(mode);
-  const plugin = await stagePlugin();
+  const { manifest } = await resolvePluginSrc();
+  const plugin = await stagePlugin(manifest);
   const builtins = await stageBuiltins();
   try {
     await withCpaEnv(api.url, async () => {
@@ -342,12 +448,19 @@ test("real daemon subprocess serves CPA quotas as native cards with observed_at 
         const claudeB = first.reports.find((entry) => entry.id === `claude:${CLAUDE_B}`);
         expect(claudeB?.report.status).toBe("available");
 
-        // The expired account stays a visible expiry, never quota.
+        // The expired account stays a visible expiry, never quota — but its
+        // fresh backend windows travel as retained history (R1), so a cold
+        // daemon shows error + quota instead of error alone.
         const codexB = first.reports.find((entry) => entry.id === `codex:${CODEX_B}`);
         expect(codexB?.report).toMatchObject({
           status: "unavailable",
           problem: { kind: "expired", expiresAt: expect.any(String) },
         });
+        expect(codexB?.lastSuccessful?.report).toMatchObject({
+          status: "available",
+          windows: [{ usedPct: 88 }],
+        });
+        expect(codexB?.lastSuccessful?.report.observedAt).toMatch(/^\d{4}-/);
 
         // R1 over the real RPC: the rate-limited account keeps its visible
         // error, while its fresh backend quota is bridged to lastSuccessful
@@ -359,6 +472,9 @@ test("real daemon subprocess serves CPA quotas as native cards with observed_at 
           windows: [{ usedPct: 61 }],
         });
         expect(codexC?.lastSuccessful?.report.observedAt).toMatch(/^\d{4}-/);
+
+        // H2: persist this exact RPC payload for the native card chain test.
+        await maybeDumpChain(first.reports, manifest, mode.current);
       } finally {
         await client.close();
         await daemon.close();
@@ -374,7 +490,8 @@ test("real daemon subprocess serves CPA quotas as native cards with observed_at 
 test("real registry never serves quota older than the ceiling, including after a restart", async () => {
   const mode: { current: ApiMode } = { current: "aged" };
   const api = await startFakeApi(mode);
-  const plugin = await stagePlugin();
+  const { manifest } = await resolvePluginSrc();
+  const plugin = await stagePlugin(manifest);
   const builtins = await stageBuiltins();
   try {
     await withCpaEnv(api.url, async () => {
