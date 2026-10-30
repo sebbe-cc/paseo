@@ -155,7 +155,9 @@ export class PluginService {
 
   private handleUsageChanged(sourceId: string): void {
     const reportIds = this.usageSources.invalidateSource(sourceId);
-    if (reportIds.length === 0) return;
+    // An empty id list is still a push: the source's inventory may have
+    // changed (first observation after an empty discovery), so clients
+    // rediscover instead of waiting for a refresh.
     for (const listener of this.usageChangedListeners) listener(reportIds);
   }
 

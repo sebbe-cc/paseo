@@ -868,3 +868,123 @@ test("failed discovery preserves history until discovery confirms account remova
   present = true;
   expect((await registry.listReports())[0]?.lastSuccessful).toBeUndefined();
 });
+
+test("a fetch retired by an event never overwrites the event's newer data", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  let calls = 0;
+  let releaseOld!: () => void;
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve;
+  });
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => {
+        calls++;
+        if (calls === 2) {
+          // F1 starts with the older quota and stalls.
+          await oldGate;
+          return { status: "available", windows: [{ id: "w", label: "old" }] };
+        }
+        return {
+          status: "available",
+          windows: [{ id: "w", label: calls === 1 ? "old" : "new" }],
+        };
+      },
+    }),
+  );
+  const first = await registry.listReports();
+  expect(first[0]?.report).toMatchObject({ windows: [{ label: "old" }] });
+  // F1 hangs on its next read; the event retires it, F2 reads the new quota,
+  // and F1 resolves last with the older values.
+  const slow = registry.listReports({ reportIds: ["muse:a"], forceRefresh: true });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+  const fresh = await registry.listReports({ reportIds: ["muse:a"] });
+  expect(fresh[0]?.report).toMatchObject({ windows: [{ label: "new" }] });
+  releaseOld();
+  const retired = await slow;
+  // The retired fetch serves what the event announced, not its own stale read.
+  expect(retired[0]?.report).toMatchObject({ windows: [{ label: "new" }] });
+  expect(calls).toBe(3);
+  // The cache now holds the new quota; no further fetch is needed.
+  await registry.listReports({ reportIds: ["muse:a"] });
+  expect(calls).toBe(3);
+});
+
+test("a freshness invalidation keeps every account's last-good snapshot for later errors", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  let failB = false;
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: async (input) => {
+        const account = (input as { account: string }).account;
+        if (account === "b" && failB) throw new Error("quota backend down");
+        return { status: "available", windows: [{ id: "w", label: `ok-${account}` }] };
+      },
+    }),
+  );
+  const initial = await registry.listReports();
+  expect(initial.map((entry) => entry.id)).toEqual(["muse:a", "muse:b"]);
+  // An event for the source drops freshness but preserves valid history.
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a", "muse:b"]);
+  failB = true;
+  const after = await registry.listReports({ forceRefresh: true });
+  const entryB = after.find((entry) => entry.id === "muse:b")!;
+  expect(entryB.report).toMatchObject({ status: "error" });
+  // B's proven observation survives the invalidation and the later error.
+  expect(entryB.lastSuccessful?.report).toMatchObject({ windows: [{ label: "ok-b" }] });
+  const entryA = after.find((entry) => entry.id === "muse:a")!;
+  expect(entryA.report).toMatchObject({ windows: [{ label: "ok-a" }] });
+});
+
+test("a first event after an empty discovery still pushes an inventory invalidation", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(source({ id: "muse" }));
+  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
+  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
+  try {
+    // Nothing discovered yet: no card ids, but the registered source's
+    // inventory may have changed, so listeners still fire for rediscovery.
+    expect(registry.invalidateSource("muse")).toEqual([]);
+    expect(invalidated).toEqual([{ sourceId: "muse", reportIds: [] }]);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("replacing a source keeps invalidation routed to the new owner's cards", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  const windows = (label: string) => ({ status: "available", windows: [{ id: "w", label }] });
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => windows("v1"),
+    }),
+  );
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["muse:a"]);
+  registry.unregister("muse");
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => windows("v2"),
+    }),
+  );
+  const replaced = await registry.listReports();
+  expect(replaced[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+  const refetched = await registry.listReports({ reportIds: ["muse:a"] });
+  expect(refetched[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
+});

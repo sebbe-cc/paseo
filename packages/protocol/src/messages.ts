@@ -3752,6 +3752,11 @@ export const ServerInfoStatusPayloadSchema = z
         fileByteWrites: z.boolean().optional(),
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
         providerUsageList: z.boolean().optional(),
+        // COMPAT(usageReportsChanged): added with the muse usage/changed push;
+        // older daemons reject the whole event subscription when the new event
+        // is bundled with providers/config, so the app requests it only when
+        // this flag is set. Remove the gate once the daemon floor serves it.
+        usageReportsChanged: z.boolean().optional(),
         // COMPAT(agentDetach): added in v0.1.98, remove gate after 2026-12-19 once daemon floor >= v0.1.98.
         agentDetach: z.boolean().optional(),
         // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
@@ -6456,7 +6461,10 @@ export const UsageListReportsResponseMessageSchema = z.object({
 });
 export const UsageReportsChangedMessageSchema = z.object({
   type: z.literal("usage.reports.changed"),
-  payload: z.object({ reportIds: z.array(z.string().min(1)).min(1) }),
+  // An empty id list is a valid inventory push: the source's card set may
+  // have changed (first observation after an empty discovery), so clients
+  // rediscover instead of patching known cards.
+  payload: z.object({ reportIds: z.array(z.string().min(1)) }),
 });
 
 const AgentSlashCommandSchema = z.object({

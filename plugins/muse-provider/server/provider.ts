@@ -9,7 +9,7 @@ import {
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
 import { serveArgs } from "./options.js";
-import { Usage, accountForEnv } from "./usage.js";
+import { Usage } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
 import { MspConnection } from "./connection.js";
@@ -65,6 +65,7 @@ async function seedSubscriptionUsage(
   session: Session,
   usage: Usage,
   account: string,
+  generation: number,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -74,7 +75,7 @@ async function seedSubscriptionUsage(
         timer = setTimeout(() => reject(new Error("usage seed timed out")), 5000);
       }),
     ]);
-    if (observation.usage) usage.observe(account, observation.usage);
+    if (observation.usage) usage.observe(account, generation, observation.usage);
   } catch {
     // Best-effort: silence keeps the prior snapshot, events fill it later.
   } finally {
@@ -142,6 +143,12 @@ function connect(
       if (sessions.has(input.sessionId))
         throw new MuseError("duplicateSession", "Muse session is already open");
       const sessionLaunch = { ...launch, env: { ...launch.env, ...input.config.env } };
+      // usage/changed is host-global without an account id: attribute each
+      // observation to the launch env that opened this host, filed under this
+      // host's own attach generation — never merged across accounts, hosts,
+      // or pool contexts. Events arriving before attach are dropped; the
+      // seed read right after attach covers them.
+      const hostUsage: { account?: string; generation?: number } = {};
       const session = new Session({
         id: input.sessionId,
         config: input.config,
@@ -149,19 +156,21 @@ function connect(
         emit,
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
-        // usage/changed is host-global without an account id: attribute it to
-        // the launch env that opened this host, never merged across accounts.
-        onSubscriptionUsage: (observed) =>
-          usage.observe(accountForEnv(sessionLaunch.env), observed),
+        onSubscriptionUsage: (observed) => {
+          if (hostUsage.account === undefined || hostUsage.generation === undefined) return;
+          usage.observe(hostUsage.account, hostUsage.generation, observed);
+        },
       });
       sessions.set(input.sessionId, session);
       try {
         await session.open(input);
-        const { account } = usage.attach(input.sessionId, sessionLaunch, () => session.readUsage());
+        const attached = usage.attach(input.sessionId, sessionLaunch, () => session.readUsage());
+        hostUsage.account = attached.account;
+        hostUsage.generation = attached.generation;
         // Seed the snapshot from the already-awake host at connect; events
         // keep it fresh from here. Best-effort and bounded: a slow host must
         // not stall session open, and silence keeps prior observations.
-        await seedSubscriptionUsage(session, usage, account);
+        await seedSubscriptionUsage(session, usage, attached.account, attached.generation);
       } catch (error) {
         sessions.delete(input.sessionId);
         await session.close();

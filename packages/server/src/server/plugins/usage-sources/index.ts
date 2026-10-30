@@ -64,6 +64,15 @@ export class UsageSourceRegistry {
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
   private readonly pending = new Map<string, Promise<UsageReportEntry>>();
 
+  /**
+   * Bumped on every freshness invalidation. In-flight fetches capture it and
+   * refuse to publish once it moved: a retired request must never overwrite
+   * the event's newer data with the older quota it started with. Same
+   * generation idiom as the override pending guard (pa-91k7j); the two must
+   * stay one counter at integration.
+   */
+  private generation = 0;
+
   private readonly invalidatedListeners = new Set<(event: UsageSourceInvalidated) => void>();
 
   constructor(
@@ -83,22 +92,36 @@ export class UsageSourceRegistry {
   }
 
   /**
-   * Drops a source's cached cards (five-minute cache, last-good snapshots,
+   * Drops a source's cached cards (five-minute freshness cache and retired
    * in-flight fetches) and reports the affected card ids. Called when the
    * source pushes a locally observed change — an event, never a poll — so
    * cards re-read instead of serving the evicted entries.
+   *
+   * Ownership follows the actual source object, never an id prefix: a card
+   * a source took over (or one not yet discovered) keeps its own id shape.
+   * Last-good snapshots are deliberately kept — a freshness invalidation
+   * must not destroy the same identity's valid history, or the next read
+   * error would lose an already proven observation. Listeners fire for
+   * every registered source, even with zero known cards, so a first event
+   * after an empty discovery still triggers a rediscovery.
    */
   invalidateSource(sourceId: string): string[] {
-    const prefix = `${sourceId}:`;
-    const reportIds = [...this.known.keys()].filter((id) => id.startsWith(prefix));
-    for (const store of [this.cache, this.successful, this.pending]) {
-      for (const key of store.keys()) if (key.startsWith(prefix)) store.delete(key);
-    }
-    if (reportIds.length > 0) {
-      const event = { sourceId, reportIds: [...reportIds] };
+    this.generation++;
+    const ownedIds = [...this.known]
+      .filter(([, report]) => report.source.id === sourceId)
+      .map(([id]) => id);
+    const owned = new Set(ownedIds);
+    const ownedKey = (key: string): boolean => {
+      for (const id of owned) if (key === id || key.startsWith(`${id}:`)) return true;
+      return false;
+    };
+    for (const key of this.cache.keys()) if (ownedKey(key)) this.cache.delete(key);
+    for (const key of this.pending.keys()) if (ownedKey(key)) this.pending.delete(key);
+    if (this.sources.has(sourceId)) {
+      const event = { sourceId, reportIds: [...ownedIds] };
       for (const listener of this.invalidatedListeners) listener(event);
     }
-    return reportIds;
+    return ownedIds;
   }
 
   register(source: UsageSource): void {
@@ -304,9 +327,18 @@ export class UsageSourceRegistry {
       return Promise.resolve(cached.entry);
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
+    const generation = this.generation;
     const request = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
       const outcome = await this.fetchWithFallback(known);
+      if (this.generation !== generation) {
+        // An event retired this fetch while it was in flight: its older
+        // quota must never overwrite the event's newer data. Re-read as a
+        // normal (non-forced) read so the caller gets what the event
+        // announced — usually a fresh cache hit, or a join on the fetch the
+        // event triggered — instead of starting yet another fetch.
+        return this.fetchId(id, known);
+      }
       const completedAt = new Date(this.now()).toISOString();
       const entry: UsageReportEntry = {
         id,

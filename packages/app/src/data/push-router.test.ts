@@ -51,9 +51,12 @@ const daemonConfig: MutableDaemonConfig = {
   appendSystemPrompt: "",
 };
 
-function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}): {
+function createFakeClient(
+  config: { rejectCheckoutDiffSubscribe?: boolean; usageReportsChanged?: boolean } = {},
+): {
   client: RouterClient;
   emit: <K extends RouterMessageType>(message: Extract<RouterMessage, { type: K }>) => void;
+  observeEventsCalls: string[][];
   subscribeCheckoutDiffCalls: Array<{
     cwd: string;
     compare: { mode: "uncommitted" | "base" | "all"; baseRef?: string; ignoreWhitespace?: boolean };
@@ -139,17 +142,31 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
     };
   }
 
+  const observeEventsCalls: string[][] = [];
   return {
     client: {
       async getProvidersSnapshot() {
         throw new Error("Unexpected snapshot pull");
       },
-      observeEvents: () =>
-        observe(
-          { subscriptionId: "events", requestId: "events", events: [] },
+      getLastServerInfoMessage: () => ({
+        status: "server_info" as const,
+        serverId: "server-1",
+        hostname: null,
+        version: null,
+        ...(config.usageReportsChanged === true ? { features: { usageReportsChanged: true } } : {}),
+      }),
+      observeEvents: (events: Parameters<RouterClient["observeEvents"]>[0]) => {
+        observeEventsCalls.push([...events]);
+        return observe(
+          {
+            subscriptionId: `events-${observeEventsCalls.length}`,
+            requestId: "events",
+            events: [],
+          },
           ["status", "providers_snapshot_update", "usage.reports.changed"],
           () => {},
-        ),
+        );
+      },
       observeCheckoutDiff(cwd, compare) {
         const subscriptionId = `server-diff-${subscribeCheckoutDiffCalls.length + 1}`;
         subscribeCheckoutDiffCalls.push({ cwd, compare, subscriptionId });
@@ -187,6 +204,7 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
       },
     },
     emit,
+    observeEventsCalls,
     subscribeCheckoutDiffCalls,
     unsubscribeCheckoutDiffCalls,
     subscribeTerminalCalls,
@@ -387,7 +405,7 @@ describe("server data push router", () => {
 
   it("invalidates host and agent usage cards on usage.reports.changed", () => {
     const queryClient = new QueryClient();
-    const fake = createFakeClient();
+    const fake = createFakeClient({ usageReportsChanged: true });
     const serverId = "server-1";
     const reportsKey = ["usage", serverId, "reports"];
     const agentKey = ["usage", serverId, "agent", "agent-1"];
@@ -397,11 +415,55 @@ describe("server data push router", () => {
     queryClient.setQueryData(otherHostKey, []);
     const unmount = mountServerDataPushRouter({ client: fake.client, queryClient, serverId });
 
+    expect(fake.observeEventsCalls).toEqual([
+      ["providers_snapshot_update", "status.daemon_config_changed"],
+      ["usage.reports.changed"],
+    ]);
+
     fake.emit({ type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } });
 
     expect(queryClient.getQueryState(reportsKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(agentKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherHostKey)?.isInvalidated).not.toBe(true);
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("requests the usage push only where the daemon advertises it", () => {
+    const queryClient = new QueryClient();
+    const fake = createFakeClient();
+    const serverId = "server-1";
+    const reportsKey = ["usage", serverId, "reports"];
+    queryClient.setQueryData(reportsKey, []);
+    const unmount = mountServerDataPushRouter({ client: fake.client, queryClient, serverId });
+
+    // Older daemons parse the event list against a closed enum and reject the
+    // whole bundled request — so the usage event must not be bundled with the
+    // working providers/config push.
+    expect(fake.observeEventsCalls).toEqual([
+      ["providers_snapshot_update", "status.daemon_config_changed"],
+    ]);
+
+    // A stray usage event without a subscription changes nothing.
+    fake.emit({ type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } });
+    expect(queryClient.getQueryState(reportsKey)?.isInvalidated).not.toBe(true);
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("an empty usage inventory push still rediscovers usage cards", () => {
+    const queryClient = new QueryClient();
+    const fake = createFakeClient({ usageReportsChanged: true });
+    const serverId = "server-1";
+    const reportsKey = ["usage", serverId, "reports"];
+    queryClient.setQueryData(reportsKey, []);
+    const unmount = mountServerDataPushRouter({ client: fake.client, queryClient, serverId });
+
+    fake.emit({ type: "usage.reports.changed", payload: { reportIds: [] } });
+
+    expect(queryClient.getQueryState(reportsKey)?.isInvalidated).toBe(true);
 
     unmount();
     queryClient.clear();

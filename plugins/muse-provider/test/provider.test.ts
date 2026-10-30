@@ -1521,28 +1521,179 @@ test("usage snapshots ignore out-of-order and invalid observations, never two ac
   const usage = new Usage();
   const launchA = { command: "muse", args: [], env: { HOME: "/usage/a" } };
   const launchB = { command: "muse", args: [], env: { HOME: "/usage/b" } };
-  const accountA = usage.attach("session-a", launchA, async () => ({})).account;
-  const accountB = usage.attach("session-b", launchB, async () => ({})).account;
-  expect(accountA).not.toBe(accountB);
+  const attachedA = usage.attach("session-a", launchA, async () => ({}));
+  const attachedB = usage.attach("session-b", launchB, async () => ({}));
+  expect(attachedA.account).not.toBe(attachedB.account);
   const changed: string[] = [];
   usage.onChanged((account) => changed.push(account));
   const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
-  expect(usage.observe(accountA, fresh)).toBe(true);
-  expect(changed).toEqual([accountA]);
-  // Older observations never overwrite newer ones.
-  expect(usage.observe(accountA, changedUsage)).toBe(false);
-  expect(usage.observe(accountA, { ...fresh, observedAtMs: 1700000010000 })).toBe(false);
-  expect(changed).toEqual([accountA]);
+  expect(usage.observe(attachedA.account, attachedA.generation, fresh)).toBe(true);
+  expect(changed).toEqual([attachedA.account]);
+  // Older observations never overwrite newer ones for the same host.
+  expect(usage.observe(attachedA.account, attachedA.generation, changedUsage)).toBe(false);
+  expect(
+    usage.observe(attachedA.account, attachedA.generation, {
+      ...fresh,
+      observedAtMs: 1700000010000,
+    }),
+  ).toBe(false);
+  expect(changed).toEqual([attachedA.account]);
   // Invalid observations are rejected and never become zero quota.
-  expect(usage.observe(accountA, { ...fresh, window: { ...fresh.window, usedPercent: -5 } })).toBe(
+  expect(
+    usage.observe(attachedA.account, attachedA.generation, {
+      ...fresh,
+      window: { ...fresh.window, usedPercent: -5 },
+    }),
+  ).toBe(false);
+  expect(usage.observe(attachedA.account, attachedA.generation, "not-an-observation")).toBe(false);
+  expect(usage.observe(attachedB.account, attachedB.generation, fresh)).toBe(true);
+  expect(changed).toEqual([attachedA.account, attachedB.account]);
+  expect(usage.snapshot(attachedA.account)).toEqual(fresh);
+  expect(usage.snapshot(attachedB.account)).toEqual(fresh);
+  expect(usage.snapshot("unknown")).toBeUndefined();
+});
+
+test("a replacement host in the same home never inherits the closed host's quota", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/same-home" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const hostA = usage.attach("session-a", launch, async () => ({
+    usage: { ...changedUsage, observedAtMs: 1700000005000 },
+  }));
+  expect(usage.observe(hostA.account, hostA.generation, changedUsage)).toBe(true);
+  usage.detach("session-a");
+  // Host B opens in the same config home but stays silent: no seed, no event.
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  expect(hostB.generation).not.toBe(hostA.generation);
+  const report = await usage.registration().fetch({ account: hostB.account });
+  // A's observation is history for A's context, not B's current quota — and a
+  // silent host is honestly unavailable, never zero quota from thin air.
+  expect(report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+});
+
+test("concurrent hosts in one home serve the newest live observation, never a closed host's", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/pool-home" } };
+  const old = { ...changedUsage, observedAtMs: 1700000005000 };
+  const hostA = usage.attach("session-a", launch, async () => ({ usage: old }));
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
+  // The event arrives on B's host connection while A still serves old values.
+  expect(usage.observe(hostB.account, hostB.generation, fresh)).toBe(true);
+  const live = await usage.registration().fetch({ account: hostA.account });
+  expect(live).toMatchObject({ status: "available", planLabel: "Pro" });
+  if (live.status !== "available") throw new Error("Expected an available pooled report");
+  expect(live.windows[0]).toMatchObject({ usedPct: 81 });
+  // Closing A must not disturb B's live quota, nor resurrect A's older one.
+  usage.detach("session-a");
+  const afterDetach = await usage.registration().fetch({ account: hostB.account });
+  if (afterDetach.status !== "available") throw new Error("Expected B's quota to survive A");
+  expect(afterDetach.windows[0]).toMatchObject({ usedPct: 81 });
+});
+
+test("a cold account with no observation is unavailable without starting a host", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  // status/connect remembers the launch, but no host ever opened and no
+  // event ever arrived: usage must not start a transient host to answer.
+  const { account } = usage.remember({ command: "muse", args: [], env: { HOME: "/usage/cold" } });
+  const report = await usage.registration().fetch({ account });
+  expect(report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+});
+
+test("detach notifies only on the live-to-stale transition", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/notify" } };
+  usage.attach("session-a", launch, async () => ({}));
+  usage.attach("session-b", launch, async () => ({}));
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  // One host stays live: the card content is unchanged, no push needed.
+  usage.detach("session-a");
+  expect(changed).toEqual([]);
+  // The last host closes: the card turns stale, so clients must re-read.
+  usage.detach("session-b");
+  expect(changed).toHaveLength(1);
+  usage.detach("session-not-attached");
+  expect(changed).toHaveLength(1);
+});
+
+test("a newer event wins over an older read that resolves later; a failed reader keeps the snapshot", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/race" } };
+  let releaseOld!: (value: { usage?: typeof changedUsage }) => void;
+  const oldRead = new Promise<{ usage?: typeof changedUsage }>((resolve) => {
+    releaseOld = resolve;
+  });
+  const attached = usage.attach("session-a", launch, () => oldRead);
+  const source = usage.registration();
+  const pending = source.fetch({ account: attached.account });
+  // The event lands while the older read is still in flight.
+  const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
+  expect(usage.observe(attached.account, attached.generation, fresh)).toBe(true);
+  releaseOld({ usage: changedUsage });
+  const won = await pending;
+  if (won.status !== "available") throw new Error("Expected the newer event to serve");
+  expect(won.windows[0]).toMatchObject({ usedPct: 81 });
+  // A failing reader must not fail the whole read: the stored live snapshot
+  // still serves with its true age.
+  const failing = new Usage();
+  const attachedFailing = failing.attach("session-x", launch, async () => {
+    throw new Error("host gone");
+  });
+  const stored = { ...changedUsage, observedAtMs: 1700000020000 };
+  expect(failing.observe(attachedFailing.account, attachedFailing.generation, stored)).toBe(true);
+  const served = await failing.registration().fetch({ account: attachedFailing.account });
+  if (served.status !== "available") throw new Error("Expected the live snapshot to serve");
+  expect(served.windows[0]).toMatchObject({ usedPct: 81 });
+  expect(served.details?.[0]).toMatchObject({
+    id: "observed",
+    value: new Date(stored.observedAtMs).toISOString(),
+  });
+});
+
+test("unrepresentable timestamps and blank tiers are rejected without poisoning the snapshot", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/dates" } };
+  const attached = usage.attach("session-a", launch, async () => ({}));
+  const valid = { ...changedUsage, observedAtMs: 1700000010000 };
+  // A finite-but-unrepresentable arrival stamp must not lodge in the snapshot
+  // and block every later observation through the ordering rule.
+  expect(
+    usage.observe(attached.account, attached.generation, { ...valid, observedAtMs: 1e100 }),
+  ).toBe(false);
+  expect(
+    usage.observe(attached.account, attached.generation, {
+      ...valid,
+      window: { ...valid.window, resetsAtMs: 1e100 },
+    }),
+  ).toBe(false);
+  expect(
+    usage.observe(attached.account, attached.generation, {
+      ...valid,
+      weekly: { ...valid.weekly, resetsAtMs: 1e100 },
+    }),
+  ).toBe(false);
+  expect(usage.observe(attached.account, attached.generation, { ...valid, tier: "   " })).toBe(
     false,
   );
-  expect(usage.observe(accountA, "not-an-observation")).toBe(false);
-  expect(usage.observe(accountB, fresh)).toBe(true);
-  expect(changed).toEqual([accountA, accountB]);
-  expect(usage.snapshot(accountA)).toEqual(fresh);
-  expect(usage.snapshot(accountB)).toEqual(fresh);
-  expect(usage.snapshot("unknown")).toBeUndefined();
+  expect(usage.snapshot(attached.account)).toBeUndefined();
+  // A later valid observation is still accepted, over-quota percentages kept.
+  expect(usage.observe(attached.account, attached.generation, valid)).toBe(true);
+  expect(usage.snapshot(attached.account)).toEqual(valid);
 });
 
 test("a terminal before turn admission does not start an idle watchdog", async () => {

@@ -11,7 +11,6 @@ import {
   toneFromUsedPct,
 } from "@getpaseo/plugin/server/usage";
 
-import { MspConnection } from "./connection.js";
 import { subscriptionUsageSchema, usageSchema } from "./wire.js";
 
 const inputSchema = z.object({ account: z.string() }).strict();
@@ -22,6 +21,15 @@ export type SubscriptionUsage = z.infer<typeof subscriptionUsageSchema>;
  * config homes are not two proven subscriptions, so a host event without an
  * account id must never merge accounts — snapshots stay keyed by the launch
  * env that produced them, the same key `attach` files readers under. */
+/** Newest observation by arrival stamp; empty input yields undefined. */
+function newestOf(usages: Iterable<SubscriptionUsage> | undefined): SubscriptionUsage | undefined {
+  let newest: SubscriptionUsage | undefined;
+  for (const usage of usages ?? []) {
+    if (!newest || usage.observedAtMs > newest.observedAtMs) newest = usage;
+  }
+  return newest;
+}
+
 export function accountForEnv(env: ProviderLaunch["env"]): string {
   // MSP 1.4.1 has no stable account ID; swapping accounts in one config directory shares a report ID.
   const configHome = env.XDG_CONFIG_HOME ?? path.join(env.HOME ?? homedir(), ".config");
@@ -32,11 +40,18 @@ export class Usage {
   private readonly launches = new Map<string, ProviderLaunch>();
   private readonly sessions = new Map<
     string,
-    { account: string; read: () => Promise<Observation> }
+    { account: string; generation: number; read: () => Promise<Observation> }
   >();
-  /** Latest validated observation per account, from events, seeds or live reads. */
-  private readonly snapshots = new Map<string, SubscriptionUsage>();
+  /**
+   * Latest validated observations, keyed by account and then by the
+   * host/session generation that produced them. A host event without an
+   * account id is only ever stored under its own delivering host's
+   * generation: after host A closes and host B opens in the same config
+   * home, A's snapshot is history for A's context, never B's current quota.
+   */
+  private readonly snapshots = new Map<string, Map<number, SubscriptionUsage>>();
   private readonly changeListeners = new Set<(account: string) => void>();
+  private attachSeq = 0;
   remember(launch: ProviderLaunch): { account: string } {
     const key = accountForEnv(launch.env);
     this.launches.set(key, launch);
@@ -46,34 +61,49 @@ export class Usage {
     id: string,
     launch: ProviderLaunch,
     read: () => Promise<Observation>,
-  ): { account: string } {
+  ): { account: string; generation: number } {
     const { account } = this.remember(launch);
-    this.sessions.set(id, { account, read });
-    return { account };
+    const generation = ++this.attachSeq;
+    this.sessions.set(id, { account, generation, read });
+    return { account, generation };
   }
   detach(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
     // Detach keeps the snapshot: at idle/close the card serves the last
     // observed values with age/stale instead of waking a host.
     this.sessions.delete(id);
+    // A live-to-stale transition changes what the card shows, so listeners
+    // must invalidate; while another host for the account stays live the
+    // card content is unchanged and no push is needed.
+    if (![...this.sessions.values()].some((live) => live.account === session.account)) {
+      for (const listener of this.changeListeners) listener(session.account);
+    }
   }
   /**
-   * Store a validated observation for its account. Older or out-of-order
-   * arrivals never overwrite newer ones, and invalid observations are
-   * rejected — never stored, never read as zero quota. Returns true when the
-   * snapshot changed.
+   * Store a validated observation under its delivering host's generation.
+   * Older or out-of-order arrivals never overwrite newer ones for the same
+   * generation, and invalid observations are rejected — never stored, never
+   * read as zero quota. Returns true when the snapshot changed.
    */
-  observe(account: string, raw: unknown): boolean {
+  observe(account: string, generation: number, raw: unknown): boolean {
     const parsed = subscriptionUsageSchema.safeParse(raw);
     if (!parsed.success) return false;
     const usage = parsed.data;
-    const current = this.snapshots.get(account);
+    let generations = this.snapshots.get(account);
+    if (!generations) {
+      generations = new Map();
+      this.snapshots.set(account, generations);
+    }
+    const current = generations.get(generation);
     if (current && usage.observedAtMs <= current.observedAtMs) return false;
-    this.snapshots.set(account, usage);
+    generations.set(generation, usage);
     for (const listener of this.changeListeners) listener(account);
     return true;
   }
+  /** Newest stored observation for the account across all generations. */
   snapshot(account: string): SubscriptionUsage | undefined {
-    return this.snapshots.get(account);
+    return newestOf(this.snapshots.get(account)?.values());
   }
   onChanged(listener: (account: string) => void): () => void {
     this.changeListeners.add(listener);
@@ -81,39 +111,56 @@ export class Usage {
       this.changeListeners.delete(listener);
     };
   }
-  private liveReaders(account: string): Array<() => Promise<Observation>> {
-    return [...this.sessions.values()]
-      .filter((session) => session.account === account)
-      .map((session) => session.read);
+  private liveSessions(
+    account: string,
+  ): Array<{ generation: number; read: () => Promise<Observation> }> {
+    return [...this.sessions.values()].filter((session) => session.account === account);
   }
-  private async read(account: string, launch: ProviderLaunch): Promise<Observation> {
-    const readers = this.liveReaders(account).map((read) => read());
-    if (readers.length > 0) {
-      const observations = await Promise.all(readers);
-      const usages = observations.flatMap((observation) =>
-        observation.usage ? [observation.usage] : [],
-      );
-      usages.sort((a, b) => b.observedAtMs - a.observedAtMs);
-      if (usages.length > 0) {
-        for (const observed of usages) this.observe(account, observed);
-        return { usage: usages[0] };
+  private liveReaders(account: string): Array<() => Promise<Observation>> {
+    return this.liveSessions(account).map((session) => session.read);
+  }
+  /** Newest stored observation from generations that still have a live host. */
+  private newestLiveSnapshot(account: string): SubscriptionUsage | undefined {
+    const live = new Set(this.liveSessions(account).map((session) => session.generation));
+    const generations = this.snapshots.get(account);
+    if (!generations) return undefined;
+    return newestOf(
+      (function* () {
+        for (const [generation, usage] of generations) if (live.has(generation)) yield usage;
+      })(),
+    );
+  }
+  /**
+   * Reads every live host for the account and serves the newest accepted
+   * observation — never a raw older read that resolves after a newer event
+   * was already stored. One failing reader cannot fail the whole read: its
+   * error is skipped and the remaining observations and live snapshots
+   * still serve with their true age.
+   */
+  private async readLive(
+    account: string,
+    live: Array<{ generation: number; read: () => Promise<Observation> }>,
+  ): Promise<Observation> {
+    const settled = await Promise.all(
+      live.map(async (session) => {
+        try {
+          return { generation: session.generation, usage: (await session.read()).usage };
+        } catch {
+          return { generation: session.generation, usage: undefined };
+        }
+      }),
+    );
+    const candidates: SubscriptionUsage[] = [];
+    for (const result of settled) {
+      if (result.usage) {
+        this.observe(account, result.generation, result.usage);
+        candidates.push(result.usage);
       }
-      // Live hosts observed nothing: a stored snapshot still beats absence.
-      const snapshot = this.snapshots.get(account);
-      if (snapshot) return { usage: snapshot };
-      return {};
     }
-    const snapshot = this.snapshots.get(account);
-    if (snapshot) return { usage: snapshot };
-    const host = new MspConnection({ launch });
-    try {
-      await host.initialize();
-      const observation = await host.request("usage/read", {}, usageSchema);
-      if (observation.usage) this.observe(account, observation.usage);
-      return observation;
-    } finally {
-      await host.close();
-    }
+    const stored = this.newestLiveSnapshot(account);
+    if (stored) candidates.push(stored);
+    candidates.sort((a, b) => b.observedAtMs - a.observedAtMs);
+    return candidates.length > 0 ? { usage: candidates[0] } : {};
   }
   registration(): UsageSourceRegistration {
     return {
@@ -142,7 +189,14 @@ export class Usage {
         const launch = this.launches.get(account);
         if (!launch) throw new Error("Muse login no longer exists");
         try {
-          const { usage } = await this.read(account, launch);
+          // Only already-awake hosts, their events and their seeds fill the
+          // snapshot. A cold account with no observation is honestly
+          // unavailable — usage never starts or wakes a host, not even a
+          // transient one, and an empty or invalid observation is never
+          // presented as zero quota.
+          const live = this.liveSessions(account);
+          const usage =
+            live.length > 0 ? (await this.readLive(account, live)).usage : this.snapshot(account);
           if (!usage) return unavailable({ kind: "no_quota", detail: "No usage quota reported" });
           return {
             status: "available",

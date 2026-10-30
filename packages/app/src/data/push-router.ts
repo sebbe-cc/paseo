@@ -78,6 +78,7 @@ export type ProvidersSnapshotUpdate = ProvidersSnapshotUpdateMessage;
 interface ServerDataPushClient {
   getProvidersSnapshot: import("@getpaseo/client/internal/daemon-client").DaemonClient["getProvidersSnapshot"];
   observeEvents: import("@getpaseo/client/internal/daemon-client").DaemonClient["observeEvents"];
+  getLastServerInfoMessage: import("@getpaseo/client/internal/daemon-client").DaemonClient["getLastServerInfoMessage"];
   observeCheckoutDiff: import("@getpaseo/client/internal/daemon-client").DaemonClient["observeCheckoutDiff"];
   observeTerminals: import("@getpaseo/client/internal/daemon-client").DaemonClient["observeTerminals"];
 }
@@ -242,8 +243,9 @@ export function applyUsageReportsChanged(input: {
   message: UsageReportsChangedMessage;
 }): void {
   // The report ids stay available for future per-card patching; today the
-  // whole host list refetches, which the daemon's cache keeps cheap.
-  if (input.message.payload.reportIds.length === 0) return;
+  // whole host list refetches, which the daemon's cache keeps cheap. An
+  // empty id list still invalidates: the source's inventory may have changed
+  // (first observation after an empty discovery), so clients rediscover.
   invalidateUsageQueries(input);
 }
 
@@ -316,7 +318,6 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const events = input.client.observeEvents([
     "providers_snapshot_update",
     "status.daemon_config_changed",
-    "usage.reports.changed",
   ]);
   events.subscribe({
     snapshot: () => {},
@@ -337,6 +338,21 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
           serverId: input.serverId,
           message,
         });
+    },
+  });
+  // The usage push lives in its own subscription, requested only where the
+  // daemon advertises it: older daemons parse the event list against a closed
+  // enum and would reject the whole bundled request — including the working
+  // providers/config push above. server_info arrives before connect resolves,
+  // so the flag is settled by mount time.
+  const supportsUsagePush =
+    input.client.getLastServerInfoMessage()?.features?.usageReportsChanged === true;
+  const usageEvents = supportsUsagePush
+    ? input.client.observeEvents(["usage.reports.changed"])
+    : null;
+  usageEvents?.subscribe({
+    snapshot: () => {},
+    update: (message) => {
       if (message.type === "usage.reports.changed")
         applyUsageReportsChanged({
           queryClient: input.queryClient,
@@ -352,6 +368,7 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
     disposed = true;
     unsubscribeQueryCache();
     void events.release().catch(console.error);
+    if (usageEvents) void usageEvents.release().catch(console.error);
     for (const current of activeCheckoutDiffSubscriptions.values()) {
       void current.subscription.release().catch(console.error);
     }

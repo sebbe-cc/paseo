@@ -1950,6 +1950,10 @@ export class VoiceAssistantWebSocketServer {
         // COMPAT(relayProtectedSecurity): added in v0.13.0, remove gate after 2027-04-21.
         relayProtectedSecurity: true,
         usageSources: true,
+        // COMPAT(usageReportsChanged): the usage.reports.changed push; the app
+        // requests it only when this flag is set so older daemons keep serving
+        // the bundled providers/config subscription.
+        usageReportsChanged: true,
         ownedSubscriptions: true,
         agentRequestReceipts: true,
         workspaceRequestReceipts: true,

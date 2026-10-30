@@ -444,11 +444,28 @@ test("usage login errors are additive and older reports still parse", () => {
 test("usage.reports.changed carries invalidated card ids on the outbound wire", () => {
   const message = { type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } };
   expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
-  expect(
-    SessionOutboundMessageSchema.safeParse({ ...message, payload: { reportIds: [] } }).success,
-  ).toBe(false);
+  // An empty id list is an inventory push (first observation after an empty
+  // discovery), not a malformed message.
+  const empty = { type: "usage.reports.changed", payload: { reportIds: [] } };
+  expect(SessionOutboundMessageSchema.parse(empty)).toEqual(empty);
   expect(SessionEventSubscriptionSchema.parse("usage.reports.changed")).toBe(
     "usage.reports.changed",
+  );
+});
+
+test("server_info advertises the usage push without breaking older clients", () => {
+  const withFlag = {
+    status: "server_info",
+    serverId: "host-1",
+    features: { usageSources: true, usageReportsChanged: true },
+  };
+  expect(ServerInfoStatusPayloadSchema.parse(withFlag)).toMatchObject({
+    features: { usageReportsChanged: true },
+  });
+  // Older daemons omit the flag; older clients strip it. Both parse.
+  const withoutFlag = { status: "server_info", serverId: "host-1", features: {} };
+  expect(ServerInfoStatusPayloadSchema.parse(withoutFlag).features?.usageReportsChanged).toBe(
+    undefined,
   );
 });
 

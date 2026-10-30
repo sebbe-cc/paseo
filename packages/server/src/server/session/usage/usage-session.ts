@@ -22,12 +22,16 @@ export class UsageSession {
    * Pushes invalidated card ids to this client until stopPush. Started only
    * while the client subscribes to the event; the re-read after each push
    * goes through the normal request path, so cards update without refresh.
+   *
+   * The subscription is invoked as a method on the runtime object: lifting
+   * it into a local first loses `this`, and the real PluginService keeps
+   * its listeners on the instance.
    */
   startPush(): void {
     if (this.pushUnsubscribe) return;
-    const subscribe = this.options.runtime?.subscribeUsageChanged;
-    if (!subscribe) return;
-    this.pushUnsubscribe = subscribe((reportIds) =>
+    const runtime = this.options.runtime;
+    if (!runtime?.subscribeUsageChanged) return;
+    this.pushUnsubscribe = runtime.subscribeUsageChanged((reportIds) =>
       this.options.emit({ type: "usage.reports.changed", payload: { reportIds } }),
     );
   }

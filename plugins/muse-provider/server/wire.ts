@@ -259,17 +259,25 @@ export const sessionListSchema = z.object({
  * `observedAtMs` is the host's arrival stamp, so clients render "as of",
  * never a live clock. Invalid observations are rejected, never read as zero
  * quota: `usedPercent` is a non-negative number, durations are positive.
+ *
+ * Every timestamp must also be a representable date: a finite-but-huge
+ * `observedAtMs` (e.g. 1e100) would pass a finiteness check, then throw in
+ * `new Date(...).toISOString()` at render time while permanently blocking
+ * newer observations through the ordering rule. Tier is trimmed before the
+ * length check so whitespace-only tiers cannot pass.
  */
+export const MAX_REPRESENTABLE_EPOCH_MS = 8_640_000_000_000_000;
+const epochMsSchema = z.number().finite().nonnegative().max(MAX_REPRESENTABLE_EPOCH_MS);
 export const subscriptionUsageSchema = z.object({
-  observedAtMs: z.number().finite().nonnegative(),
-  tier: z.string().min(1),
+  observedAtMs: epochMsSchema,
+  tier: z.string().trim().min(1),
   window: z.object({
-    resetsAtMs: z.number().finite().nonnegative(),
+    resetsAtMs: epochMsSchema,
     usedPercent: z.number().finite().nonnegative(),
     windowDurationMins: z.number().finite().positive(),
   }),
   weekly: z.object({
-    resetsAtMs: z.number().finite().nonnegative(),
+    resetsAtMs: epochMsSchema,
     usedPercent: z.number().finite().nonnegative(),
   }),
 });
