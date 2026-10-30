@@ -370,7 +370,7 @@ test("stable iOS releases upload once and distribute to external testers before 
 test("eight Playwright shards share two-worker coverage", () => {
   const source = readFileSync(ciWorkflowPath, "utf8");
   const jobs = jobBlocks(source);
-  assert.equal(jobs.size, 21);
+  assert.equal(jobs.size, 22);
   for (let shard = 1; shard <= 8; shard++) {
     const job = jobs.get(`playwright-${shard}`).join("\n");
     assert.match(job, new RegExp(`PLAYWRIGHT_SHARD: "${shard}/8"`));
@@ -390,6 +390,35 @@ test("eight Playwright shards share two-worker coverage", () => {
   // No fan-in result job: a gate needs its own runner and under contention it
   // queued 8m08s behind the last shard. Required checks name the shards directly.
   assert.equal(jobs.has("playwright"), false);
+});
+
+test("chain-qa runs only on manual dispatch with same-run evidence", () => {
+  const source = readFileSync(ciWorkflowPath, "utf8");
+  const jobs = jobBlocks(source);
+  const chainQa = jobs.get("chain-qa");
+  assert.ok(chainQa, "missing static job chain-qa");
+  const job = chainQa.join("\n");
+  assert.match(job, /^    name: chain-qa \(CPA usage server e2e \+ native card screenshots\)$/m);
+  // Manual dispatch only: no push, pull_request, or merge_group trigger may
+  // start this job, so topic pushes never allocate its runner.
+  assert.match(job, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  assert.doesNotMatch(job, /needs: changes/);
+  const trigger = source.split("jobs:", 1)[0];
+  assert.match(trigger, /push:\s*\n\s+branches: \[main\]/);
+  assert.doesNotMatch(trigger, /chain-qa/);
+  // Same-run chain: e2e dumps entries, the card fixture is refreshed from
+  // that dump, then the native card tests render it before/after expiry.
+  assert.match(job, /CPA_CHAIN_DUMP=.*npx vitest run src\/server\/plugins\/usage-cpa-provenance\.e2e\.test\.ts/);
+  assert.match(job, /cp chain-qa-dump\/chain-entries\.json packages\/app\/src\/usage\/fixtures\/chain-entries\.fixture\.json/);
+  assert.match(job, /npx vitest run --project browser src\/usage\/cpa-cards-chain\.browser\.test\.tsx/);
+  assert.match(job, /npx vitest run --project browser src\/usage\/card\.browser\.test\.tsx/);
+  // Fail-on-test-error through the tee pipelines, and evidence upload even
+  // on failure with the exact SHA/manifest/log/image set.
+  assert.match(job, /set -o pipefail/);
+  assert.match(job, /name: cpa-chain-qa/);
+  assert.match(job, /chain-qa-core-sha\.txt/);
+  assert.match(job, /chain-qa-plugin-sha\.txt/);
+  assert.match(job, /if-no-files-found: error/);
 });
 
 test("quality preserves commands and routes each domain independently after failures", () => {
