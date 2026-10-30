@@ -525,6 +525,7 @@ export interface SessionOptions {
       reportIds?: string[];
     }): Promise<UsageReportEntry[]>;
     listLegacyUsage(): Promise<{ fetchedAt: string; providers: ProviderUsage[] }>;
+    subscribeUsageChanged?(listener: (reportIds: string[]) => void): () => void;
   };
   orchestrationSkills?: import("./orchestration-skills/index.js").OrchestrationSkills;
   mcpBaseUrl?: string | null;
@@ -1759,6 +1760,8 @@ export class Session {
     );
     if (this.wantsEvent("providers_snapshot_update")) this.providerCatalogSession.start();
     else this.providerCatalogSession.dispose();
+    if (this.wantsEvent("usage.reports.changed")) this.usageSession.startPush();
+    else this.usageSession.stopPush();
     if (
       legacy ||
       this.wantsEvent("status.plugin_catalog_changed") ||
@@ -8703,6 +8706,7 @@ export class Session {
       this.unsubscribeTerminalWorkspaceContributionEvents = null;
     }
     this.providerCatalogSession.dispose();
+    this.usageSession.stopPush();
 
     this.terminalController.dispose();
 
@@ -8775,6 +8779,7 @@ function sessionEventCategory(message: SessionOutboundMessage): SessionEventSubs
     case "workspace_setup_progress":
     case "agent.provider_subagents.update":
     case "terminal_attention_required":
+    case "usage.reports.changed":
     case "activity_log":
     case "hub.execution.agent.update":
     case "hub.execution.agent.stream":
@@ -8812,6 +8817,10 @@ function legacyWantsEvent(
       return !capabilities.has(CLIENT_CAPS.explicitEventSubscriptions);
     case "agent.provider_subagents.update":
       return capabilities.has(CLIENT_CAPS.providerSubagents);
+    case "usage.reports.changed":
+      // New message type: only clients that explicitly subscribe receive it,
+      // so older clients never see a type their schema cannot parse.
+      return false;
     default:
       return true;
   }

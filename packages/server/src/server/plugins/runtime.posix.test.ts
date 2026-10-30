@@ -826,6 +826,24 @@ export default function contribute(server: any) { server.registerProvider(provid
     await runtime.stopAll();
   });
 
+  it("forwards a usage.changed child message to onUsageChanged", async () => {
+    const directory = await createPlugin(
+      "usage-push",
+      `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+    );
+    const seen: Array<{ pluginId: string; sourceId: string }> = [];
+    const child = createReloadChild("usage-push", []);
+    const runtime = createTestRuntime({
+      spawnChild: () => child,
+      onUsageChanged: (pluginId, sourceId) => seen.push({ pluginId, sourceId }),
+    });
+
+    await runtime.startPlugin("usage-push", directory);
+    child.emitMessage({ type: "usage.changed", sourceId: "muse" });
+    await vi.waitFor(() => expect(seen).toEqual([{ pluginId: "usage-push", sourceId: "muse" }]));
+    await runtime.stopAll();
+  });
+
   it("records host-owned plugin lifecycle events", async () => {
     const directory = await createPlugin(
       "lifecycle",

@@ -84,6 +84,13 @@ export interface UsageSourceRegistration {
   discover(scope: UsageScope): Promise<UsageAccount[]>;
   /** Re-reads the login store; never writes it. */
   fetch(input: unknown): Promise<UsageReport>;
+  /**
+   * Pushes a locally observed change (a provider event, not a poll): the
+   * daemon clears its cached cards for this source and tells connected
+   * clients to re-read. Called at most once per observation the source
+   * stores; listeners must tolerate repeats.
+   */
+  subscribeChanged?: (listener: () => void) => () => void;
 }
 
 export function windowFromUsedPct(input: {

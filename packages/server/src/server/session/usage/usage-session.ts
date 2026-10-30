@@ -8,12 +8,34 @@ export interface UsageSessionOptions {
   runtime?: {
     listUsageReports(options: ListUsageReportsOptions): Promise<UsageReportEntry[]>;
     listLegacyUsage(): Promise<{ fetchedAt: string; providers: ProviderUsage[] }>;
+    subscribeUsageChanged?: (listener: (reportIds: string[]) => void) => () => void;
   };
   logger: pino.Logger;
 }
 
 export class UsageSession {
+  private pushUnsubscribe: (() => void) | null = null;
+
   constructor(private readonly options: UsageSessionOptions) {}
+
+  /**
+   * Pushes invalidated card ids to this client until stopPush. Started only
+   * while the client subscribes to the event; the re-read after each push
+   * goes through the normal request path, so cards update without refresh.
+   */
+  startPush(): void {
+    if (this.pushUnsubscribe) return;
+    const subscribe = this.options.runtime?.subscribeUsageChanged;
+    if (!subscribe) return;
+    this.pushUnsubscribe = subscribe((reportIds) =>
+      this.options.emit({ type: "usage.reports.changed", payload: { reportIds } }),
+    );
+  }
+
+  stopPush(): void {
+    this.pushUnsubscribe?.();
+    this.pushUnsubscribe = null;
+  }
 
   async handleListReports(
     msg: Extract<SessionInboundMessage, { type: "usage.list_reports.request" }>,

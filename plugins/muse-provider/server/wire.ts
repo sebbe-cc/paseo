@@ -252,19 +252,30 @@ export const sessionListSchema = z.object({
     }),
   ),
 });
+/**
+ * The bare subscription-usage observation: the `usage/read` result's `usage`
+ * member and the `usage/changed` params (ADR 32563 D2/D3). Percentages are
+ * verbatim provider numbers — over-quota values above 100 are valid — and
+ * `observedAtMs` is the host's arrival stamp, so clients render "as of",
+ * never a live clock. Invalid observations are rejected, never read as zero
+ * quota: `usedPercent` is a non-negative number, durations are positive.
+ */
+export const subscriptionUsageSchema = z.object({
+  observedAtMs: z.number().finite().nonnegative(),
+  tier: z.string().min(1),
+  window: z.object({
+    resetsAtMs: z.number().finite().nonnegative(),
+    usedPercent: z.number().finite().nonnegative(),
+    windowDurationMins: z.number().finite().positive(),
+  }),
+  weekly: z.object({
+    resetsAtMs: z.number().finite().nonnegative(),
+    usedPercent: z.number().finite().nonnegative(),
+  }),
+});
+export type SubscriptionUsageObservation = z.infer<typeof subscriptionUsageSchema>;
 export const usageSchema = z.object({
-  usage: z
-    .object({
-      observedAtMs: z.number(),
-      tier: z.string(),
-      window: z.object({
-        resetsAtMs: z.number(),
-        usedPercent: z.number(),
-        windowDurationMins: z.number(),
-      }),
-      weekly: z.object({ resetsAtMs: z.number(), usedPercent: z.number() }),
-    })
-    .optional(),
+  usage: subscriptionUsageSchema.optional(),
 });
 export const childSessionSchema = z.object({
   session: z.object({

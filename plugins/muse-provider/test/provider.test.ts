@@ -1459,9 +1459,91 @@ for (const usage of [
         status: "unavailable",
         problem: { kind: "no_quota", detail: "No usage quota reported" },
       });
-    expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(1);
+    expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(2);
   });
 }
+
+const changedUsage = {
+  observedAtMs: 1700000005000,
+  tier: "Pro",
+  window: { usedPercent: 81, resetsAtMs: 1700018000000, windowDurationMins: 300 },
+  weekly: { usedPercent: 106, resetsAtMs: 1700604800000 },
+};
+
+test("usage/changed observations update the card and survive close without waking a host", async () => {
+  const h = await harness("catalog-controls", {
+    MUSE_TEST_USAGE: JSON.stringify({
+      usage: {
+        observedAtMs: 1700000000000,
+        tier: "Pro",
+        window: { usedPercent: 75, resetsAtMs: 1700018000000, windowDurationMins: 300 },
+        weekly: { usedPercent: 105, resetsAtMs: 1700604800000 },
+      },
+    }),
+    MUSE_TEST_USAGE_CHANGED: JSON.stringify(changedUsage),
+  });
+  await h.open();
+  const [account] = await h.usageSource.discover({ kind: "global" });
+  // The seed read at connect returned the initial values, then the host
+  // emitted usage/changed; live reads now serve the event's values.
+  const first = await h.usageSource.fetch(account!.input);
+  expect(first).toMatchObject({
+    status: "available",
+    planLabel: "Pro",
+    windows: [{ usedPct: 81 }, { usedPct: 106 }],
+    details: [{ id: "observed", value: new Date(changedUsage.observedAtMs).toISOString() }],
+  });
+  expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(2);
+  await h.send({ type: "session.close", sessionId: "paseo-session", requestId: "close" });
+  await h.wait((e) => e.type === "session.closed");
+  // No live session left: the stored observation is served stale, with no new host read.
+  // The event races close over stdio, so retry until the queued notification lands.
+  const deadline = Date.now() + 5000;
+  let afterClose = await h.usageSource.fetch(account!.input);
+  while (afterClose.status !== "available" || afterClose.windows[0]?.usedPct !== 81) {
+    if (Date.now() > deadline) break;
+    await delay(20);
+    afterClose = await h.usageSource.fetch(account!.input);
+  }
+  expect(afterClose).toMatchObject({
+    status: "available",
+    windows: [{ usedPct: 81 }, { usedPct: 106 }],
+    details: [
+      { id: "observed", value: new Date(changedUsage.observedAtMs).toISOString() },
+      { id: "staleness", label: "Stale" },
+    ],
+  });
+  expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(2);
+});
+
+test("usage snapshots ignore out-of-order and invalid observations, never two accounts mix", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launchA = { command: "muse", args: [], env: { HOME: "/usage/a" } };
+  const launchB = { command: "muse", args: [], env: { HOME: "/usage/b" } };
+  const accountA = usage.attach("session-a", launchA, async () => ({})).account;
+  const accountB = usage.attach("session-b", launchB, async () => ({})).account;
+  expect(accountA).not.toBe(accountB);
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  const fresh = { ...changedUsage, observedAtMs: 1700000010000 };
+  expect(usage.observe(accountA, fresh)).toBe(true);
+  expect(changed).toEqual([accountA]);
+  // Older observations never overwrite newer ones.
+  expect(usage.observe(accountA, changedUsage)).toBe(false);
+  expect(usage.observe(accountA, { ...fresh, observedAtMs: 1700000010000 })).toBe(false);
+  expect(changed).toEqual([accountA]);
+  // Invalid observations are rejected and never become zero quota.
+  expect(usage.observe(accountA, { ...fresh, window: { ...fresh.window, usedPercent: -5 } })).toBe(
+    false,
+  );
+  expect(usage.observe(accountA, "not-an-observation")).toBe(false);
+  expect(usage.observe(accountB, fresh)).toBe(true);
+  expect(changed).toEqual([accountA, accountB]);
+  expect(usage.snapshot(accountA)).toEqual(fresh);
+  expect(usage.snapshot(accountB)).toEqual(fresh);
+  expect(usage.snapshot("unknown")).toBeUndefined();
+});
 
 test("a terminal before turn admission does not start an idle watchdog", async () => {
   const h = await harness("text-reasoning", { MUSE_TEST_ACK_LAST: "1" });

@@ -28,6 +28,10 @@ type SubscribeCheckoutDiffResponseMessage = Extract<
 >;
 type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
+type UsageReportsChangedMessage = Extract<
+  SessionOutboundMessage,
+  { type: "usage.reports.changed" }
+>;
 type CheckoutDiffResponsePayload = SubscribeCheckoutDiffResponseMessage["payload"];
 type CheckoutDiffCachePayload = Omit<CheckoutDiffResponsePayload, "subscriptionId">;
 type ListTerminalsPayload = ListTerminalsResponse["payload"];
@@ -129,6 +133,12 @@ const RECONNECT_REPAIR_POLICIES: ReconnectRepairPolicy[] = [
       });
     },
   },
+  {
+    domain: "usageReports",
+    invalidate: ({ queryClient, serverId }) => {
+      invalidateUsageQueries({ queryClient, serverId });
+    },
+  },
 ];
 
 export function checkoutDiffPushRoute(input: {
@@ -213,6 +223,30 @@ export async function applyProvidersSnapshotUpdate(input: {
   }
 }
 
+/**
+ * Drops a host's usage cards (host and agent reports alike) so the next read
+ * refetches. The daemon already dropped its cached cards, so the re-read
+ * goes through the normal query path and the native cards update without a
+ * manual refresh. Keyed off the `usage` query root owned by
+ * `@/usage/queries`, like the other domains key off their query modules.
+ */
+function invalidateUsageQueries(input: { queryClient: QueryClient; serverId: string }): void {
+  void input.queryClient.invalidateQueries({
+    predicate: (query) => isQueryForServer(query.queryKey, "usage", input.serverId),
+  });
+}
+
+export function applyUsageReportsChanged(input: {
+  serverId: string;
+  queryClient: QueryClient;
+  message: UsageReportsChangedMessage;
+}): void {
+  // The report ids stay available for future per-card patching; today the
+  // whole host list refetches, which the daemon's cache keeps cheap.
+  if (input.message.payload.reportIds.length === 0) return;
+  invalidateUsageQueries(input);
+}
+
 export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const activeCheckoutDiffSubscriptions = new Map<string, CheckoutDiffRegistration>();
   const activeTerminalSubscriptions = new Map<string, WorkspaceTerminalsRegistration>();
@@ -282,6 +316,7 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const events = input.client.observeEvents([
     "providers_snapshot_update",
     "status.daemon_config_changed",
+    "usage.reports.changed",
   ]);
   events.subscribe({
     snapshot: () => {},
@@ -298,6 +333,12 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
       }
       if (message.type === "status")
         applyDaemonConfigStatus({
+          queryClient: input.queryClient,
+          serverId: input.serverId,
+          message,
+        });
+      if (message.type === "usage.reports.changed")
+        applyUsageReportsChanged({
           queryClient: input.queryClient,
           serverId: input.serverId,
           message,

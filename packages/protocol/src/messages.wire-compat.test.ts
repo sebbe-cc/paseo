@@ -7,6 +7,7 @@ import {
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
   ServerInfoStatusPayloadSchema,
+  SessionEventSubscriptionSchema,
   SessionOutboundMessageSchema,
   WSHelloMessageSchema,
   WorkspaceSetupSnapshotSchema,
@@ -438,6 +439,17 @@ test("usage login errors are additive and older reports still parse", () => {
   expect(SessionOutboundMessageSchema.parse(oldMessage)).toEqual(oldMessage);
   expect(SessionOutboundMessageSchema.parse(newMessage)).toEqual(newMessage);
   expect(legacy.parse(newMessage)).toEqual(oldMessage);
+});
+
+test("usage.reports.changed carries invalidated card ids on the outbound wire", () => {
+  const message = { type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } };
+  expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  expect(
+    SessionOutboundMessageSchema.safeParse({ ...message, payload: { reportIds: [] } }).success,
+  ).toBe(false);
+  expect(SessionEventSubscriptionSchema.parse("usage.reports.changed")).toBe(
+    "usage.reports.changed",
+  );
 });
 
 test("usage entries accept older failures and additive successful snapshots", () => {

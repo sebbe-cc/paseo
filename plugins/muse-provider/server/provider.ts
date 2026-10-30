@@ -9,7 +9,7 @@ import {
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
 import { serveArgs } from "./options.js";
-import { Usage } from "./usage.js";
+import { Usage, accountForEnv } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
 import { MspConnection } from "./connection.js";
@@ -59,6 +59,27 @@ export function createMuseProvider(usage: Usage): ProviderRegistration {
 function requireLaunch(launch: ProviderLaunch | undefined): ProviderLaunch {
   if (!launch) throw new MuseError("missingLaunch", "Muse requires a daemon-resolved executable");
   return launch;
+}
+/** Seed the account snapshot with one read from the already-awake host. */
+async function seedSubscriptionUsage(
+  session: Session,
+  usage: Usage,
+  account: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const observation = await Promise.race([
+      session.readUsage(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("usage seed timed out")), 5000);
+      }),
+    ]);
+    if (observation.usage) usage.observe(account, observation.usage);
+  } catch {
+    // Best-effort: silence keeps the prior snapshot, events fill it later.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 async function status(launch: ProviderLaunch): Promise<ProviderStatus> {
   let host: MspConnection | undefined;
@@ -120,6 +141,7 @@ function connect(
     if (input.type === "session.open") {
       if (sessions.has(input.sessionId))
         throw new MuseError("duplicateSession", "Muse session is already open");
+      const sessionLaunch = { ...launch, env: { ...launch.env, ...input.config.env } };
       const session = new Session({
         id: input.sessionId,
         config: input.config,
@@ -127,15 +149,19 @@ function connect(
         emit,
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
+        // usage/changed is host-global without an account id: attribute it to
+        // the launch env that opened this host, never merged across accounts.
+        onSubscriptionUsage: (observed) =>
+          usage.observe(accountForEnv(sessionLaunch.env), observed),
       });
       sessions.set(input.sessionId, session);
       try {
         await session.open(input);
-        usage.attach(
-          input.sessionId,
-          { ...launch, env: { ...launch.env, ...input.config.env } },
-          () => session.readUsage(),
-        );
+        const { account } = usage.attach(input.sessionId, sessionLaunch, () => session.readUsage());
+        // Seed the snapshot from the already-awake host at connect; events
+        // keep it fresh from here. Best-effort and bounded: a slow host must
+        // not stall session open, and silence keeps prior observations.
+        await seedSubscriptionUsage(session, usage, account);
       } catch (error) {
         sessions.delete(input.sessionId);
         await session.close();

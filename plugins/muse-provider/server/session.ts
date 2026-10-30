@@ -20,6 +20,7 @@ import {
   pendingSchema,
   itemNotificationSchema,
   approvalResolvedSchema,
+  subscriptionUsageSchema,
   usageSchema,
   ackSchema,
   gapSchema,
@@ -52,6 +53,8 @@ interface SessionOptions {
   launch: ProviderLaunch;
   emit(event: ProviderEvent): void;
   capabilities: readonly string[];
+  /** Stores a validated `usage/changed` observation under this host's account. */
+  onSubscriptionUsage?: (usage: z.infer<typeof subscriptionUsageSchema>) => void;
 }
 
 interface Live {
@@ -464,6 +467,9 @@ export class Session {
       case "turn/completed":
         this.completeTurn(notification.params);
         break;
+      case "usage/changed":
+        this.subscriptionUsage(notification.params);
+        break;
       case "session/tokenUsage": {
         const params = tokenUsageSchema.parse(notification.params);
         this.options.emit({
@@ -490,6 +496,13 @@ export class Session {
         break;
       }
     }
+  }
+  private subscriptionUsage(params: unknown): void {
+    // Host-global subscription-quota observation, params are the bare
+    // SubscriptionUsage (ADR 32563 D2). Validation rejects invalid
+    // observations; they never reach the snapshot, never zero quota.
+    const parsed = subscriptionUsageSchema.safeParse(params);
+    if (parsed.success) this.options.onSubscriptionUsage?.(parsed.data);
   }
   private startTurn(input: unknown): void {
     const params = turnSchema.parse(input);

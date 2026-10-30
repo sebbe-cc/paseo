@@ -58,6 +58,61 @@ test("surfaces a legacy usage-list failure as an rpc_error envelope", async () =
   });
 });
 
+test("pushes invalidated card ids while subscribed and stops after stopPush", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const listeners = new Set<(reportIds: string[]) => void>();
+  const usage = new UsageSession({
+    emit: (message) => emitted.push(message),
+    runtime: {
+      async listUsageReports() {
+        return [];
+      },
+      async listLegacyUsage() {
+        return { fetchedAt: "2026-01-01T00:00:00.000Z", providers: [] };
+      },
+      subscribeUsageChanged: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    },
+    logger: pino({ level: "silent" }),
+  });
+  // Not started: no push.
+  for (const listener of listeners) listener(["muse:abc"]);
+  expect(emitted).toEqual([]);
+  usage.startPush();
+  usage.startPush();
+  for (const listener of listeners) listener(["muse:abc"]);
+  expect(emitted).toEqual([
+    { type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } },
+  ]);
+  usage.stopPush();
+  for (const listener of listeners) listener(["muse:abc"]);
+  expect(emitted).toHaveLength(1);
+  expect(listeners.size).toBe(0);
+});
+
+test("startPush without a runtime subscription is a no-op", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const usage = new UsageSession({
+    emit: (message) => emitted.push(message),
+    runtime: {
+      async listUsageReports() {
+        return [];
+      },
+      async listLegacyUsage() {
+        return { fetchedAt: "2026-01-01T00:00:00.000Z", providers: [] };
+      },
+    },
+    logger: pino({ level: "silent" }),
+  });
+  usage.startPush();
+  usage.stopPush();
+  expect(emitted).toEqual([]);
+});
+
 test("request failures terminate with an error response and no updates", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const usage = new UsageSession({

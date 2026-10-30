@@ -397,6 +397,7 @@ const OUTBOUND_PERMISSION = {
   "provider.usage.list.response": "daemon.read",
   "usage.list_reports.update": "daemon.read",
   "usage.list_reports.response": "daemon.read",
+  "usage.reports.changed": "daemon.read",
   provider_diagnostic_response: "daemon.read",
   providers_snapshot_update: ["daemon.read", "hub.execute"],
   pull_request_timeline_response: "workspace.read",

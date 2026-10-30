@@ -3214,6 +3214,7 @@ export const SessionEventSubscriptionSchema = z.enum([
   "status.daemon_config_changed",
   "status.plugin_catalog_changed",
   "status.plugin_settings_changed",
+  "usage.reports.changed",
   "activity_log",
   "hub.execution.agent.update",
   "hub.execution.agent.stream",
@@ -6453,6 +6454,10 @@ export const UsageListReportsResponseMessageSchema = z.object({
   type: z.literal("usage.list_reports.response"),
   payload: z.object({ requestId: z.string(), error: z.string().nullable() }),
 });
+export const UsageReportsChangedMessageSchema = z.object({
+  type: z.literal("usage.reports.changed"),
+  payload: z.object({ reportIds: z.array(z.string().min(1)).min(1) }),
+});
 
 const AgentSlashCommandSchema = z.object({
   name: z.string(),
@@ -7155,6 +7160,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListResponseMessageSchema,
   UsageListReportsUpdateMessageSchema,
   UsageListReportsResponseMessageSchema,
+  UsageReportsChangedMessageSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,
@@ -7340,6 +7346,7 @@ export type UsageProblem = z.infer<typeof UsageProblemSchema>;
 export type UsageReport = z.infer<typeof UsageReportSchema>;
 export type UsageReportEntry = z.infer<typeof UsageReportEntrySchema>;
 export type UsageListReportsResponseMessage = z.infer<typeof UsageListReportsResponseMessageSchema>;
+export type UsageReportsChangedMessage = z.infer<typeof UsageReportsChangedMessageSchema>;
 export type ProviderUsageStatus = z.infer<typeof ProviderUsageStatusSchema>;
 export type ProviderUsage = z.infer<typeof ProviderUsageSchema>;
 export type ProviderUsageWindow = z.infer<typeof ProviderUsageWindowSchema>;

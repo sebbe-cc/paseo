@@ -138,6 +138,7 @@ export function createPluginWorker(options: {
     providers.set(id, { ...provider, id });
   }
 
+  const usageChangedUnsubs = new Map<string, () => void>();
   function registerUsageSource(source: UsageSourceRegistration): void {
     const id = source.id.trim();
     if (
@@ -152,6 +153,21 @@ export function createPluginWorker(options: {
     }
     if (usageSources.has(id)) throw new Error(`Duplicate usage source: ${id}`);
     usageSources.set(id, { ...source, id });
+    // A source that observes changes locally (a provider event, not a poll)
+    // pushes them here; the daemon clears its cached cards and tells clients
+    // to re-read. The subscription dies with the plugin.
+    if (typeof source.subscribeChanged === "function") {
+      usageChangedUnsubs.set(
+        id,
+        source.subscribeChanged(() => {
+          try {
+            send({ type: "usage.changed", sourceId: id });
+          } catch {
+            // The channel is gone; shutdown releases the subscription.
+          }
+        }),
+      );
+    }
   }
 
   function providerMetadata(provider: ProviderRegistration) {
@@ -325,6 +341,8 @@ export function createPluginWorker(options: {
       .catch((error) => console.error("Plugin API cleanup failed", error));
     hooks.close();
     agentTools.close();
+    for (const unsubscribe of usageChangedUnsubs.values()) unsubscribe();
+    usageChangedUnsubs.clear();
     for (const pending of pendingProviderConnections.values()) pending.tombstoned = true;
     const currentCleanup = cleanup;
     cleanup = null;

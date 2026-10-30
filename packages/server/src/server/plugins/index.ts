@@ -124,6 +124,9 @@ export class PluginService {
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
+        onUsageChanged: (_pluginId, sourceId) => {
+          this.handleUsageChanged(sourceId);
+        },
       });
     this.managedSources = dependencies.managedSources ?? null;
     this.builtinPlugins = dependencies.builtinPlugins ?? new BuiltinPluginLoader(undefined, []);
@@ -139,6 +142,22 @@ export class PluginService {
   readonly emit: PluginLifecycle["emit"] = (name, event) => {
     this.runtime.emit?.(name, event);
   };
+
+  private readonly usageChangedListeners = new Set<(reportIds: string[]) => void>();
+
+  /** Fires with affected card ids after a usage source pushes an observation. */
+  subscribeUsageChanged(listener: (reportIds: string[]) => void): () => void {
+    this.usageChangedListeners.add(listener);
+    return () => {
+      this.usageChangedListeners.delete(listener);
+    };
+  }
+
+  private handleUsageChanged(sourceId: string): void {
+    const reportIds = this.usageSources.invalidateSource(sourceId);
+    if (reportIds.length === 0) return;
+    for (const listener of this.usageChangedListeners) listener(reportIds);
+  }
 
   subscribeSessionOpenChanges(listener: () => void): () => void {
     return this.runtime.subscribeSessionOpenChanges?.(listener) ?? (() => {});

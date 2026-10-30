@@ -49,6 +49,11 @@ interface AgentReports {
   reports: Map<string, KnownReport>;
 }
 
+export interface UsageSourceInvalidated {
+  sourceId: string;
+  reportIds: string[];
+}
+
 /** Owns account identity, ordered logins for each account, and the five-minute fetch cache. */
 export class UsageSourceRegistry {
   private readonly sources = new Map<string, UsageSource>();
@@ -59,6 +64,8 @@ export class UsageSourceRegistry {
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
   private readonly pending = new Map<string, Promise<UsageReportEntry>>();
 
+  private readonly invalidatedListeners = new Set<(event: UsageSourceInvalidated) => void>();
+
   constructor(
     private readonly now: () => number = Date.now,
     private readonly ttlMs = 300_000,
@@ -66,6 +73,33 @@ export class UsageSourceRegistry {
     private readonly agents: AgentUsageLookup = { hasAgent: () => false, usageSession: () => null },
     private readonly deadlineMs = 20_000,
   ) {}
+
+  /** Fires after a source's cached cards were dropped; clients re-read. */
+  onInvalidated(listener: (event: UsageSourceInvalidated) => void): () => void {
+    this.invalidatedListeners.add(listener);
+    return () => {
+      this.invalidatedListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Drops a source's cached cards (five-minute cache, last-good snapshots,
+   * in-flight fetches) and reports the affected card ids. Called when the
+   * source pushes a locally observed change — an event, never a poll — so
+   * cards re-read instead of serving the evicted entries.
+   */
+  invalidateSource(sourceId: string): string[] {
+    const prefix = `${sourceId}:`;
+    const reportIds = [...this.known.keys()].filter((id) => id.startsWith(prefix));
+    for (const store of [this.cache, this.successful, this.pending]) {
+      for (const key of store.keys()) if (key.startsWith(prefix)) store.delete(key);
+    }
+    if (reportIds.length > 0) {
+      const event = { sourceId, reportIds: [...reportIds] };
+      for (const listener of this.invalidatedListeners) listener(event);
+    }
+    return reportIds;
+  }
 
   register(source: UsageSource): void {
     if (this.sources.has(source.id)) throw new Error(`Duplicate usage source: ${source.id}`);

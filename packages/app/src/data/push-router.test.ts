@@ -25,12 +25,17 @@ type SubscribeCheckoutDiffResponseMessage = Extract<
 >;
 type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
+type UsageReportsChangedMessage = Extract<
+  SessionOutboundMessage,
+  { type: "usage.reports.changed" }
+>;
 type RouterMessage =
   | ProvidersSnapshotUpdateMessage
   | CheckoutDiffUpdateMessage
   | SubscribeCheckoutDiffResponseMessage
   | StatusMessage
-  | TerminalsChangedMessage;
+  | TerminalsChangedMessage
+  | UsageReportsChangedMessage;
 type RouterMessageType = RouterMessage["type"];
 type RouterHandler = (message: RouterMessage) => void;
 type RouterClient = Parameters<typeof mountServerDataPushRouter>[0]["client"];
@@ -64,6 +69,7 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
     subscribe_checkout_diff_response: [],
     status: [],
     terminals_changed: [],
+    "usage.reports.changed": [],
   };
   const subscribeCheckoutDiffCalls: Array<{
     cwd: string;
@@ -141,7 +147,7 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
       observeEvents: () =>
         observe(
           { subscriptionId: "events", requestId: "events", events: [] },
-          ["status", "providers_snapshot_update"],
+          ["status", "providers_snapshot_update", "usage.reports.changed"],
           () => {},
         ),
       observeCheckoutDiff(cwd, compare) {
@@ -377,6 +383,28 @@ describe("server data push router", () => {
         generatedAt: "2026-01-01T00:00:00.000Z",
         requestId: "providers_snapshot_update",
       });
+  });
+
+  it("invalidates host and agent usage cards on usage.reports.changed", () => {
+    const queryClient = new QueryClient();
+    const fake = createFakeClient();
+    const serverId = "server-1";
+    const reportsKey = ["usage", serverId, "reports"];
+    const agentKey = ["usage", serverId, "agent", "agent-1"];
+    const otherHostKey = ["usage", "server-2", "reports"];
+    queryClient.setQueryData(reportsKey, []);
+    queryClient.setQueryData(agentKey, []);
+    queryClient.setQueryData(otherHostKey, []);
+    const unmount = mountServerDataPushRouter({ client: fake.client, queryClient, serverId });
+
+    fake.emit({ type: "usage.reports.changed", payload: { reportIds: ["muse:abc"] } });
+
+    expect(queryClient.getQueryState(reportsKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(agentKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherHostKey)?.isInvalidated).not.toBe(true);
+
+    unmount();
+    queryClient.clear();
   });
 
   it.each(["base", "all"] as const)("routes %s diff snapshots and updates", (mode) => {

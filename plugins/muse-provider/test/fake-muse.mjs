@@ -27,6 +27,24 @@ if (process.env.MUSE_TEST_REQUESTS)
     JSON.stringify({ event: "hostStarted", args: process.argv.slice(2) }) + "\n",
   );
 const catalogRows = readFixture("catalog-controls");
+let usageChangedSent = false;
+function usageReadResponse(frame) {
+  let result;
+  if (process.env.MUSE_TEST_USAGE_CHANGED && usageChangedSent)
+    result = { usage: JSON.parse(process.env.MUSE_TEST_USAGE_CHANGED) };
+  else if (process.env.MUSE_TEST_USAGE) result = JSON.parse(process.env.MUSE_TEST_USAGE);
+  else result = responseFor(catalogRows, "usage/read");
+  respond(frame, result);
+  if (process.env.MUSE_TEST_USAGE_CHANGED && !usageChangedSent) {
+    usageChangedSent = true;
+    send({
+      jsonrpc: "2.0",
+      method: "usage/changed",
+      params: JSON.parse(process.env.MUSE_TEST_USAGE_CHANGED),
+    });
+  }
+  return true;
+}
 const replacements = new Map();
 const counts = new Map();
 const receipts = new Set();
@@ -171,13 +189,7 @@ function parityResponse(frame) {
     respond(frame, result);
     return true;
   }
-  if (frame.method === "usage/read") {
-    const result = process.env.MUSE_TEST_USAGE
-      ? JSON.parse(process.env.MUSE_TEST_USAGE)
-      : responseFor(catalogRows, "usage/read");
-    respond(frame, result);
-    return true;
-  }
+  if (frame.method === "usage/read") return usageReadResponse(frame);
   if (frame.method === "session/list") {
     const result = responseFor(catalogRows, "session/list");
     result.nextCursor = null;

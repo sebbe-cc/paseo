@@ -103,6 +103,46 @@ test("discovery preserves account IDs and updates input after token rotation", a
   expect(refreshed[0]?.report.windows[0]?.label).toBe("new");
 });
 
+test("invalidateSource drops cached cards and notifies with the affected ids", async () => {
+  let now = 0;
+  const counts = new Map<string, number>();
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => {
+        counts.set("muse", (counts.get("muse") ?? 0) + 1);
+        return { status: "available", windows: [] };
+      },
+    }),
+  );
+  registry.register(
+    source({
+      id: "other",
+      discover: async () => [{ key: "b", input: { account: "b" } }],
+      fetch: async () => ({ status: "available", windows: [] }),
+    }),
+  );
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["muse:a", "other:b"]);
+  expect(counts.get("muse")).toBe(1);
+  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
+  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
+  // A cached re-read does not refetch.
+  await registry.listReports({ reportIds: ["muse:a"] });
+  expect(counts.get("muse")).toBe(1);
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+  expect(invalidated).toEqual([{ sourceId: "muse", reportIds: ["muse:a"] }]);
+  // Only the muse cards were dropped; other:b stays cached and no event fires for it.
+  expect(registry.invalidateSource("unknown")).toEqual([]);
+  expect(invalidated).toHaveLength(1);
+  await registry.listReports({ reportIds: ["muse:a", "other:b"] });
+  expect(counts.get("muse")).toBe(2);
+  unsubscribe();
+  registry.invalidateSource("muse");
+  expect(invalidated).toHaveLength(1);
+});
+
 test("coalesces per account, caches errors, and refreshes only requested IDs", async () => {
   let now = 0;
   const counts = new Map<string, number>();
