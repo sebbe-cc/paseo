@@ -106,11 +106,25 @@ const DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PI_RPC_TIMEOUT_MS = 60_000;
 const QUESTION_RESPONSE_HEADER = "Response";
 
+const PiProviderRegistrationSchema = z
+  .object({
+    baseUrl: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+  })
+  .strict();
+
+// Generic plugin-API extension point (pa-89is1.14): a plugin contributes
+// per-session Pi model-provider configuration through providerOptions at
+// agent.create (or session_open env), and the daemon-injected extension
+// registers each entry verbatim via pi.registerProvider. Values may carry
+// $ENV placeholders, which Pi expands from the session process env.
 export const PiProviderOptionsSchema = z
   .object({
     sessionDir: z.string().min(1).optional(),
     rpcTimeoutMs: z.number().int().positive().default(DEFAULT_PI_RPC_TIMEOUT_MS),
     extensionTimeoutMs: z.number().int().positive().default(DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS),
+    providers: z.record(z.string(), PiProviderRegistrationSchema).optional(),
   })
   .strict();
 
@@ -271,6 +285,10 @@ type PiMcpInjection =
 interface PiPaseoExtensionOptions {
   systemPrompt?: string;
   mcpServers?: Record<string, PiMcpServerConfig>;
+  providers?: Record<
+    string,
+    { baseUrl?: string; apiKey?: string; headers?: Record<string, string> }
+  >;
 }
 
 interface PiTempFile {
@@ -616,6 +634,7 @@ function createPiMcpConfigFile(
 function createPiPaseoExtensionFile({
   systemPrompt,
   mcpServers = {},
+  providers = {},
 }: PiPaseoExtensionOptions): PiTempFile {
   const dir = mkdtempSync(join(tmpdir(), "paseo-pi-extension-"));
   const filePath = join(dir, "paseo-integration.mjs");
@@ -678,6 +697,12 @@ function createPiPaseoExtensionFile({
 	export default function paseoIntegration(pi) {
 	  for (const [name, config] of Object.entries(${JSON.stringify(mcpServers)})) {
 	    pi.registerMcpServer(name, config);
+	  }
+	  // Per-session provider configuration contributed via providerOptions
+	  // (generic plugin API; entries pass through verbatim so plugins can
+	  // use $ENV placeholders expanded by Pi from the session env).
+	  for (const [name, config] of Object.entries(${JSON.stringify(providers)})) {
+	    pi.registerProvider(name, config);
 	  }
 	  const submittedUserMessages = [];
 	  ${piExtensionRuntimeBridge}
@@ -2549,6 +2574,7 @@ export class PiRpcAgentClient implements AgentClient {
     const paseoExtension = createPiPaseoExtensionFile({
       systemPrompt: composeSystemPromptParts(config.systemPrompt, config.daemonAppendSystemPrompt),
       mcpServers: mcp?.kind === "builtin" ? mcp.servers : undefined,
+      providers: providerOptions.providers,
     });
     let runtimeSession: PiRuntimeSession;
     try {
@@ -2619,6 +2645,7 @@ export class PiRpcAgentClient implements AgentClient {
         resumeConfig.config.daemonAppendSystemPrompt,
       ),
       mcpServers: mcp?.kind === "builtin" ? mcp.servers : undefined,
+      providers: providerOptions.providers,
     });
     let runtimeSession: PiRuntimeSession;
     try {

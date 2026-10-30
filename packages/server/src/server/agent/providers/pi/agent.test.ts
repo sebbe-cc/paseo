@@ -161,6 +161,7 @@ function parseEntryCapture(notification: string): unknown {
 async function loadPaseoExtensionListeners(
   extensionPath: string,
   registerMcpServer: (name: string, config: unknown) => void = () => undefined,
+  registerProvider: (name: string, config: unknown) => void = () => undefined,
 ): Promise<Map<string, PaseoExtensionListener>> {
   const listeners = new Map<string, PaseoExtensionListener>();
   const extension = (await import(pathToFileURL(extensionPath).href)) as {
@@ -169,6 +170,7 @@ async function loadPaseoExtensionListeners(
       events: { on: () => void };
       registerCommand: () => void;
       registerMcpServer: (name: string, config: unknown) => void;
+      registerProvider: (name: string, config: unknown) => void;
     }) => void;
   };
   extension.default({
@@ -176,8 +178,23 @@ async function loadPaseoExtensionListeners(
     events: { on: () => undefined },
     registerCommand: () => undefined,
     registerMcpServer,
+    registerProvider,
   });
   return listeners;
+}
+
+async function readRegisteredProviders(
+  extensionPath: string,
+): Promise<Array<{ name: string; config: unknown }>> {
+  const providers: Array<{ name: string; config: unknown }> = [];
+  await loadPaseoExtensionListeners(
+    extensionPath,
+    () => undefined,
+    (name, config) => {
+      providers.push({ name, config });
+    },
+  );
+  return providers;
 }
 
 async function readRegisteredMcpServers(extensionPath: string): Promise<Record<string, unknown>> {
@@ -228,6 +245,45 @@ test("forwards launch-context env to the Pi process launch", async () => {
     CHUNK14_PROBE: "expected",
   });
 
+  await session.close();
+});
+
+test("registers providerOptions.providers in the injected extension verbatim", async () => {
+  const pi = new FakePi();
+  const session = await createClient(pi).createSession(
+    createConfig({
+      providerOptions: {
+        providers: {
+          example: {
+            baseUrl: "https://models.example.test/v1",
+            apiKey: "$EXAMPLE_API_KEY",
+            headers: { "x-example-session": "$EXAMPLE_SESSION_ID" },
+          },
+        },
+      },
+    }),
+  );
+  const extensionPath = pi.recordedLaunches[0]?.extensionPaths[0];
+  expect(extensionPath).toBeDefined();
+  await expect(readRegisteredProviders(extensionPath!)).resolves.toEqual([
+    {
+      name: "example",
+      config: {
+        baseUrl: "https://models.example.test/v1",
+        apiKey: "$EXAMPLE_API_KEY",
+        headers: { "x-example-session": "$EXAMPLE_SESSION_ID" },
+      },
+    },
+  ]);
+  await session.close();
+});
+
+test("registers no providers without providerOptions.providers", async () => {
+  const pi = new FakePi();
+  const session = await createClient(pi).createSession(createConfig());
+  const extensionPath = pi.recordedLaunches[0]?.extensionPaths[0];
+  expect(extensionPath).toBeDefined();
+  await expect(readRegisteredProviders(extensionPath!)).resolves.toEqual([]);
   await session.close();
 });
 
