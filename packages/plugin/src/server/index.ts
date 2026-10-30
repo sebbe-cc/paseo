@@ -39,3 +39,13 @@ export type {
   PluginVoiceHost,
   VoiceProviderCommand,
 } from "./voice.js";
+
+export { DictationProviderCommandSchema, DictationCommitResultSchema } from "./dictation.js";
+export type {
+  DictationProviderCommand,
+  DictationProviderRegistration,
+  DictationProviderSelection,
+  DictationProviderSession,
+  DictationProviderStartContext,
+  PluginDictationHost,
+} from "./dictation.js";
