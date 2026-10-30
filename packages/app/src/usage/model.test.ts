@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "@/i18n/i18next";
 import {
+  MAX_OBSERVED_AGE_MS,
+  resolveObservationExpiry,
   resolveUsageReport,
   displayPercent,
   resolveAgentUsageView,
@@ -553,4 +555,43 @@ it("R4: resolve exposes the source-owned observation as render input", () => {
   const failed = resolveUsageReport(failure, i18n.t);
   expect(failed.retained).toBe(true);
   expect(failed.observedAt).toBe(freshObservedAt);
+});
+
+describe("resolveObservationExpiry", () => {
+  const now = Date.parse("2026-10-30T12:00:00.000Z");
+  const atAge = (ms: number): string => new Date(now - ms).toISOString();
+
+  it("schedules nothing for legacy and future observations", () => {
+    expect(resolveObservationExpiry(null, now)).toEqual({ kind: "none" });
+    expect(resolveObservationExpiry("not-a-date", now)).toEqual({ kind: "none" });
+    expect(resolveObservationExpiry(new Date(now + 60_000).toISOString(), now)).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("times a fresh observation to fire 1ms past the inclusive ceiling", () => {
+    expect(resolveObservationExpiry(atAge(60_000), now)).toEqual({
+      kind: "timer",
+      delayMs: MAX_OBSERVED_AGE_MS - 60_000 + 1,
+    });
+    // Exactly on the ceiling: the model still renders quota, so the effect
+    // must still schedule the +1ms invalidation, never nothing.
+    expect(resolveObservationExpiry(atAge(MAX_OBSERVED_AGE_MS), now)).toEqual({
+      kind: "timer",
+      delayMs: 1,
+    });
+  });
+
+  it("invalidates immediately when the effect lands past a boundary-fresh render", () => {
+    // The render→effect race from ft-d8vx R4: the render commits fresh
+    // windows at exactly the ceiling (model age <= MAX is fresh) while the
+    // effect runs 1ms later. Returning nothing there leaves the quota stuck;
+    // only an immediate one-shot invalidation drops it without a poll.
+    expect(resolveObservationExpiry(atAge(MAX_OBSERVED_AGE_MS), now + 1)).toEqual({
+      kind: "invalidate",
+    });
+    expect(resolveObservationExpiry(atAge(MAX_OBSERVED_AGE_MS + 5_000), now)).toEqual({
+      kind: "invalidate",
+    });
+  });
 });

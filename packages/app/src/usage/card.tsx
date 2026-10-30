@@ -17,7 +17,7 @@ import type { TFunction } from "i18next";
 import { UsageBalanceBar } from "./balance-bar";
 import type { UsageDisplay } from "./display";
 import { formatAgo, formatProviderUsageLabel } from "./format";
-import { MAX_OBSERVED_AGE_MS, resolveUsageReport, type UsageRefresh } from "./model";
+import { resolveObservationExpiry, resolveUsageReport, type UsageRefresh } from "./model";
 
 /**
  * R4: the observation ceiling is render input on the mounted card. When the
@@ -32,21 +32,24 @@ import { MAX_OBSERVED_AGE_MS, resolveUsageReport, type UsageRefresh } from "./mo
 function useObservationExpiry(observedAt: string | null): void {
   const [, setExpired] = useState(0);
   useEffect(() => {
-    if (!observedAt) return undefined;
-    const at = Date.parse(observedAt);
-    if (Number.isNaN(at)) return undefined;
-    const delay = at + MAX_OBSERVED_AGE_MS - Date.now();
-    // The model treats an age of exactly MAX_OBSERVED_AGE_MS as fresh, so a
-    // timer firing exactly on the boundary would re-render into the same
-    // quota with no follow-up timer and the card would stay stuck. Fire 1ms
-    // past the boundary instead, so the re-render lands provably past the
-    // ceiling. Mounting exactly on the boundary (delay 0) still schedules
-    // that +1ms invalidation; an already-expired observation (delay < 0)
-    // renders stale on this render and needs no timer.
-    if (delay < 0 || at > Date.now()) return undefined;
+    // One clock reading for the whole decision: the render may have
+    // committed fresh windows exactly on the ceiling while this effect runs
+    // a millisecond later, so re-reading the clock per branch could straddle
+    // the boundary mid-decision.
+    const expiry = resolveObservationExpiry(observedAt, Date.now());
+    if (expiry.kind === "invalidate") {
+      // Already past the ceiling while the committed render may still show
+      // quota (render at exactly MAX_OBSERVED_AGE_MS is fresh, this effect
+      // at +1ms is not). Invalidate once so the re-render drops the quota
+      // without a poll. The dep list excludes the counter, so this fires at
+      // most once per observation.
+      setExpired((count) => count + 1);
+      return undefined;
+    }
+    if (expiry.kind === "none") return undefined;
     const timer = setTimeout(
       () => setExpired((count) => count + 1),
-      Math.min(delay + 1, 2_147_483_647),
+      Math.min(expiry.delayMs, 2_147_483_647),
     );
     return () => clearTimeout(timer);
   }, [observedAt]);

@@ -157,6 +157,62 @@ it("mounting exactly on the boundary still expires 1ms later", () => {
   expect(container.textContent).toContain("Quota data is stale and no longer shown.");
 });
 
+it("drops quota when the effect runs just past a boundary-fresh render", async () => {
+  // R4 render→effect race (ft-d8vx): the initial commit is synchronous, so
+  // the render below commits fresh windows at exactly the ceiling while the
+  // passive expiry effect only flushes on the next act boundary — by which
+  // the clock has moved 1ms past it. The old effect returned there without
+  // a timer or an invalidation and the quota stayed stuck; the fixed effect
+  // invalidates once so the same mounted entry drops its quota with no new
+  // entry and no fetch.
+  vi.useFakeTimers();
+  const boundary = Date.parse("2026-10-30T12:00:00.000Z");
+  vi.setSystemTime(boundary);
+  root.render(
+    <QueryClientProvider client={queryClient}>
+      <UsageCard
+        serverId="test"
+        entry={entryWithObservedAt(new Date(boundary - 30 * 60_000).toISOString())}
+        display={display}
+        pinnable={false}
+        refreshable={false}
+        compact
+      />
+    </QueryClientProvider>,
+  );
+  // Committed exactly on the inclusive ceiling: quota still renders.
+  expect(container.textContent).toContain("5-hour");
+  vi.setSystemTime(boundary + 1);
+  await act(async () => {});
+  expect(container.textContent).not.toContain("5-hour");
+  expect(container.textContent).toContain("Quota data is stale and no longer shown.");
+});
+
+it("drops retained quota when the effect runs just past a boundary-fresh render", async () => {
+  // Same race for the retained path: error stays visible, retained quota
+  // disappears, no poll involved.
+  vi.useFakeTimers();
+  const boundary = Date.parse("2026-10-30T12:00:00.000Z");
+  vi.setSystemTime(boundary);
+  root.render(
+    <QueryClientProvider client={queryClient}>
+      <UsageCard
+        serverId="test"
+        entry={retainedEntryWithObservedAt(new Date(boundary - 30 * 60_000).toISOString())}
+        display={display}
+        pinnable={false}
+        refreshable={false}
+        compact
+      />
+    </QueryClientProvider>,
+  );
+  expect(container.textContent).toContain("Primary");
+  vi.setSystemTime(boundary + 1);
+  await act(async () => {});
+  expect(container.textContent).not.toContain("Primary");
+  expect(container.textContent).toContain("quota rate limited");
+});
+
 it("expires retained history on the mounted card without a new poll", () => {
   vi.useFakeTimers();
   const now = Date.parse("2026-10-30T12:00:00.000Z");

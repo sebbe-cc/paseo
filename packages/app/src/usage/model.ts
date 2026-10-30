@@ -209,6 +209,33 @@ export function resolveUsageModalHostId(choice: UsageHostChoice): string | null 
  */
 export const MAX_OBSERVED_AGE_MS = 1_800_000;
 
+/**
+ * R4: what a mounted card's expiry effect must do for one source-owned
+ * observation at one clock reading. Pure so the render→effect race is
+ * unit-testable without a browser: the render may commit fresh windows at
+ * exactly the ceiling while the effect runs 1ms later, and only an
+ * explicit `invalidate` closes that gap. `timer` fires 1ms past the
+ * ceiling so the re-render lands provably past the inclusive model
+ * boundary; legacy (absent/unparsable) and future observations schedule
+ * nothing and invalidate nothing.
+ */
+export type ObservationExpiry =
+  | { kind: "none" }
+  | { kind: "invalidate" }
+  | { kind: "timer"; delayMs: number };
+
+export function resolveObservationExpiry(
+  observedAt: string | null,
+  now: number,
+): ObservationExpiry {
+  if (!observedAt) return { kind: "none" };
+  const at = Date.parse(observedAt);
+  if (Number.isNaN(at) || at > now) return { kind: "none" };
+  const delay = at + MAX_OBSERVED_AGE_MS - now;
+  if (delay < 0) return { kind: "invalidate" };
+  return { kind: "timer", delayMs: delay + 1 };
+}
+
 /** Source-owned observation time of a report, or null when unclaimed. */
 function observedAtOf(report: UsageReport): number | null {
   if (report.status !== "available" || !report.observedAt) return null;
