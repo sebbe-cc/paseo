@@ -2,6 +2,7 @@ import type { PluginText } from "../text.js";
 import type { ComponentType } from "react";
 import type { PaseoApi } from "@getpaseo/client";
 import type { AgentTimelineItem, JsonValue } from "@getpaseo/protocol/agent-types";
+import type { WorkspaceLabelColor } from "@getpaseo/protocol/workspace-labels";
 import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
 import type { PluginFile } from "./file.js";
 import type { PluginRpcContract } from "../rpc.js";
@@ -202,7 +203,53 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addTimelineRenderer<Schema extends ZodType>(
     contribution: PluginTimelineRendererContribution<Schema>,
   ): PluginCleanup;
+  addWorkspaceLabelPresenter(
+    contribution: PluginWorkspaceLabelPresenterContribution,
+  ): PluginCleanup;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
+}
+
+/**
+ * A plugin's say over how a sidebar workspace row draws its labels.
+ *
+ * The host owns the row: labels always render on their own wrapping line
+ * below the branch/project/host/change-request line, whether or not any
+ * plugin contributes. A presenter only reshapes which names are drawn —
+ * typically hiding one long machine-written label (kept intact on the
+ * workspace, so lookups still work) and adding short human-readable ones.
+ * It must not reach any other row content, and it must stay synchronous
+ * and deterministic like a timeline transformer.
+ */
+export interface PluginWorkspaceLabelPresenterInput {
+  /** The host the workspace lives on. */
+  serverId: string;
+  workspaceId: string;
+  /** The workspace's raw label names, in assignment order. */
+  labels: readonly string[];
+}
+
+export interface PluginWorkspaceLabelDisplay {
+  /** Short human-readable name, e.g. a bead id or a city nickname. */
+  name: string;
+  /**
+   * Tint hint when the host catalog knows no color for the name.
+   * A name the catalog already defines keeps its catalog color.
+   */
+  color?: WorkspaceLabelColor;
+}
+
+export interface PluginWorkspaceLabelPresenterResult {
+  /** Raw names to hide. Everything else still renders. */
+  hide?: readonly string[];
+  /** Display names appended after the remaining raw labels. */
+  add?: readonly PluginWorkspaceLabelDisplay[];
+}
+
+export interface PluginWorkspaceLabelPresenterContribution {
+  id: string;
+  present(
+    input: PluginWorkspaceLabelPresenterInput,
+  ): PluginWorkspaceLabelPresenterResult | undefined;
 }
 
 export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;

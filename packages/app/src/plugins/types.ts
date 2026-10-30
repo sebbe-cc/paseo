@@ -19,6 +19,7 @@ import type {
   PluginTimelineRendererContribution,
   PluginTimelineTransformerContribution,
   PluginPanelLocation,
+  PluginWorkspaceLabelPresenterContribution as SDKPluginWorkspaceLabelPresenterContribution,
   PluginWorkspacePanelContribution as SDKPluginWorkspacePanelContribution,
 } from "@getpaseo/plugin/client";
 
@@ -38,6 +39,8 @@ type PluginWorkspacePanelContribution =
   | Extract<WorkspacePanelInput, { context: "agent" }>;
 
 export type PluginSidebarSection = "header" | "footer";
+
+type PluginWorkspaceLabelPresenterContribution = SDKPluginWorkspaceLabelPresenterContribution;
 
 export type EvaluatedPluginWorkspacePanelContribution = PluginWorkspacePanelContribution & {
   locations: readonly PluginPanelLocation[];
@@ -60,6 +63,7 @@ export interface EvaluatedPlugin {
   themes: PluginThemeContribution[];
   timelineTransformers: PluginTimelineTransformerContribution[];
   timelineRenderers: PluginTimelineRendererContribution[];
+  workspaceLabelPresenters: PluginWorkspaceLabelPresenterContribution[];
 }
 
 export interface InstalledPlugin extends EvaluatedPlugin {
@@ -90,5 +94,6 @@ export type {
   PluginThemeContribution,
   PluginTimelineRendererContribution,
   PluginTimelineTransformerContribution,
+  PluginWorkspaceLabelPresenterContribution,
   PluginWorkspacePanelContribution,
 };

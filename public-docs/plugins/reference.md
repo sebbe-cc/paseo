@@ -1701,6 +1701,42 @@ same plugin and `id`. If its renderer is missing, Paseo shows the existing unava
 reject `data` over the limit rather than truncating it. Daemons that support this operation
 advertise `server_info.features.pluginTimelineItems`.
 
+## Workspace labels
+
+A sidebar workspace row draws its labels on their own wrapping line below the
+branch/project/host/change-request line. A plugin can reshape which names that
+line shows — typically hiding one long machine-written label and adding short
+readable ones — without touching anything else on the row:
+
+```tsx
+export default function contribute(client: PluginClientContext) {
+  client.addWorkspaceLabelPresenter({
+    id: "queue-shortener",
+    present({ labels }) {
+      const raw = labels.find((name) => name.startsWith("queue="));
+      if (!raw) return undefined;
+      return { hide: [raw], add: [{ name: "inbox" }] };
+    },
+  });
+  return () => {};
+}
+```
+
+The raw labels stay on the workspace untouched, so lookups that read them keep
+resolving; only the drawing changes. Returning `undefined` keeps every raw
+name. `hide` names match exactly; anything not hidden still renders. `add`
+names render before the remaining raw labels in the order given, at most eight
+per presenter, so the curated identity leads the line. A name the host catalog already defines keeps its catalog
+color, otherwise the optional `color` hint applies, otherwise a default tint.
+Added names that duplicate a visible raw name (case-insensitive) are skipped.
+Presenters run in registration order across all installed plugins and must be
+synchronous and deterministic. A presenter that throws or returns a misshapen
+result is skipped with a console warning and never blanks the line. With no
+presenters, or when the `labels` row item is switched off, the host draws the
+raw labels (or nothing) exactly as before. Requires a host newer than 0.14.0;
+guard with `client.addWorkspaceLabelPresenter?.(...)` when the same bundle
+runs on older hosts.
+
 ## Theme and layout
 
 Plugin UI runs on desktop, browser, iOS, and Android, across every Paseo theme. `theme` is a typed `PluginTheme` mapped from the active host theme. Color and spacing must come from those props. Hardcoded colors and unstyled `Text` break when the host theme changes.
