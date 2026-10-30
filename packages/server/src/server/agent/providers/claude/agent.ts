@@ -133,6 +133,7 @@ import {
   type ToolCallDetail,
 } from "../../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
+import { PendingTurnQueue, type PendingTurn } from "../../pending-turn-queue.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
 import {
   checkProviderLaunchAvailable,
@@ -2328,6 +2329,18 @@ class ClaudeAgentSession implements AgentSession {
   private subagentHandbackIds = new Set<string>();
   private pendingPermissions = new Map<string, PendingPermission>();
   private activeForegroundTurnId: string | null = null;
+  /**
+   * Messages sent while a foreground turn is active wait here instead of
+   * being rejected, then start in order when the active turn ends. Nothing
+   * sent to a busy agent is ever dropped.
+   */
+  private readonly pendingTurns = new PendingTurnQueue(() => this.createTurnId("foreground"));
+  /**
+   * Aborts in flight. A queued turn must never start while one runs: the
+   * abort withdraws unstarted SDK messages, so starting first would hand the
+   * new turn's message to the withdrawal and stall it.
+   */
+  private interruptInFlight = 0;
   private autonomousTurn: AutonomousTurnState | null = null;
   private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
   private readonly timelineAssembler = new TimelineAssembler();
@@ -2514,12 +2527,48 @@ class ClaudeAgentSession implements AgentSession {
       throw new Error("Claude session is closed");
     }
     if (this.activeForegroundTurnId) {
-      throw new Error("A foreground turn is already active");
+      // Self-heal first: a turn the runtime can no longer complete must not
+      // block everything behind it. Otherwise the message waits for turn end
+      // instead of being rejected, so no sender ever loses one.
+      if (this.clearStuckForegroundTurn("startTurn") === null) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        this.logger.debug(
+          {
+            agentId: this.agentId,
+            queuedTurnId,
+            activeTurnId: this.activeForegroundTurnId,
+            queued: this.pendingTurns.size,
+          },
+          "provider.claude.turn_queued",
+        );
+        return { turnId: queuedTurnId };
+      }
+      // Clearing the stuck turn drained the queue into the fresh slot when
+      // one was waiting. Join behind it instead of starting over it.
+      if (this.activeForegroundTurnId) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        return { turnId: queuedTurnId };
+      }
     }
+    if (this.pendingTurns.size > 0) {
+      // The slot is free but older messages are still waiting (an abort just
+      // settled or is settling): join behind them under a reserved id and let
+      // the drain start the oldest first. Returning the oldest id would bind
+      // this run to another message's turn.
+      const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+      this.drainPendingTurns();
+      return { turnId: queuedTurnId };
+    }
+    return this.startTurnInternal(prompt, options);
+  }
 
+  private async startTurnInternal(
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    turnId: string = this.createTurnId("foreground"),
+  ): Promise<{ turnId: string }> {
     const slashCommand = this.resolveSlashCommandInvocation(prompt);
     if (slashCommand?.commandName === REWIND_COMMAND_NAME) {
-      const turnId = this.createTurnId("foreground");
       this.activeForegroundTurnId = turnId;
       this.transitionTurnState("foreground", "rewind command");
       void this.executeRewindTurn(turnId, slashCommand);
@@ -2534,7 +2583,6 @@ class ClaudeAgentSession implements AgentSession {
     const sdkUserMessageId =
       typeof sdkMessage.uuid === "string" && sdkMessage.uuid.length > 0 ? sdkMessage.uuid : null;
     this.rememberRewindUserAnchor(sdkUserMessageId);
-    const turnId = this.createTurnId("foreground");
     this.activeForegroundTurnId = turnId;
     this.foregroundHasVisibleActivity = false;
     this.activeTurnHasAssistantText = false;
@@ -2558,14 +2606,22 @@ class ClaudeAgentSession implements AgentSession {
         this.mainTurnInFlight ||
         (sdkUserMessageId !== null && !this.unstartedMessageUuids.has(sdkUserMessageId));
       this.rejectAllPendingPermissions(new Error("Permission request canceled"));
+      // Mark the abort before finishing: the drain must not start the next
+      // queued turn until the abort below has settled, or the withdrawal
+      // would take the new turn's still-unsent message with it.
+      this.interruptInFlight += 1;
       this.finishForegroundTurn({
         type: "turn_canceled",
         provider: "claude",
         reason: "Interrupted",
       });
-      void this.interruptActiveTurn(claudeStartedTurn).catch((error) => {
-        this.logger.warn({ err: error }, "Failed to interrupt during cancel");
-      });
+      void this.interruptActiveTurn(claudeStartedTurn).then(
+        () => this.settleInterrupt(),
+        (error: unknown) => {
+          this.logger.warn({ err: error }, "Failed to interrupt during cancel");
+          this.settleInterrupt();
+        },
+      );
     };
     this.cancelCurrentTurn = requestCancel;
 
@@ -2680,7 +2736,14 @@ class ClaudeAgentSession implements AgentSession {
       this.completeAutonomousTurn();
     }
 
-    await this.interruptActiveTurn();
+    // No cancelCurrentTurn ran, so no abort is marked yet: hold the drain
+    // until this abort settles, same as the requestCancel path.
+    this.interruptInFlight += 1;
+    try {
+      await this.interruptActiveTurn();
+    } finally {
+      this.settleInterrupt();
+    }
   }
 
   async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
@@ -3019,6 +3082,9 @@ class ClaudeAgentSession implements AgentSession {
     await this.ensureHistoryReady();
     this.rejectAllPendingPermissions(new Error("Claude session closed"));
     this.cancelCurrentTurn?.();
+    // The daemon synthesizes cancellation for runs bound to queued turns, so
+    // no waiter can dangle on a message this dead session will never start.
+    this.pendingTurns.clear();
     this.subscribers.clear();
     this.activeForegroundTurnId = null;
     this.activeForegroundQuery = null;
@@ -3997,6 +4063,68 @@ class ClaudeAgentSession implements AgentSession {
     this.activeTurnHasAssistantText = false;
     this.compactionMarkerOpen = false;
     this.syncTurnState("foreground turn terminal");
+    this.drainPendingTurns();
+  }
+
+  /**
+   * Start the next queued message, if any, now that no foreground turn is
+   * active. Runs synchronously up to the queued turn's own start so the busy
+   * mark is set before any concurrent startTurn can interleave.
+   */
+  private drainPendingTurns(): void {
+    if (this.closed || this.activeForegroundTurnId || this.interruptInFlight > 0) {
+      return;
+    }
+    const next = this.pendingTurns.dequeue();
+    if (!next) {
+      return;
+    }
+    void this.startQueuedTurn(next);
+  }
+
+  private async startQueuedTurn(next: PendingTurn): Promise<void> {
+    try {
+      await this.startTurnInternal(next.prompt, next.options, next.turnId);
+    } catch (error) {
+      this.finishForegroundTurn({
+        type: "turn_failed",
+        provider: "claude",
+        error: error instanceof Error ? error.message : "Queued Claude turn failed to start",
+        turnId: next.turnId,
+      });
+    }
+  }
+
+  /**
+   * Fail and clear a foreground turn marked active while its runtime is gone:
+   * no live query input and no pump that could still complete it. Returns the
+   * cleared turn id, or null when the active turn still has a live path (or
+   * there is none). Draining the queue is part of finishing, so a cleared
+   * stuck turn hands the slot to the next waiting message.
+   */
+  clearStuckTurn(reason: string): string | null {
+    return this.clearStuckForegroundTurn(reason);
+  }
+
+  private clearStuckForegroundTurn(reason: string): string | null {
+    const stuckTurnId = this.activeForegroundTurnId;
+    if (!stuckTurnId || this.closed) {
+      return null;
+    }
+    if (this.queryPumpPromise || this.input) {
+      return null;
+    }
+    this.logger.warn(
+      { agentId: this.agentId, stuckTurnId, reason },
+      "provider.claude.clear_stuck_turn",
+    );
+    this.finishForegroundTurn({
+      type: "turn_failed",
+      provider: "claude",
+      error: "Claude turn was still marked active after its runtime ended; clearing it.",
+      turnId: stuckTurnId,
+    });
+    return stuckTurnId;
   }
 
   private dispatchEvents(events: AgentStreamEvent[]): void {
@@ -4015,6 +4143,7 @@ class ClaudeAgentSession implements AgentSession {
         this.cancelCurrentTurn = null;
         this.activeTurnHasAssistantText = false;
         this.syncTurnState("foreground turn terminal");
+        this.drainPendingTurns();
       } else if (this.autonomousTurn) {
         this.autonomousTurn = null;
         this.activeForegroundQuery = null;
@@ -4469,6 +4598,23 @@ class ClaudeAgentSession implements AgentSession {
    * perTaskStopAffordance), and no result would follow to consume pendingInterruptAbort.
    */
   private async interruptActiveTurn(claudeStartedTurn = this.mainTurnInFlight): Promise<void> {
+    // Paired with settleInterrupt below. requestCancel holds its own count
+    // across the finish-then-abort window, so overlapping counts are normal:
+    // only the zero crossing matters.
+    this.interruptInFlight += 1;
+    try {
+      await this.interruptActiveTurnInner(claudeStartedTurn);
+    } finally {
+      this.settleInterrupt();
+    }
+  }
+
+  private settleInterrupt(): void {
+    this.interruptInFlight = Math.max(0, this.interruptInFlight - 1);
+    this.drainPendingTurns();
+  }
+
+  private async interruptActiveTurnInner(claudeStartedTurn: boolean): Promise<void> {
     const queryToInterrupt = this.query;
     if (!queryToInterrupt || typeof queryToInterrupt.interrupt !== "function") {
       this.logger.trace(
