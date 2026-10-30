@@ -60,6 +60,13 @@ export type UsageReport =
        * identity (locator-only logins never attest).
        */
       accountIdentity?: string;
+      /**
+       * Last successful validated vendor observation (RFC3339 UTC), owned
+       * by the source — never poll time. The registry and app enforce the
+       * 1800 s ceiling on this timestamp. Omit when the source has no
+       * verified observation; the daemon then keeps poll-time semantics.
+       */
+      observedAt?: string;
     }
   | { status: "unavailable"; problem: UsageProblem }
   | { status: "error"; error: string };

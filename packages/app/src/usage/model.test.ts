@@ -405,3 +405,57 @@ it("available and retained usage show the same successful completion time", () =
   );
   expect(upsertReport([failure], success)).toEqual([failure]);
 });
+
+it("prefers source-owned observation time over poll time", () => {
+  const observedAt = new Date(Date.now() - 60_000).toISOString();
+  const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
+  if (live.report.status !== "available") throw new Error("fixture must be available");
+  const withObserved: UsageReportEntry = {
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    successfulAt: new Date().toISOString(),
+    report: { ...live.report, observedAt },
+  };
+  const resolved = resolveUsageReport(withObserved, i18n.t);
+  expect(resolved.successfulAt).toBe(observedAt);
+  expect(resolved.windows).toHaveLength(1);
+  expect(resolved.messages).toEqual([]);
+});
+
+it("hides quota observed past the ceiling even when the poll is fresh", () => {
+  const observedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+  const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
+  if (live.report.status !== "available") throw new Error("fixture must be available");
+  const aged: UsageReportEntry = {
+    ...live,
+    fetchedAt: new Date().toISOString(),
+    successfulAt: new Date().toISOString(),
+    report: { ...live.report, observedAt },
+  };
+  const resolved = resolveUsageReport(aged, i18n.t);
+  expect(resolved.windows).toEqual([]);
+  expect(resolved.messages).toHaveLength(1);
+});
+
+it("serves retained history only while its own observation is fresh", () => {
+  const freshObservedAt = new Date(Date.now() - 120_000).toISOString();
+  const staleObservedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+  const base = entry({ windows: [{ id: "primary", label: "Primary", usedPct: 61 }] });
+  if (base.report.status !== "available") throw new Error("fixture must be available");
+  const failureWith = (observedAt: string): UsageReportEntry => ({
+    ...base,
+    fetchedAt: new Date().toISOString(),
+    report: { status: "error", error: "proxy down" },
+    lastSuccessful: {
+      fetchedAt: new Date().toISOString(),
+      report: { ...base.report, observedAt },
+    },
+  });
+  const fresh = resolveUsageReport(failureWith(freshObservedAt), i18n.t);
+  expect(fresh.windows).toHaveLength(1);
+  expect(fresh.successfulAt).toBe(freshObservedAt);
+  expect(fresh.retained).toBe(true);
+  const stale = resolveUsageReport(failureWith(staleObservedAt), i18n.t);
+  expect(stale.windows).toEqual([]);
+  expect(stale.retained).toBe(false);
+});

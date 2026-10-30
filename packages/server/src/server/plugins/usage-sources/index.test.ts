@@ -1792,3 +1792,64 @@ test("replacing a source keeps invalidation routed to the new owner's cards", as
   const refetched = await registry.listReports({ reportIds: ["muse:a"] });
   expect(refetched[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
 });
+
+test("source-owned observation age owns freshness through the registry", async () => {
+  let now = 1_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now - 60_000).toISOString();
+  let mode: "ok" | "fail" = "ok";
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () =>
+        mode === "ok"
+          ? {
+              status: "available",
+              observedAt,
+              windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+            }
+          : { status: "error", error: "proxy down" },
+    }),
+  );
+  // Poll time never becomes the observation: successfulAt is the source's
+  // observedAt even though the fetch completed later.
+  now += 5_000;
+  const first = await registry.listReports();
+  expect(first[0]?.report.status).toBe("available");
+  expect(first[0]?.successfulAt).toBe(observedAt);
+  // A failure inside the ceiling keeps the error visible and carries the
+  // true observation in history — no new observation is stamped.
+  mode = "fail";
+  now += 120_000;
+  const failed = await registry.listReports({ forceRefresh: true });
+  expect(failed[0]?.report.status).toBe("error");
+  expect(failed[0]?.lastSuccessful?.report).toMatchObject({ status: "available", observedAt });
+  expect(failed[0]?.successfulAt).toBeUndefined();
+  // Repeated failures past the ceiling drop history: stale quota is never
+  // reintroduced, however fresh the poll itself is.
+  now += 2_000_000;
+  const stale = await registry.listReports({ forceRefresh: true });
+  expect(stale[0]?.report.status).toBe("error");
+  expect(stale[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("available quota older than the ceiling never publishes, even cold", async () => {
+  const now = 5_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () => ({
+        status: "available",
+        observedAt: new Date(now - 45 * 60_000).toISOString(),
+        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+      }),
+    }),
+  );
+  const reports = await registry.listReports();
+  expect(reports).toHaveLength(1);
+  expect(reports[0]?.report.status).toBe("error");
+  expect(reports[0]?.lastSuccessful).toBeUndefined();
+});
