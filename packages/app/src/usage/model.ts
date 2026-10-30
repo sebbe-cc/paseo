@@ -202,13 +202,73 @@ export function resolveUsageModalHostId(choice: UsageHostChoice): string | null 
   return picked?.serverId ?? resolveUsageHostId(choice) ?? connected[0]?.serverId ?? null;
 }
 
+/**
+ * Age ceiling for source-owned observations (pa-vtgw9). Matches the
+ * daemon's MAX_OBSERVED_AGE_MS; quota observed longer ago is never shown
+ * as quota, however fresh the poll is.
+ */
+export const MAX_OBSERVED_AGE_MS = 1_800_000;
+
+/** Source-owned observation time of a report, or null when unclaimed. */
+function observedAtOf(report: UsageReport): number | null {
+  if (report.status !== "available" || !report.observedAt) return null;
+  const at = Date.parse(report.observedAt);
+  return Number.isNaN(at) ? null : at;
+}
+
+function isFreshObservation(observedAt: number | null, now: number): boolean {
+  return observedAt === null || now - observedAt <= MAX_OBSERVED_AGE_MS;
+}
+
+/**
+ * Retained history stays servable only while its own observation is fresh.
+ * A snapshot whose observation aged past the ceiling is not history — it is
+ * expired quota. Dropped, so repeated failures can never reintroduce it,
+ * even when an older daemon served it.
+ */
+function pickSnapshot(
+  entry: UsageReportEntry,
+  available: boolean,
+  now: number,
+): UsageReportEntry["lastSuccessful"] {
+  // COMPAT(usageLastSuccessful): added in v0.12.0, remove after 2027-04-17 once daemon floor >= v0.12.0.
+  // Older daemons cannot provide history; a failed attempt is never a successful update.
+  if (available) return null;
+  const snapshot = entry.lastSuccessful ?? null;
+  if (snapshot && !isFreshObservation(observedAtOf(snapshot.report), now)) return null;
+  return snapshot;
+}
+
+function pickObservedAgeText(
+  liveObservedAt: number | null,
+  snapshotObservedAt: number | null,
+  entry: UsageReportEntry,
+  available: boolean,
+  snapshot: UsageReportEntry["lastSuccessful"],
+): string | null {
+  // Source-owned observation time is the truth for freshness displays;
+  // poll/attempt time is only a fallback for sources that omit it.
+  if (liveObservedAt !== null) return new Date(liveObservedAt).toISOString();
+  if (snapshotObservedAt !== null) return new Date(snapshotObservedAt).toISOString();
+  // COMPAT(usageSuccessfulAt): added in v0.12.0, remove after 2027-04-17 once daemon floor >= v0.12.0.
+  // Old daemons expose only attempt time for available reports, never for failures.
+  if (available) return entry.successfulAt ?? entry.fetchedAt;
+  return snapshot?.fetchedAt ?? null;
+}
+
 /** Current outcome owns messages; only a successful poll owns values and freshness. */
 export function resolveUsageReport(entry: UsageReportEntry, t: TFunction) {
   const available = entry.report.status === "available";
-  // COMPAT(usageLastSuccessful): added in v0.12.0, remove after 2027-04-17 once daemon floor >= v0.12.0.
-  // Older daemons cannot provide history; a failed attempt is never a successful update.
-  const snapshot = available ? null : (entry.lastSuccessful ?? null);
-  const content = entry.report.status === "available" ? entry.report : (snapshot?.report ?? null);
+  const now = Date.now();
+  const snapshot = pickSnapshot(entry, available, now);
+  const liveObservedAt = entry.report.status === "available" ? observedAtOf(entry.report) : null;
+  const liveFresh = entry.report.status === "available" && isFreshObservation(liveObservedAt, now);
+  let content: UsageReportEntry["report"] | null = null;
+  if (entry.report.status === "available") {
+    if (liveFresh) content = entry.report;
+  } else if (snapshot) {
+    content = snapshot.report;
+  }
   const messages: string[] = [];
   if (!available) {
     if (entry.loginErrors)
@@ -220,16 +280,21 @@ export function resolveUsageReport(entry: UsageReportEntry, t: TFunction) {
     // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once daemon floor >= v0.11.0.
     else messages.push(usageProblemText(entry.report, t));
   }
+  if (available && !liveFresh) {
+    messages.push("Quota data is stale and no longer shown.");
+  }
   return {
     windows: content?.windows ?? [],
     balances: content?.balances ?? [],
     details: content?.details ?? [],
     planLabel: content?.planLabel ?? null,
-    // COMPAT(usageSuccessfulAt): added in v0.12.0, remove after 2027-04-17 once daemon floor >= v0.12.0.
-    // Old daemons expose only attempt time for available reports, never for failures.
-    successfulAt: available
-      ? (entry.successfulAt ?? entry.fetchedAt)
-      : (snapshot?.fetchedAt ?? null),
+    successfulAt: pickObservedAgeText(
+      liveObservedAt,
+      snapshot ? observedAtOf(snapshot.report) : null,
+      entry,
+      available,
+      snapshot,
+    ),
     retained: snapshot !== null,
     messages,
   };

@@ -1561,3 +1561,304 @@ test("a pending primary cannot start native fallback or publish after reload and
   expect(after[0].report.windows).toEqual([{ id: "override", label: "Override", usedPct: 42 }]);
   expect(await registry.listReports({ reportIds: ["local:shared"] })).toEqual([]);
 });
+
+test("a successful pending primary publishes nothing after disable", async () => {
+  const registry = new UsageSourceRegistry();
+  let calls = 0;
+  let releasePrimary!: (value: unknown) => void;
+  const primaryGate = new Promise<unknown>((resolve) => {
+    releasePrimary = resolve;
+  });
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => {
+        calls++;
+        // Only the second read stalls: the warm-up and the post-enable
+        // re-read resolve at once.
+        if (calls === 2) await primaryGate;
+        return { status: "available", windows: [{ id: "w", label: "retired-success" }] };
+      },
+    }),
+  );
+  // Warm the card so the retired shape is a success, not a first discovery.
+  expect((await registry.listReports())[0]?.report).toMatchObject({
+    windows: [{ label: "retired-success" }],
+  });
+  const reported: string[] = [];
+  const pending = registry.listReports({
+    reportIds: ["muse:a"],
+    forceRefresh: true,
+    onReport: (entry) => reported.push(entry.id),
+  });
+  await Promise.resolve();
+  // Disable while the successful primary is still in flight.
+  registry.disable("muse");
+  releasePrimary(undefined);
+  // Sequence A: the success resolves, but the retired card reaches neither
+  // the callback, the returned list, the cache, nor last-success.
+  expect(await pending).toEqual([]);
+  expect(reported).toEqual([]);
+  registry.enable("muse");
+  // A global re-read rediscovers the card and serves it fresh; the retired
+  // success lodged neither cache nor last-success on its way out.
+  const after = await registry.listReports();
+  expect(after.map((entry) => entry.id)).toEqual(["muse:a"]);
+  expect(after[0]?.report).toMatchObject({ windows: [{ label: "retired-success" }] });
+  expect(after[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("an already-started fallback publishes nothing after retirement", async () => {
+  const nativeCalls: unknown[] = [];
+  let releaseFallback!: () => void;
+  const fallbackGate = new Promise<void>((resolve) => {
+    releaseFallback = resolve;
+  });
+  let nativeFails = false;
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "local",
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "shared" } }],
+      fetch: async (input) => {
+        nativeCalls.push(input);
+        await fallbackGate;
+        if (nativeFails) throw new Error("native down");
+        return {
+          status: "available",
+          accountIdentity: "test:a",
+          windows: [{ id: "native", label: "Native", usedPct: 11 }],
+        };
+      },
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "a" } }],
+      // The primary fails while live, so native fallback starts at once.
+      fetch: async () => ({ status: "error", error: "proxy down" }),
+    }),
+  );
+  const reported: string[] = [];
+  const pending = registry.listReports({ onReport: (entry) => reported.push(entry.id) });
+  // Flush macrotasks so the primary has failed and the native fallback is
+  // genuinely in flight before retirement.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(nativeCalls).toHaveLength(1);
+  // Sequence B: retire while the attested fallback is in flight, then let it
+  // succeed. The success reaches neither callback nor return, and retirement
+  // starts no further native fetch.
+  registry.disable("cpa");
+  const callsAtRetire = nativeCalls.length;
+  releaseFallback();
+  expect(await pending).toEqual([]);
+  expect(reported).toEqual([]);
+  expect(nativeCalls).toHaveLength(callsAtRetire);
+  // Nothing lodged: with everything failing after re-enable, the error
+  // carries no last-success from the retired fetch.
+  registry.enable("cpa");
+  nativeFails = true;
+  const [failed] = await registry.listReports({ forceRefresh: true });
+  expect(failed?.report).toMatchObject({ status: "error" });
+  expect(failed?.lastSuccessful).toBeUndefined();
+});
+
+test("a fetch retired by an event publishes nothing; the push's re-read serves new data", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  let calls = 0;
+  let releaseOld!: () => void;
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve;
+  });
+  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
+  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
+  try {
+    registry.register(
+      source({
+        id: "muse",
+        discover: async () => [{ key: "a", input: { account: "a" } }],
+        fetch: async () => {
+          calls++;
+          if (calls === 2) {
+            // F1 starts with the older quota and stalls.
+            await oldGate;
+            return { status: "available", windows: [{ id: "w", label: "old" }] };
+          }
+          return {
+            status: "available",
+            windows: [{ id: "w", label: calls === 1 ? "old" : "new" }],
+          };
+        },
+      }),
+    );
+    const first = await registry.listReports();
+    expect(first[0]?.report).toMatchObject({ windows: [{ label: "old" }] });
+    // F1 hangs on its next read; the event retires it, F2 reads the new
+    // quota, and F1 resolves last with the older values.
+    const reported: string[] = [];
+    const slow = registry.listReports({
+      reportIds: ["muse:a"],
+      forceRefresh: true,
+      onReport: (entry) => reported.push(entry.id),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+    expect(invalidated).toEqual([{ sourceId: "muse", reportIds: ["muse:a"] }]);
+    const fresh = await registry.listReports({ reportIds: ["muse:a"] });
+    expect(fresh[0]?.report).toMatchObject({ windows: [{ label: "new" }] });
+    releaseOld();
+    // The retired fetch reaches neither the callback nor the returned list,
+    // so its older quota can never overwrite the event's newer data.
+    expect(await slow).toEqual([]);
+    expect(reported).toEqual([]);
+    expect(calls).toBe(3);
+    // The cache holds the new quota; no further fetch is needed.
+    await registry.listReports({ reportIds: ["muse:a"] });
+    expect(calls).toBe(3);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("a freshness invalidation keeps every account's last-good snapshot for later errors", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  let failB = false;
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [
+        { key: "a", input: { account: "a" } },
+        { key: "b", input: { account: "b" } },
+      ],
+      fetch: async (input) => {
+        const account = (input as { account: string }).account;
+        if (account === "b" && failB) throw new Error("quota backend down");
+        return { status: "available", windows: [{ id: "w", label: `ok-${account}` }] };
+      },
+    }),
+  );
+  const initial = await registry.listReports();
+  expect(initial.map((entry) => entry.id)).toEqual(["muse:a", "muse:b"]);
+  // An event for the source drops freshness but preserves valid history.
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a", "muse:b"]);
+  failB = true;
+  const after = await registry.listReports({ forceRefresh: true });
+  const entryB = after.find((entry) => entry.id === "muse:b")!;
+  expect(entryB.report).toMatchObject({ status: "error" });
+  // B's proven observation survives the invalidation and the later error.
+  expect(entryB.lastSuccessful?.report).toMatchObject({ windows: [{ label: "ok-b" }] });
+  const entryA = after.find((entry) => entry.id === "muse:a")!;
+  expect(entryA.report).toMatchObject({ windows: [{ label: "ok-a" }] });
+});
+
+test("a first event after an empty discovery still pushes an inventory invalidation", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(source({ id: "muse" }));
+  const invalidated: Array<{ sourceId: string; reportIds: string[] }> = [];
+  const unsubscribe = registry.onInvalidated((event) => invalidated.push(event));
+  try {
+    // Nothing discovered yet: no card ids, but the registered source's
+    // inventory may have changed, so listeners still fire for rediscovery.
+    expect(registry.invalidateSource("muse")).toEqual([]);
+    expect(invalidated).toEqual([{ sourceId: "muse", reportIds: [] }]);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("replacing a source keeps invalidation routed to the new owner's cards", async () => {
+  let now = 0;
+  const registry = new UsageSourceRegistry(() => now);
+  const windows = (label: string) => ({ status: "available", windows: [{ id: "w", label }] });
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => windows("v1"),
+    }),
+  );
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["muse:a"]);
+  registry.unregister("muse");
+  registry.register(
+    source({
+      id: "muse",
+      discover: async () => [{ key: "a", input: { account: "a" } }],
+      fetch: async () => windows("v2"),
+    }),
+  );
+  const replaced = await registry.listReports();
+  expect(replaced[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
+  expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
+  const refetched = await registry.listReports({ reportIds: ["muse:a"] });
+  expect(refetched[0]?.report).toMatchObject({ windows: [{ label: "v2" }] });
+});
+
+test("source-owned observation age owns freshness through the registry", async () => {
+  let now = 1_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  const observedAt = new Date(now - 60_000).toISOString();
+  let mode: "ok" | "fail" = "ok";
+  registry.register(
+    source({
+      id: "claude",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () =>
+        mode === "ok"
+          ? {
+              status: "available",
+              observedAt,
+              windows: [{ id: "five_hour", label: "5-hour", usedPct: 10 }],
+            }
+          : { status: "error", error: "proxy down" },
+    }),
+  );
+  // Poll time never becomes the observation: successfulAt is the source's
+  // observedAt even though the fetch completed later.
+  now += 5_000;
+  const first = await registry.listReports();
+  expect(first[0]?.report.status).toBe("available");
+  expect(first[0]?.successfulAt).toBe(observedAt);
+  // A failure inside the ceiling keeps the error visible and carries the
+  // true observation in history — no new observation is stamped.
+  mode = "fail";
+  now += 120_000;
+  const failed = await registry.listReports({ forceRefresh: true });
+  expect(failed[0]?.report.status).toBe("error");
+  expect(failed[0]?.lastSuccessful?.report).toMatchObject({ status: "available", observedAt });
+  expect(failed[0]?.successfulAt).toBeUndefined();
+  // Repeated failures past the ceiling drop history: stale quota is never
+  // reintroduced, however fresh the poll itself is.
+  now += 2_000_000;
+  const stale = await registry.listReports({ forceRefresh: true });
+  expect(stale[0]?.report.status).toBe("error");
+  expect(stale[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("available quota older than the ceiling never publishes, even cold", async () => {
+  const now = 5_000_000;
+  const registry = new UsageSourceRegistry(() => now);
+  registry.register(
+    source({
+      id: "codex",
+      discover: async () => [{ key: "a", input: {} }],
+      fetch: async () => ({
+        status: "available",
+        observedAt: new Date(now - 45 * 60_000).toISOString(),
+        windows: [{ id: "primary", label: "Primary", usedPct: 61 }],
+      }),
+    }),
+  );
+  const reports = await registry.listReports();
+  expect(reports).toHaveLength(1);
+  expect(reports[0]?.report.status).toBe("error");
+  expect(reports[0]?.lastSuccessful).toBeUndefined();
+});

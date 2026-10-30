@@ -6419,6 +6419,12 @@ const AvailableUsageReportSchema = z.object({
   // native login whose attested identity equals the expected one; anything
   // else fails closed. Optional: older sources omit it.
   accountIdentity: z.string().optional(),
+  // Last successful validated vendor observation (RFC3339 UTC), owned by the
+  // source — never poll time. The registry and app enforce the 1800 s
+  // ceiling on this timestamp, not on fetch/poll time, so repeated
+  // failures can never reintroduce older quota or stamp a new observation.
+  // Optional: older sources omit it and keep poll-time semantics.
+  observedAt: z.iso.datetime().optional(),
 });
 export const UsageReportSchema = z.discriminatedUnion("status", [
   AvailableUsageReportSchema,

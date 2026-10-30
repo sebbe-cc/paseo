@@ -11,6 +11,50 @@ import {
   type UsageReport,
 } from "@getpaseo/protocol/messages";
 
+/**
+ * Ceiling for source-owned observation age (pa-vtgw9). Quota observed
+ * longer ago than this is never served as quota — not as a live report and
+ * not via `lastSuccessful` — however fresh the poll itself is.
+ */
+export const MAX_OBSERVED_AGE_MS = 1_800_000;
+
+function parseObservedAt(value: string | undefined): number | null {
+  if (!value) return null;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : at;
+}
+
+function ageText(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+/** Age of the source-owned observation, or null when the source omits it. */
+function observedAgeMsOf(report: UsageReport, now: number): number | null {
+  if (report.status !== "available" || !report.observedAt) return null;
+  const at = parseObservedAt(report.observedAt);
+  return at === null ? null : Math.max(0, now - at);
+}
+
+/**
+ * A stored last-successful snapshot stays servable only while its own
+ * observation is fresh. Snapshots from sources without `observedAt` keep
+ * the previous behavior (always servable); snapshots with an observation
+ * older than the ceiling are dropped so repeated failures can never
+ * reintroduce stale quota after a restart.
+ */
+function lastSuccessfulStillFresh(
+  snapshot: NonNullable<UsageReportEntry["lastSuccessful"]>,
+  now: number,
+): boolean {
+  const age = observedAgeMsOf(snapshot.report, now);
+  return age === null || age <= MAX_OBSERVED_AGE_MS;
+}
+
 export interface UsageSource {
   id: string;
   label: string;
@@ -590,10 +634,26 @@ export class UsageSourceRegistry {
         fetchedAt,
         ...outcome,
       };
+      // Provenance ceiling (pa-vtgw9): when a source owns its observation
+      // time via `observedAt`, age is measured from that timestamp — never
+      // from poll/fetch time. Quota older than the ceiling is never served
+      // as quota, and a repeated failure can never stamp a new observation.
+      // Sources without `observedAt` keep the previous poll-time semantics.
       if (entry.report.status === "available") {
-        entry.successfulAt = completedAt;
-      } else {
-        entry.lastSuccessful = this.successful.get(cacheKey);
+        const observedAgeMs = observedAgeMsOf(entry.report, this.now());
+        if (observedAgeMs !== null && observedAgeMs > MAX_OBSERVED_AGE_MS) {
+          (entry as { report: UsageReport }).report = {
+            status: "error",
+            error: `quota data is stale (last success ${ageText(observedAgeMs)})`,
+          };
+        } else {
+          entry.successfulAt = entry.report.observedAt ?? completedAt;
+        }
+      }
+      if (entry.report.status !== "available") {
+        const snapshot = this.successful.get(cacheKey);
+        entry.lastSuccessful =
+          snapshot && lastSuccessfulStillFresh(snapshot, this.now()) ? snapshot : undefined;
       }
       if (
         isLive() &&
