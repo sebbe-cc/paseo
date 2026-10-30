@@ -620,6 +620,15 @@ errors stay on the card as `loginErrors`. `server.disableUsageSource("codex")` h
 built-in source without replacing it; a takeover of the same id re-enables it. Both are
 per-plugin: unloading the plugin restores the built-in cards.
 
+Fallback needs a provable same-account match: only built-in logins discovered under the
+override account's own `key` may serve its card, so one account's failure can never show
+another account's quota. A source whose keys can never match the native identities — or
+whose native fetch would start a host just to fail, such as a CPA-backed Muse source —
+sets `skipNativeFallback: true`: the daemon then never calls the taken-over sources'
+`discover`/`fetch`, and a failing override reports its own error (or its last successful
+snapshot with its age) instead of built-in values. The same policy covers discovery
+failures: no built-in cards return for a provider the opted-out source owns.
+
 The source icon is a file path with the same rules as a provider icon.
 
 ## Entry point and cleanup
