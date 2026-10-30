@@ -12470,3 +12470,157 @@ test("providers with a pre-compact hook get beforeCompact instead of the thresho
   });
   expect(requests).toMatchObject([{ source: "provider", reason: "manual" }]);
 });
+
+class TurnPrepareRecordingSession extends TestAgentSession {
+  readonly receivedPrompts: AgentPromptInput[] = [];
+
+  override async startTurn(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
+    this.receivedPrompts.push(prompt);
+    return super.startTurn(prompt, options);
+  }
+}
+
+class TurnPrepareRecordingClient extends TestAgentClient {
+  readonly sessions: TurnPrepareRecordingSession[] = [];
+
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    const session = new TurnPrepareRecordingSession(config);
+    this.sessions.push(session);
+    return session;
+  }
+}
+
+function promptTextOf(prompt: AgentPromptInput): string {
+  if (typeof prompt === "string") return prompt;
+  return prompt.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+test("turn_prepare hidden context reaches the provider prompt but not the stored timeline", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-prepare-"));
+  const client = new TurnPrepareRecordingClient();
+  const turnPrepareRequests: Array<{
+    kind: unknown;
+    turnNumber: unknown;
+    prompt: unknown;
+    labels: unknown;
+  }> = [];
+  const createRequests: unknown[] = [];
+  const manager = new AgentManager({
+    clients: { codex: client },
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: (async (name: string, request: unknown) => {
+        if (name === "agent.turn_prepare") {
+          const seen = request as {
+            agent: { labels: unknown };
+            turn: { kind: unknown; turnNumber: unknown; prompt: unknown };
+          };
+          turnPrepareRequests.push({
+            kind: seen.turn.kind,
+            turnNumber: seen.turn.turnNumber,
+            prompt: seen.turn.prompt,
+            labels: seen.agent.labels,
+          });
+          // Mirror PluginHookHandlers: the daemon accumulates `context`
+          // pieces and returns them as `accumulatedContext`.
+          return {
+            ...(seen as object),
+            accumulatedContext: ["memory: sentinel-alpha"],
+          };
+        }
+        if (name === "agent.create") createRequests.push(request);
+        return request;
+      }) as never,
+    },
+  });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { "gc-session": "sentinel-test" },
+    });
+    expect(createRequests).toHaveLength(1);
+
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "do the thing", { clientMessageId: "msg-1" }),
+    );
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "follow up", { clientMessageId: "msg-2" }),
+    );
+
+    // Verified identity, prompt snapshot, and turn progression reach the hook.
+    expect(turnPrepareRequests).toEqual([
+      {
+        kind: "start",
+        turnNumber: 1,
+        prompt: "do the thing",
+        labels: { "gc-session": "sentinel-test" },
+      },
+      {
+        kind: "next",
+        turnNumber: 2,
+        prompt: "follow up",
+        labels: { "gc-session": "sentinel-test" },
+      },
+    ]);
+
+    // The provider-bound request carries the hidden sentinel exactly once per
+    // turn; the stored timeline keeps the original user text.
+    const received = client.sessions[0]?.receivedPrompts ?? [];
+    expect(received).toHaveLength(2);
+    for (const [index, expected] of ["do the thing", "follow up"].entries()) {
+      const text = promptTextOf(received[index]!);
+      expect(text).toContain("memory: sentinel-alpha");
+      expect(text).toContain(expected);
+      expect(countOccurrences(text, "memory: sentinel-alpha")).toBe(1);
+    }
+    const storedUserMessages = manager
+      .getTimeline(agent.id)
+      .filter((item) => item.type === "user_message");
+    expect(storedUserMessages.map((item) => item.type === "user_message" && item.text)).toEqual([
+      "do the thing",
+      "follow up",
+    ]);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("a failing turn_prepare hook never stops the turn", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-prepare-failopen-"));
+  const client = new TurnPrepareRecordingClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: (async (name: string, request: unknown) => {
+        if (name === "agent.turn_prepare") throw new Error("hindsight is down");
+        return request;
+      }) as never,
+    },
+  });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "do the thing", { clientMessageId: "msg-1" }),
+    );
+    const received = client.sessions[0]?.receivedPrompts ?? [];
+    expect(received).toHaveLength(1);
+    expect(promptTextOf(received[0]!)).toBe("do the thing");
+    expect(
+      manager.getTimeline(agent.id).filter((item) => item.type === "user_message"),
+    ).toHaveLength(1);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});

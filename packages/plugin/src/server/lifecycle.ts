@@ -42,6 +42,20 @@ export interface PluginSessionOpenRequest {
   tools: AgentToolDefinition[];
   env: Record<string, string>;
   mcpServers: NonNullable<AgentSessionConfig["mcpServers"]>;
+  /**
+   * First user prompt when known, otherwise null. Read-only: hooks must not
+   * change it. At create time this is usually null because the first prompt
+   * has not been submitted yet; per-turn prompts arrive via
+   * `agent.turn_prepare`.
+   */
+  initialPrompt: string | null;
+  /**
+   * Recomposable stable instructions. A session_open hook may return changed
+   * values for interactive opens (create/resume/refresh/import); history
+   * opens must leave them unchanged.
+   */
+  systemPrompt?: string | null;
+  daemonAppendSystemPrompt?: string | null;
 }
 
 /**
@@ -88,12 +102,66 @@ export interface PluginLifecycleEvents {
   "workspace.archived": { workspace: PluginHookWorkspace };
 }
 
+export interface PluginCreateRequest {
+  config: AgentSessionConfig;
+  env?: Record<string, string>;
+  /**
+   * Verified labels the agent will be registered with. Read-only: create
+   * hooks must not change them; they exist so retrieval can match task and
+   * role without trusting env.
+   */
+  labels: Record<string, string>;
+  /**
+   * First user prompt when the caller supplied one, otherwise null.
+   * Read-only: hooks must not change it. Normal agent creation happens
+   * before the first prompt, so this is usually null; the per-turn prompt
+   * snapshot arrives via `agent.turn_prepare`.
+   */
+  initialPrompt: string | null;
+}
+
+export type PluginTurnKind = "start" | "resume" | "refresh" | "compaction" | "next";
+
+export interface PluginTurnPrepareRequest {
+  agent: PluginHookAgent & { labels: Record<string, string> };
+  turn: {
+    /** Snapshot of the submitted user prompt for this turn. Never mutated. */
+    prompt: string;
+    /** Why this turn starts: first start, resume, refresh, post-compaction, or a later turn. */
+    kind: PluginTurnKind;
+    /** Interactive turns run the model; history opens never do. */
+    purpose: "interactive" | "history";
+    /** 1-based count of foreground turns started on this agent. */
+    turnNumber: number;
+  };
+  /**
+   * Hidden per-turn context contributed by earlier turn_prepare hooks.
+   * A hook returns only its own addition via `context`; it never edits this.
+   */
+  accumulatedContext: string[];
+}
+
+export interface PluginTurnPrepareResult {
+  /**
+   * Hidden context for the effective model request. A separate channel from
+   * the user prompt: the daemon delivers it without mutating stored user
+   * text and without creating a new turn or a visible timeline message.
+   */
+  context?: string | string[] | null;
+}
+
 export interface PluginBeforeRequests {
-  "agent.create": { config: AgentSessionConfig; env?: Record<string, string> };
+  "agent.create": PluginCreateRequest;
   "agent.session_open": PluginSessionOpenRequest;
   "agent.compact": PluginCompactRequest;
+  "agent.turn_prepare": PluginTurnPrepareRequest;
   "workspace.create": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
+
+export type PluginBeforeResult<Name extends keyof PluginBeforeRequests> =
+  Name extends "agent.turn_prepare"
+    ? PluginTurnPrepareResult | void | Promise<PluginTurnPrepareResult | void>
+    : PluginBeforeRequests[Name] | void | Promise<PluginBeforeRequests[Name] | void>;
 
 export interface PluginLifecycleRegistration {
   on<Name extends keyof PluginLifecycleEvents>(
@@ -108,6 +176,6 @@ export interface PluginLifecycleRegistration {
     handler: (
       input: { request: PluginBeforeRequests[Name] },
       context: PluginHookContext,
-    ) => PluginBeforeRequests[Name] | void | Promise<PluginBeforeRequests[Name] | void>,
+    ) => PluginBeforeResult<Name>,
   ): () => void;
 }
