@@ -1,4 +1,4 @@
-import React, { act } from "react";
+import React, { act, useLayoutEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -58,6 +58,30 @@ let root: Root;
 let container: HTMLDivElement;
 let queryClient: QueryClient;
 
+/**
+ * C1: deterministic render→effect harness (ft-x8zz). The probe's layout
+ * effect runs after the commit (so fresh quota is observable) but before any
+ * passive effect (so UsageCard's expiry effect still sees the moved clock).
+ * Asserting fresh DOM inside the probe proves the commit was fresh; moving
+ * the clock there proves the passive effect invalidates past the ceiling.
+ */
+// Module-scope slot (set per test before render, cleared in afterEach): the
+// probe itself takes no props so no inline function is passed as JSX prop
+// (repo oxlint jsx-no-new-function-as-prop), yet the commit assertion and
+// clock move still run in a layout effect — after commit, before passive
+// expiry effects.
+let commitProbeCallback: (() => void) | null = null;
+
+function CommitProbe(): null {
+  // Mount-once: the probe must move the clock exactly once per mount, even
+  // if a later re-render would see a new closure.
+  const commitRef = useRef(commitProbeCallback);
+  useLayoutEffect(() => {
+    commitRef.current?.();
+  }, []);
+  return null;
+}
+
 function renderCard(entry: UsageReportEntry): void {
   act(() =>
     root.render(
@@ -87,6 +111,7 @@ beforeEach(async () => {
 afterEach(async () => {
   act(() => root.unmount());
   container.remove();
+  commitProbeCallback = null;
   await queryClient.clear();
   await i18n.changeLanguage("en");
   vi.unstubAllGlobals();
@@ -158,31 +183,38 @@ it("mounting exactly on the boundary still expires 1ms later", () => {
 });
 
 it("drops quota when the effect runs just past a boundary-fresh render", async () => {
-  // R4 render→effect race (ft-d8vx): the initial commit is synchronous, so
-  // the render below commits fresh windows at exactly the ceiling while the
-  // passive expiry effect only flushes on the next act boundary — by which
-  // the clock has moved 1ms past it. The old effect returned there without
-  // a timer or an invalidation and the quota stayed stuck; the fixed effect
-  // invalidates once so the same mounted entry drops its quota with no new
-  // entry and no fetch.
+  // R4 render→effect race (ft-d8vx, harness C1 ft-x8zz): the commit below
+  // lands exactly on the inclusive ceiling while the passive expiry effect
+  // flushes after the probe has moved the clock 1ms past it. The fixed
+  // effect invalidates once so the same mounted entry drops its quota with
+  // no new entry and no fetch. A bare render outside act would read an
+  // uncommitted container, and awaiting the render before moving the clock
+  // would let the passive effect observe the ceiling instead of the race.
   vi.useFakeTimers();
   const boundary = Date.parse("2026-10-30T12:00:00.000Z");
   vi.setSystemTime(boundary);
-  root.render(
-    <QueryClientProvider client={queryClient}>
-      <UsageCard
-        serverId="test"
-        entry={entryWithObservedAt(new Date(boundary - 30 * 60_000).toISOString())}
-        display={display}
-        pinnable={false}
-        refreshable={false}
-        compact
-      />
-    </QueryClientProvider>,
-  );
-  // Committed exactly on the inclusive ceiling: quota still renders.
-  expect(container.textContent).toContain("5-hour");
-  vi.setSystemTime(boundary + 1);
+  const observed = new Date(boundary - 30 * 60_000).toISOString();
+  commitProbeCallback = () => {
+    // Committed exactly on the inclusive ceiling: quota still renders.
+    expect(container.textContent).toContain("5-hour");
+    vi.setSystemTime(boundary + 1);
+  };
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <UsageCard
+          serverId="test"
+          entry={entryWithObservedAt(observed)}
+          display={display}
+          pinnable={false}
+          refreshable={false}
+          compact
+        />
+        <CommitProbe />
+      </QueryClientProvider>,
+    );
+  });
+  // Flush the passive expiry effect and its one-shot invalidation.
   await act(async () => {});
   expect(container.textContent).not.toContain("5-hour");
   expect(container.textContent).toContain("Quota data is stale and no longer shown.");
@@ -190,24 +222,30 @@ it("drops quota when the effect runs just past a boundary-fresh render", async (
 
 it("drops retained quota when the effect runs just past a boundary-fresh render", async () => {
   // Same race for the retained path: error stays visible, retained quota
-  // disappears, no poll involved.
+  // disappears, no poll involved. Same deterministic probe ordering.
   vi.useFakeTimers();
   const boundary = Date.parse("2026-10-30T12:00:00.000Z");
   vi.setSystemTime(boundary);
-  root.render(
-    <QueryClientProvider client={queryClient}>
-      <UsageCard
-        serverId="test"
-        entry={retainedEntryWithObservedAt(new Date(boundary - 30 * 60_000).toISOString())}
-        display={display}
-        pinnable={false}
-        refreshable={false}
-        compact
-      />
-    </QueryClientProvider>,
-  );
-  expect(container.textContent).toContain("Primary");
-  vi.setSystemTime(boundary + 1);
+  const observed = new Date(boundary - 30 * 60_000).toISOString();
+  commitProbeCallback = () => {
+    expect(container.textContent).toContain("Primary");
+    vi.setSystemTime(boundary + 1);
+  };
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <UsageCard
+          serverId="test"
+          entry={retainedEntryWithObservedAt(observed)}
+          display={display}
+          pinnable={false}
+          refreshable={false}
+          compact
+        />
+        <CommitProbe />
+      </QueryClientProvider>,
+    );
+  });
   await act(async () => {});
   expect(container.textContent).not.toContain("Primary");
   expect(container.textContent).toContain("quota rate limited");
