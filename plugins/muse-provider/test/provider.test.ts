@@ -1797,6 +1797,197 @@ test("idle history after a silent replacement never resurrects the retired host'
   expect(idle?.lastSuccessful).toBeUndefined();
 });
 
+test("an idle read between silent host swaps never lends history to the new context", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/idle-between-swaps" } };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  registry.register(usage.registration());
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  const cardId = warmed!.id;
+  // A closes; an idle read now serves A's own context history stale — the
+  // registry-bound plain-close control for the same context.
+  usage.detach("session-a");
+  const [idleA] = await registry.listReports();
+  expect(idleA?.id).toBe(cardId);
+  expect(idleA?.report.status).toBe("available");
+  // Silent B opens and closes without reporting and without any read in
+  // between. The next read discovers B's context: honestly unavailable, and
+  // A's windows must not return as B's history under the same card id.
+  usage.attach("session-b", launch, async () => ({}));
+  usage.detach("session-b");
+  const seen: string[] = [];
+  const [idleB] = await registry.listReports({ onReport: (entry) => seen.push(entry.id) });
+  expect(idleB?.id).toBe(cardId);
+  expect(idleB?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(idleB?.lastSuccessful).toBeUndefined();
+  expect(seen).toEqual([cardId]);
+});
+
+test("a targeted read spanning a silent turnover never installs the retired login", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/stale-targeted-discovery" } };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  const museRegistration = usage.registration();
+  let museDiscovers = 0;
+  const innerDiscover = museRegistration.discover.bind(museRegistration);
+  museRegistration.discover = async (scope) => {
+    museDiscovers += 1;
+    return innerDiscover(scope);
+  };
+  registry.register(museRegistration);
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const warmed = await registry.listReports();
+  const card = warmed.find((entry) => entry.id.startsWith("muse:"));
+  expect(card?.report.status).toBe("available");
+  const cardId = card!.id;
+  // A sibling source whose discovery stalls behind a gate: Muse answers with
+  // A's login while the registry still waits for the sibling.
+  let siblingStarted = false;
+  let releaseSibling!: () => void;
+  const siblingGate = new Promise<void>((resolve) => {
+    releaseSibling = resolve;
+  });
+  registry.register({
+    id: "sibling",
+    label: "sibling",
+    discover: async () => {
+      siblingStarted = true;
+      await siblingGate;
+      return [{ key: "s", input: {} }];
+    },
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  // A targeted re-read starts: Muse resolves A's login, the sibling stalls.
+  museDiscovers = 0;
+  siblingStarted = false;
+  const seen: string[] = [];
+  const pending = registry.listReports({
+    reportIds: [cardId],
+    forceRefresh: true,
+    onReport: (entry) => seen.push(entry.id),
+  });
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (museDiscovers >= 1 && siblingStarted) break;
+  }
+  expect(museDiscovers).toBeGreaterThanOrEqual(1);
+  expect(siblingStarted).toBe(true);
+  // A closes and silent B opens while discovery still waits: the pending
+  // discovery must not install A's retired login with a fresh token.
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  releaseSibling();
+  const entries = await pending;
+  expect(entries.map((entry) => entry.id)).toEqual([cardId]);
+  expect(entries[0]?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(entries[0]?.lastSuccessful).toBeUndefined();
+  expect(seen).toEqual([cardId]);
+});
+
+test("a pending agent discovery across a silent turnover never installs the retired login", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/stale-agent-discovery" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const sessions = new Map([
+    ["muse-agent", { provider: "muse", env: homeEnv, sessionKey: "muse-session" }],
+  ]);
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: (id) => sessions.has(id),
+    usageSession: (id) => sessions.get(id) ?? null,
+  });
+  const museRegistration = usage.registration();
+  let museDiscovers = 0;
+  const innerDiscover = museRegistration.discover.bind(museRegistration);
+  museRegistration.discover = async (scope) => {
+    museDiscovers += 1;
+    return innerDiscover(scope);
+  };
+  registry.register(museRegistration);
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  // A sibling source whose discovery stalls behind a gate, registered after
+  // the warm read so the warm read itself never waits on the gate.
+  let siblingStarted = false;
+  let releaseSibling!: () => void;
+  const siblingGate = new Promise<void>((resolve) => {
+    releaseSibling = resolve;
+  });
+  registry.register({
+    id: "sibling",
+    label: "sibling",
+    discover: async () => {
+      siblingStarted = true;
+      await siblingGate;
+      return [{ key: "s", input: {} }];
+    },
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  // The agent read has no mapping yet, so it discovers while the sibling
+  // stalls; the turnover lands mid-discovery with the same session key.
+  museDiscovers = 0;
+  const pending = registry.listReports({ agentId: "muse-agent" });
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (museDiscovers >= 1 && siblingStarted) break;
+  }
+  expect(museDiscovers).toBeGreaterThanOrEqual(1);
+  expect(siblingStarted).toBe(true);
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  releaseSibling();
+  const entries = await pending;
+  const agentCard = entries.find((entry) => entry.id.startsWith("muse:"));
+  expect(agentCard?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(agentCard?.lastSuccessful).toBeUndefined();
+});
+
 test("idle history still serves the same context after a plain close", async () => {
   const { Usage } = await import("../server/usage.js");
   const usage = new Usage();

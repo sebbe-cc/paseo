@@ -591,7 +591,41 @@ export class UsageSourceRegistry {
     }
   }
 
+  /**
+   * Discovers all sources, redoing the whole pass once when an event retired
+   * part of it mid-flight. A discovery that spans a turnover (for example a
+   * silent host swap while a sibling source stalls) must not install the
+   * retired login and hand it a fresh fetch token: when a watched source
+   * epoch or the structural generation moved during the awaits, the pass
+   * runs once more so the installation and the later token capture see the
+   * current context. The re-pass only re-reads; it evicts nothing, so
+   * unrelated sources keep their pending fetches (no global invalidation).
+   * A second event during the single re-pass is accepted; that event's own
+   * push already triggers a fresh re-read which converges.
+   */
   private async discover(
+    scope: UsageScope,
+    previous: ReadonlyMap<string, KnownReport> = new Map(),
+  ): Promise<Map<string, KnownReport>> {
+    for (let attempt = 0; ; attempt += 1) {
+      const epochsBefore = new Map(this.sourceEpoch);
+      const generationBefore = this.generation;
+      const merged = await this.discoverOnce(scope, previous);
+      if (attempt > 0) return merged;
+      let retired = this.generation !== generationBefore;
+      if (!retired) {
+        for (const [id, epoch] of this.sourceEpoch) {
+          if ((epochsBefore.get(id) ?? 0) !== epoch) {
+            retired = true;
+            break;
+          }
+        }
+      }
+      if (!retired) return merged;
+    }
+  }
+
+  private async discoverOnce(
     scope: UsageScope,
     previous: ReadonlyMap<string, KnownReport> = new Map(),
   ): Promise<Map<string, KnownReport>> {

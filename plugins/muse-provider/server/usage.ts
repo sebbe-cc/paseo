@@ -322,20 +322,25 @@ export class Usage {
           accounts = this.launches.has(account) ? [account] : [];
         }
         // The input pins the host context whenever exactly one host is
-        // live: same-home replacement and concurrent hosts then get
-        // distinct fetch identities, so the registry cache and last-success
-        // can never replay one context's quota as another's. With zero or
-        // several live hosts the input stays account-wide and fetch fails
-        // closed (stale history or ambiguity) instead of merging.
+        // live — and the most recent context when idle — so the registry
+        // cache identity and last-success can never replay one context's
+        // quota as another's. With several live hosts the input stays
+        // account-wide and fetch fails closed on ambiguity instead of
+        // merging. With zero live hosts the pinned idle context serves its
+        // own history stale; a silent replacement's context has no history
+        // of its own and is honestly unavailable, never the retired host's
+        // quota resurrected through the shared account key.
         return accounts.map((account) => {
           const live = this.liveSessions(account);
           const single = live.length === 1 ? live[0]! : undefined;
+          const idle = live.length === 0 ? this.lastGeneration.get(account) : undefined;
+          const generation = single?.generation ?? idle;
           return {
             key: account,
             label: "Muse Code",
             input: {
               account,
-              ...(single ? { generation: single.generation } : {}),
+              ...(generation !== undefined ? { generation } : {}),
             },
           };
         });
