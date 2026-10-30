@@ -24,6 +24,12 @@ import type { TerminalCell, TerminalState } from "@getpaseo/protocol/messages";
 import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
 import { TerminalActivityTracker } from "./activity/terminal-activity-tracker.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
+import {
+  ensureTmuxServer,
+  ensureTmuxServerStable,
+  persistentSpawnArgs,
+  type PersistentTerminalBinding,
+} from "./tmux.js";
 
 const { Terminal } = xterm;
 const require = createRequire(import.meta.url);
@@ -153,6 +159,12 @@ export interface CreateTerminalOptions {
   title?: string;
   command?: string;
   args?: string[];
+  /**
+   * Persistent terminals (pa-bhkn0): the PTY runs a tmux client attached to a
+   * tmux-server session instead of the shell directly, so the session and its
+   * PIDs survive daemon restarts. POSIX only; throws on Windows.
+   */
+  persistent?: PersistentTerminalBinding;
 }
 
 function toTerminalActivity(snapshot: {
@@ -1022,10 +1034,27 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
 
   ensureNodePtySpawnHelperExecutableForCurrentPlatform();
 
-  // Create PTY
-  const { command: spawnCommand, args: spawnArgs } = command
-    ? await resolveTerminalSpawnCommand(command, args)
-    : { command: resolvedShell, args: [] as string[] };
+  // Create PTY. A persistent terminal spawns a tmux client that attaches to
+  // (or creates) the surviving server session instead of the shell itself.
+  let spawnCommand: string;
+  let spawnArgs: string[] | string;
+  if (options.persistent) {
+    if (process.platform === "win32") {
+      throw new Error("Persistent tmux terminals are not supported on Windows");
+    }
+    ({ command: spawnCommand, args: spawnArgs } = persistentSpawnArgs({
+      binding: options.persistent,
+      cwd,
+      shell: resolvedShell,
+      ...(command ? { command, args } : {}),
+      cols,
+      rows,
+    }));
+  } else {
+    ({ command: spawnCommand, args: spawnArgs } = command
+      ? await resolveTerminalSpawnCommand(command, args)
+      : { command: resolvedShell, args: [] as string[] });
+  }
   const terminalEnv = buildTerminalEnvironment({
     shell: spawnCommand,
     env: {
@@ -1036,6 +1065,14 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
   });
 
   await assertTerminalCommandCanStart({ command, cwd, env: terminalEnv });
+  if (options.persistent) {
+    // The tmux client is the actual spawn target; fail fast when it is gone.
+    await assertTerminalCommandCanStart({ command: spawnCommand, cwd, env: terminalEnv });
+    // Orphaned tmux clients attach to ANOTHER session by default; harden the
+    // server first so a dead session detaches (and exits) the client instead
+    // of serving a stranger's output (pa-vbhcu).
+    ensureTmuxServer(options.persistent);
+  }
 
   const ptyProcess = pty.spawn(spawnCommand, spawnArgs, {
     name: "xterm-256color",
@@ -1044,6 +1081,14 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     cwd,
     env: terminalEnv,
   });
+
+  if (options.persistent) {
+    // The spawn above may have started a brand-new tmux server; make sure the
+    // detach-on-destroy hardening sticks there too (retries while the server
+    // comes up, best-effort). Without it an orphaned client attaches to
+    // another session and the dead terminal serves that session's output.
+    await ensureTmuxServerStable(options.persistent);
+  }
 
   function emitTitleChange(nextTitle: string | undefined): void {
     if (title === nextTitle) {
