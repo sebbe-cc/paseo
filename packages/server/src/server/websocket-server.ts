@@ -2262,6 +2262,9 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(assistantFileResolve): added in fix/assistant-file-links-worktree.
+        // Remove the gate when the daemon floor always resolves assistant file links.
+        assistantFileResolve: true,
       },
     };
   }
