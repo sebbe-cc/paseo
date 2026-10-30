@@ -287,7 +287,7 @@ test("duplicate logins prefer discovery order across unavailable, error and thro
   }
 });
 
-test("targeted refresh re-reads the login without discovering again", async () => {
+test("targeted refresh re-discovers the login before re-reading", async () => {
   let discoveries = 0;
   let value = "old";
   const registry = new UsageSourceRegistry();
@@ -311,7 +311,10 @@ test("targeted refresh re-reads the login without discovering again", async () =
     status: "available",
     windows: [{ id: "session", label: "new" }],
   });
-  expect(discoveries).toBe(1);
+  // A targeted re-read must serve the current login, never one pinned before
+  // a turnover: it re-discovers first, so a retired login cannot be replayed
+  // with its history under today's card.
+  expect(discoveries).toBe(2);
 });
 
 test("a thrown fetch is an error card", async () => {
@@ -1461,14 +1464,70 @@ test("a rotated native login cannot rescue the override, even on targeted refres
   const [matched] = await registry.listReports();
   if (matched?.report.status !== "available") throw new Error("Expected matched fallback usage");
   expect(matched.report.windows).toEqual([{ id: "native", label: "Native", usedPct: 11 }]);
-  // The login file now belongs to C under the same locator. A targeted
-  // refresh skips discovery, so only the fetch-time attestation can stop it.
+  // The login file now belongs to C under the same locator. The targeted
+  // refresh re-discovers first, so the rotation is caught at match time: no
+  // fallback is attempted and the native source is never even fetched.
   backing.identity = "test:c";
   backing.usedPct = 99;
   const [rotated] = await registry.listReports({
     reportIds: ["local:shared"],
     forceRefresh: true,
   });
+  expect(rotated?.report).toEqual({ status: "error", error: "proxy down" });
+  // C's quota value never appears anywhere in the card.
+  expect(JSON.stringify(rotated)).not.toContain("99");
+  expect(calls.fetch).toHaveLength(1);
+  // A global read sees the same locator with C's identity and no longer
+  // matches the override either: still A's own error, never C's values.
+  const [rediscovered] = await registry.listReports();
+  expect(rediscovered?.report).toEqual({ status: "error", error: "proxy down" });
+  expect(JSON.stringify(rediscovered)).not.toContain("99");
+  expect(calls.fetch).toHaveLength(1);
+});
+
+test("a rotation between discovery and fetch is discarded by fetch-time attestation", async () => {
+  let releaseNative!: (value: unknown) => void;
+  const nativeGate = new Promise<unknown>((resolve) => {
+    releaseNative = resolve;
+  });
+  const backing = { identity: "test:a", usedPct: 11 };
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "local",
+      label: "Local",
+      discover: async () => [{ key: "shared", identity: backing.identity, input: { slot: "n" } }],
+      fetch: async () => {
+        // Reads the login store afresh, like the real sources do: a rotation
+        // while the fetch is in flight changes what is attested.
+        await nativeGate;
+        return {
+          status: "available",
+          accountIdentity: backing.identity,
+          windows: [{ id: "native", label: "Native", usedPct: backing.usedPct }],
+        };
+      },
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cpa",
+      label: "CPA",
+      replaces: ["local"],
+      discover: async () => [{ key: "shared", identity: "test:a", input: { account: "a" } }],
+      fetch: async () => {
+        throw new Error("proxy down");
+      },
+    }),
+  );
+  // The targeted read re-discovers (still A, so the fallback is attempted)
+  // and its native fetch stalls; the login file rotates to C meanwhile.
+  const pending = registry.listReports({ reportIds: ["local:shared"], forceRefresh: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  backing.identity = "test:c";
+  backing.usedPct = 99;
+  releaseNative(undefined);
+  const [rotated] = await pending;
   expect(rotated?.report).toEqual({ status: "error", error: "proxy down" });
   // C's quota value never appears; its identity only shows up inside the
   // provenance error explaining why the read was discarded.
@@ -1481,12 +1540,6 @@ test("a rotated native login cannot rescue the override, even on targeted refres
         login.report.error.includes("does not match"),
     ),
   ).toBe(true);
-  // A fresh discovery sees the same locator with C's identity and no longer
-  // matches the override either: still A's own error, never C's values.
-  const [rediscovered] = await registry.listReports();
-  expect(rediscovered?.report).toEqual({ status: "error", error: "proxy down" });
-  expect(JSON.stringify(rediscovered)).not.toContain("99");
-  expect(calls.fetch).toHaveLength(2);
 });
 
 test("a pending primary cannot start native fallback or publish after reload and opt-out", async () => {
@@ -1699,8 +1752,9 @@ test("a fetch retired by an event publishes nothing; the push's re-read serves n
       forceRefresh: true,
       onReport: (entry) => reported.push(entry.id),
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    // Let the targeted read's rediscovery and fetch start run to the gate:
+    // a macrotask flush drains the whole microtask chain before the event.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(registry.invalidateSource("muse")).toEqual(["muse:a"]);
     expect(invalidated).toEqual([{ sourceId: "muse", reportIds: ["muse:a"] }]);
     const fresh = await registry.listReports({ reportIds: ["muse:a"] });

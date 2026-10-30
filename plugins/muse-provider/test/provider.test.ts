@@ -1668,6 +1668,185 @@ test("same-home replacement gets a fresh registry identity with no inherited his
   expect(current?.lastSuccessful).toBeUndefined();
 });
 
+test("targeted refresh after same-home turnover never serves the retired host's quota", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/targeted-turnover" } };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  registry.register(usage.registration());
+  // Wire pushes the way the plugin service does: every locally observed
+  // change invalidates the source so cards re-read.
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  const cardId = warmed!.id;
+  // A closes, silent B opens in the same home. A targeted re-read must use
+  // B's freshly discovered login — never A's retired login plus A's history.
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  const seen: string[] = [];
+  const [current] = await registry.listReports({
+    reportIds: [cardId],
+    forceRefresh: true,
+    onReport: (entry) => seen.push(entry.id),
+  });
+  expect(current?.id).toBe(cardId);
+  expect(current?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(current?.lastSuccessful).toBeUndefined();
+  // The callback fires for the current context's own honest result — which
+  // carries neither A's windows nor A's history.
+  expect(seen).toEqual([cardId]);
+});
+
+test("agent-scoped reads after same-home turnover never serve the retired host's quota", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const homeEnv = { HOME: "/usage/agent-turnover" };
+  const launch = { command: "muse", args: [], env: homeEnv };
+  const sessions = new Map([
+    ["muse-agent", { provider: "muse", env: homeEnv, sessionKey: "muse-session" }],
+  ]);
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: (id) => sessions.has(id),
+    usageSession: (id) => sessions.get(id) ?? null,
+  });
+  registry.register(usage.registration());
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  const agentWarmed = await registry.listReports({ agentId: "muse-agent" });
+  expect(agentWarmed).toHaveLength(1);
+  expect(agentWarmed[0]?.report.status).toBe("available");
+  // Same session key, but the host behind it turned over to silent B: the
+  // agent mapping must not replay A's login and history.
+  usage.detach("session-a");
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  expect(hostB.account).toBe(hostA.account);
+  const agentCurrent = await registry.listReports({ agentId: "muse-agent" });
+  expect(agentCurrent).toHaveLength(1);
+  expect(agentCurrent[0]?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(agentCurrent[0]?.lastSuccessful).toBeUndefined();
+  // Even after a global rediscovery the session scope stays clean.
+  const [globalCurrent] = await registry.listReports();
+  expect(globalCurrent?.report.status).toBe("unavailable");
+  const agentAgain = await registry.listReports({ agentId: "muse-agent" });
+  expect(agentAgain[0]?.report.status).toBe("unavailable");
+  expect(agentAgain[0]?.lastSuccessful).toBeUndefined();
+});
+
+test("idle history after a silent replacement never resurrects the retired host's quota", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/idle-turnover" } };
+  const registry = new UsageSourceRegistry(Date.now, 300_000, undefined, {
+    hasAgent: () => false,
+    usageSession: () => null,
+  });
+  registry.register(usage.registration());
+  usage.onChanged(() => {
+    registry.invalidateSource("muse");
+  });
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  const [warmed] = await registry.listReports();
+  expect(warmed?.report.status).toBe("available");
+  // Silent B replaces A and closes again without any observation of its own.
+  // The idle account is B's context with no quota — not A's resurrected 10%.
+  usage.detach("session-a");
+  usage.attach("session-b", launch, async () => ({}));
+  usage.detach("session-b");
+  await expect(usage.registration().fetch({ account: hostA.account })).resolves.toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  const [idle] = await registry.listReports();
+  expect(idle?.report).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(idle?.lastSuccessful).toBeUndefined();
+});
+
+test("idle history still serves the same context after a plain close", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/plain-idle" } };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  const quotaA = {
+    ...changedUsage,
+    window: { ...changedUsage.window, usedPercent: 10 },
+  };
+  expect(usage.observe(hostA.account, hostA.generation, quotaA)).toBe(true);
+  usage.detach("session-a");
+  const idle = await usage.registration().fetch({ account: hostA.account });
+  if (idle.status !== "available") throw new Error("Expected the same context's idle history");
+  expect(idle.windows[0]).toMatchObject({ usedPct: 10 });
+  expect(idle.details).toContainEqual({
+    id: "staleness",
+    label: "Stale",
+    value: expect.any(String),
+  });
+});
+
+test("retired generations accept no new seed or event observations", async () => {
+  const { Usage } = await import("../server/usage.js");
+  const usage = new Usage();
+  const launch = { command: "muse", args: [], env: { HOME: "/usage/retired-write" } };
+  const otherLaunch = { command: "muse", args: [], env: { HOME: "/usage/retired-other" } };
+  const hostA = usage.attach("session-a", launch, async () => ({}));
+  const hostB = usage.attach("session-b", launch, async () => ({}));
+  const hostC = usage.attach("session-c", otherLaunch, async () => ({}));
+  expect(hostC.account).not.toBe(hostA.account);
+  const changed: string[] = [];
+  usage.onChanged((account) => changed.push(account));
+  const late = { ...changedUsage, observedAtMs: 1700000020000 };
+  // A detaches; a deferred seed or a late event for its generation — even
+  // with a newer stamp — must store nothing and notify nothing.
+  usage.detach("session-a");
+  changed.length = 0;
+  expect(usage.observe(hostA.account, hostA.generation, late)).toBe(false);
+  expect(usage.snapshot(hostA.account)).toBeUndefined();
+  // A generation issued for another account is not this account's context,
+  // even though its number is inside the attached range.
+  expect(usage.observe(hostA.account, hostC.generation, late)).toBe(false);
+  expect(usage.snapshot(hostA.account)).toBeUndefined();
+  expect(changed).toEqual([]);
+  // The still-live generation still accepts.
+  expect(usage.observe(hostB.account, hostB.generation, late)).toBe(true);
+  expect(changed).toEqual([hostB.account]);
+  expect(usage.snapshot(hostB.account)).toEqual(late);
+});
+
 test("concurrent hosts in one home never merge: each context serves only its own quota", async () => {
   const { Usage } = await import("../server/usage.js");
   const usage = new Usage();

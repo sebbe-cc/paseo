@@ -190,6 +190,23 @@ export class UsageSourceRegistry {
     };
     for (const key of this.cache.keys()) if (ownedKey(key)) this.cache.delete(key);
     for (const key of this.pending.keys()) if (ownedKey(key)) this.pending.delete(key);
+    // Session mappings pin the logins they were discovered with. A turnover
+    // must force them to rediscover: otherwise a targeted agent read keeps
+    // serving the retired login — and the registry keeps attaching the
+    // retired context's last-successful snapshot to it. Same-context
+    // rediscovery reproduces the same login (and cache identity), so valid
+    // history survives; only the mapping, never the snapshot, is dropped.
+    for (const [agentId, mapping] of this.byAgent) {
+      if (
+        [...mapping.reports.values()].some(
+          (report) =>
+            report.source.id === sourceId ||
+            report.overriddenId === sourceId ||
+            report.fallback?.source.id === sourceId,
+        )
+      )
+        this.byAgent.delete(agentId);
+    }
     if (this.sources.has(sourceId)) {
       const event = { sourceId, reportIds: [...ownedIds] };
       for (const listener of this.invalidatedListeners) listener(event);
@@ -364,6 +381,14 @@ export class UsageSourceRegistry {
       ids = await this.discoverAgent(options.agentId);
       reports = this.byAgent.get(options.agentId)?.reports ?? new Map();
     } else if (options.reportIds !== undefined) {
+      // A targeted read must serve the current context, not a login pinned
+      // before a turnover: re-discover first so a silent replacement host's
+      // input (and cache identity) replaces the retired one before any
+      // fetch, callback, or last-successful attachment. A full re-read of an
+      // explicitly old report id then finds no live login for it instead of
+      // replaying retired history under today's card.
+      this.defaults = await this.discover({ kind: "global" }, this.defaults);
+      this.mergeKnown();
       ids = options.reportIds;
     } else {
       this.defaults = await this.discover({ kind: "global" }, this.defaults);

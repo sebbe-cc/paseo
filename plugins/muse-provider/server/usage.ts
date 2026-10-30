@@ -54,6 +54,13 @@ export class Usage {
   private readonly snapshots = new Map<string, Map<number, SubscriptionUsage>>();
   private readonly changeListeners = new Set<(account: string) => void>();
   private attachSeq = 0;
+  /**
+   * Most recent host context per account. Idle history belongs to this
+   * context only: after host A closes and silent host B opens and closes,
+   * the account's current context is B — with no observation of its own it
+   * is honestly unavailable, never A's resurrected quota.
+   */
+  private readonly lastGeneration = new Map<string, number>();
   remember(launch: ProviderLaunch): { account: string } {
     const key = accountForEnv(launch.env);
     this.launches.set(key, launch);
@@ -67,6 +74,7 @@ export class Usage {
     const { account } = this.remember(launch);
     const generation = ++this.attachSeq;
     this.sessions.set(id, { account, generation, read });
+    this.lastGeneration.set(account, generation);
     // A new host can change the served context — a silent second host makes
     // the account ambiguous, a first host makes it live — so every attach
     // invalidates; the registry re-reads only already-awake hosts.
@@ -79,24 +87,46 @@ export class Usage {
     // Detach keeps the snapshot: at idle/close the card serves the last
     // observed values with age/stale instead of waking a host.
     this.sessions.delete(id);
+    // The current context follows the remaining live hosts, or — when none
+    // remain — the just-closed host, whose history stays servable stale. An
+    // older context never becomes current again through a later detach.
+    const remaining = [...this.sessions.values()]
+      .filter((entry) => entry.account === session.account)
+      .map((entry) => entry.generation);
+    this.lastGeneration.set(
+      session.account,
+      remaining.length > 0 ? Math.max(...remaining) : session.generation,
+    );
     // Detaching the host that served the shown values changes the card —
     // including when another host stays live, since the remaining context
     // may be silent, ambiguous, or a different quota. Every detach of a
     // known session therefore invalidates; unknown ids stay silent.
     for (const listener of this.changeListeners) listener(session.account);
   }
+  /** True while the exact attached account+generation context is live. */
+  private isLive(account: string, generation: number): boolean {
+    return [...this.sessions.values()].some(
+      (session) => session.account === account && session.generation === generation,
+    );
+  }
   /**
    * Store a validated observation under its delivering host's generation.
    * Older or out-of-order arrivals never overwrite newer ones for the same
    * generation, observations from generations this process never attached
    * are rejected, and invalid observations are rejected — never stored,
-   * never read as zero quota. Returns true when the snapshot changed.
+   * never read as zero quota. A deferred seed or a late event for a
+   * generation that already detached stores nothing at all: retired work
+   * must not write new history, even with a newer stamp. The generation
+   * must pair with the account it was attached under — a number issued for
+   * another account proves nothing here. Returns true when the snapshot
+   * changed.
    */
   observe(account: string, generation: number, raw: unknown): boolean {
     if (!Number.isInteger(generation) || generation < 1 || generation > this.attachSeq)
       return false;
     const parsed = subscriptionUsageSchema.safeParse(raw);
     if (!parsed.success) return false;
+    if (!this.isLive(account, generation)) return false;
     const usage = parsed.data;
     let generations = this.snapshots.get(account);
     if (!generations) {
@@ -106,18 +136,23 @@ export class Usage {
     const current = generations.get(generation);
     if (current && usage.observedAtMs <= current.observedAtMs) return false;
     generations.set(generation, usage);
-    // Only a live context's observation changes the shown card: a retired
-    // context's late event is kept as that context's history but never
-    // invalidates the live cards.
-    const live = [...this.sessions.values()].some(
-      (session) => session.account === account && session.generation === generation,
-    );
-    if (live) for (const listener of this.changeListeners) listener(account);
+    for (const listener of this.changeListeners) listener(account);
     return true;
   }
   /** Newest stored observation for the account across all generations. */
   snapshot(account: string): SubscriptionUsage | undefined {
     return newestOf(this.snapshots.get(account)?.values());
+  }
+  /**
+   * Idle history for the account's current context only: the most recent
+   * host's stored observation, or undefined when that context never
+   * reported. Older contexts' snapshots stay in the store as their own
+   * history but are never served as the account's current quota.
+   */
+  private idleSnapshot(account: string): SubscriptionUsage | undefined {
+    const generation = this.lastGeneration.get(account);
+    if (generation === undefined) return undefined;
+    return this.snapshots.get(account)?.get(generation);
   }
   onChanged(listener: (account: string) => void): () => void {
     this.changeListeners.add(listener);
@@ -263,8 +298,10 @@ export class Usage {
     // A retired context never poses as current while another host is live:
     // only a fully idle account serves detached history stale. A silent
     // replacement host is honestly unavailable, never the closed host's
-    // quota and never zero quota from thin air.
-    if (live.length > 0)
+    // quota and never zero quota from thin air. And only the most recent
+    // context's history is servable: once a newer context existed, an older
+    // pinned generation is superseded, even at full idle.
+    if (live.length > 0 || this.lastGeneration.get(account) !== generation)
       return unavailable({ kind: "no_quota", detail: "No usage quota reported" });
     return this.availableReport(account, stored, true);
   }
@@ -318,7 +355,10 @@ export class Usage {
           if (live.length === 1)
             return this.reportForGeneration(account, live[0]!.generation, live);
           if (live.length === 0) {
-            const usage = this.snapshot(account);
+            // Idle history is the current (most recent) context's alone:
+            // after a silent replacement that never reported, the account
+            // is honestly unavailable rather than an older quota.
+            const usage = this.idleSnapshot(account);
             if (!usage) return unavailable({ kind: "no_quota", detail: "No usage quota reported" });
             return this.availableReport(account, usage, true);
           }
