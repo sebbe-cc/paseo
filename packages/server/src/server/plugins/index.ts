@@ -55,6 +55,7 @@ interface PluginRuntimePort {
   startDictationProvider?: PluginRuntime["startDictationProvider"];
   getProviderRegistrations?(pluginId: string): readonly PluginProviderMetadata[];
   getUsageSourceRegistrations(pluginId: string): readonly PluginUsageSourceMetadata[];
+  getDisabledUsageSources?(pluginId: string): readonly string[];
   fetchUsage: PluginRuntime["fetchUsage"];
   discoverUsage: PluginRuntime["discoverUsage"];
   connectProvider: PluginRuntime["connectProvider"];
@@ -97,6 +98,7 @@ export class PluginService {
   private readonly providers = new Map<string, ProviderRegistration>();
   private readonly usageSources: UsageSourceRegistry;
   private readonly usageSourceIdsByPlugin = new Map<string, string[]>();
+  private readonly disabledUsageSourceIdsByPlugin = new Map<string, string[]>();
   private readonly providerIdsByPlugin = new Map<string, readonly string[]>();
   private readonly providerListeners = new Set<() => void>();
   private lifecycle = Promise.resolve();
@@ -654,13 +656,17 @@ export class PluginService {
 
   private publishUsageSources(pluginId: string): void {
     const metadata = this.runtime.getUsageSourceRegistrations(pluginId);
+    const disabled = this.runtime.getDisabledUsageSources?.(pluginId) ?? [];
     const registered: string[] = [];
     try {
+      for (const target of disabled) this.usageSources.disable(target);
+      this.disabledUsageSourceIdsByPlugin.set(pluginId, [...disabled]);
       for (const source of metadata) {
         this.usageSources.register({
           id: source.id,
           label: source.label,
           icon: source.icon,
+          replaces: source.replaces,
           discover: async (scope) => {
             const result = await this.runtime.discoverUsage(pluginId, source.id, scope);
             if (!Array.isArray(result))
@@ -675,6 +681,9 @@ export class PluginService {
       }
     } catch (error) {
       for (const id of registered) this.usageSources.unregister(id);
+      for (const target of this.disabledUsageSourceIdsByPlugin.get(pluginId) ?? [])
+        this.usageSources.enable(target);
+      this.disabledUsageSourceIdsByPlugin.delete(pluginId);
       throw error;
     }
     this.usageSourceIdsByPlugin.set(pluginId, registered);
@@ -684,6 +693,9 @@ export class PluginService {
     for (const id of this.usageSourceIdsByPlugin.get(pluginId) ?? [])
       this.usageSources.unregister(id);
     this.usageSourceIdsByPlugin.delete(pluginId);
+    for (const target of this.disabledUsageSourceIdsByPlugin.get(pluginId) ?? [])
+      this.usageSources.enable(target);
+    this.disabledUsageSourceIdsByPlugin.delete(pluginId);
   }
 
   private async publishProviderRegistrations(
