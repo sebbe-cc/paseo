@@ -220,13 +220,53 @@ test("text and reasoning stream, completion overwrites deltas, user echo retains
     reasoningEffort: "high",
     displayText: "hello",
     input: [
-      { type: "text", text: "<system_instructions>\nTest instructions\n</system_instructions>" },
+      {
+        type: "text",
+        text: '<system-reminder source="paseo-system-prompt">\nTest instructions\n</system-reminder>',
+      },
       { type: "text", text: "hello" },
     ],
   });
   expect(h.events.findLast((event) => event.type === "session.persistence")).toMatchObject({
     persistence: { version: 1, data: { model: "meta/muse-spark-1.3", thinkingOption: "high" } },
   });
+});
+test("system prompt uses Muse's own system-reminder shape exactly once", async () => {
+  const h = await harness("image-followup");
+  expect(await h.open()).toMatchObject({ type: "session.ready" });
+  await h.prompt("auto", true);
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const from = await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed", from);
+  const turns = (await h.recorded()).filter((frame) => frame.method === "turn/start");
+  expect(turns).toHaveLength(2);
+  // pa-89is1.16: Muse's own servers wrap system context as
+  // <system-reminder source="…">…</system-reminder>; the Paseo system prompt
+  // must match that shape (attribute name and newlines), not
+  // <system_instructions>.
+  expect(turns[0].params.input[0]).toEqual({
+    type: "text",
+    text: '<system-reminder source="paseo-system-prompt">\nTest instructions\n</system-reminder>',
+  });
+  for (const turn of turns.slice(1))
+    expect(JSON.stringify(turn.params.input)).not.toContain("paseo-system-prompt");
+  expect(JSON.stringify(turns[0].params.input)).not.toContain("system_instructions");
+});
+test("resumed sessions do not resend the system prompt", async () => {
+  const h = await harness("resume-without-cursor");
+  await h.open({
+    version: 1,
+    data: { sessionId: "saved-session" },
+  });
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const turns = (await h.recorded()).filter((frame) => frame.method === "turn/start");
+  expect(turns).toHaveLength(1);
+  // The native session keeps its own context across resume, so the reminder
+  // is first-turn only; config.systemPrompt (create/resume/turn_prepare,
+  // pa-89is1.4) still flows through the same send-point above.
+  expect(JSON.stringify(turns[0].params.input)).not.toContain("paseo-system-prompt");
+  expect(JSON.stringify(turns[0].params.input)).not.toContain("system_instructions");
 });
 test("tool calls classify read, shell, and edit with fetched JSON patch converted to unified diff", async () => {
   const h = await harness("tools-edit");
