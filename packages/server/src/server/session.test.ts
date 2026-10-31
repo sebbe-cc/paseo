@@ -5959,6 +5959,75 @@ describe("archived timeline fetch routing (pa-zuuvf product decision)", () => {
     await session.cleanup();
   });
 
+  test("a Muse probe failure surfaces as a loud error, never legacy", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const fetchArchivedTimeline = vi.fn();
+    const storageGet = vi.fn(async () => undefined);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        hasStoredArchivedHistory: vi.fn(async () => {
+          throw new Error("MUSE-PROBE-BOOM");
+        }),
+        fetchArchivedTimeline,
+      },
+      agentStorage: { get: storageGet },
+    });
+
+    await session.handleMessage({
+      type: "fetch_agent_timeline_request",
+      requestId: "fetch-1",
+      agentId: "agent-1",
+    });
+
+    // The probe failure never reaches the legacy load: no stored fetch,
+    // no record read, no resumed session.
+    expect(fetchArchivedTimeline).not.toHaveBeenCalled();
+    expect(storageGet).not.toHaveBeenCalled();
+    const responses = fetchMessages(messages);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      payload: expect.objectContaining({ requestId: "fetch-1", error: "MUSE-PROBE-BOOM" }),
+    });
+    await session.cleanup();
+  });
+
+  test("a Muse probe failure in search surfaces as a loud error, never legacy", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const getArchivedTimelineRows = vi.fn();
+    const getTimelineRows = vi.fn(async () => []);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        hasStoredArchivedHistory: vi.fn(async () => {
+          throw new Error("MUSE-PROBE-BOOM");
+        }),
+        getArchivedTimelineRows,
+        getTimelineRows,
+      },
+    });
+
+    await session.handleMessage({
+      type: "agent.timeline.search.request",
+      requestId: "search-1",
+      agentId: "agent-1",
+      query: "hello",
+    });
+
+    // The probe failure never reaches the legacy load: no stored rows,
+    // no live rows, no resumed session.
+    expect(getArchivedTimelineRows).not.toHaveBeenCalled();
+    expect(getTimelineRows).not.toHaveBeenCalled();
+    const responses = messages.filter(
+      (message) => message.type === "agent.timeline.search.response",
+    );
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      payload: expect.objectContaining({ requestId: "search-1", error: "MUSE-PROBE-BOOM" }),
+    });
+    await session.cleanup();
+  });
+
   test("a lost Muse generation race fails loudly instead of resuming", async () => {
     const messages: SessionOutboundMessage[] = [];
     const hasStored = vi.fn(async () => true);

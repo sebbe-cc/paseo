@@ -1033,14 +1033,12 @@ class PluginAgentClient implements AgentClient {
     // advertise session.read_history (Muse does; Antigravity does not).
     // Report the negotiated capability so providers without the read-only
     // path keep their legacy archived route instead of failing stored
-    // reads as unsupported. An unreadable provider answers false here and
-    // fails through the legacy path like before, never as a stored read.
-    try {
-      const capabilities = await this.runtime.connectedCapabilities();
-      return capabilities.includes("session.read_history");
-    } catch {
-      return false;
-    }
+    // reads as unsupported. A failed probe rejects instead of answering
+    // false: the caller applies provider-family policy to the failure
+    // (loud for Muse, legacy for the rest) rather than conflating an
+    // unreadable provider with a capable one.
+    const capabilities = await this.runtime.connectedCapabilities();
+    return capabilities.includes("session.read_history");
   }
 
   async readHistory(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead> {
