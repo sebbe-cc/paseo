@@ -26,6 +26,26 @@ import { AgentStorage } from "../../../packages/server/src/server/agent/agent-st
 import { PluginAgentClientRegistry } from "../../../packages/server/src/server/agent/plugin-provider.js";
 import { buildProviderRegistry } from "../../../packages/server/src/server/agent/provider-registry.js";
 import { createTestLogger } from "../../../packages/server/src/test-utils/test-logger.js";
+import { Session } from "../../../packages/server/src/server/session.js";
+import {
+  asCheckoutDiffManager,
+  asDaemonConfigStore,
+  asDownloadTokenStore,
+  asPushNotifications,
+  asScheduleService,
+  asWorkspaceGitService,
+  createAgentMessageDeliveryStub,
+  createMessageReceiptsStub,
+  createProviderSnapshotManagerStub,
+  createTestCreationService,
+} from "../../../packages/server/src/server/test-utils/session-stubs.js";
+import { createWorkspaceRuntimeStore } from "../../../packages/server/src/server/workspace-runtime-store/index.js";
+import { OWNER_PERMISSIONS } from "../../../packages/server/src/server/authorization/index.js";
+import type { SessionOutboundMessage } from "../../../packages/server/src/server/messages.js";
+import type {
+  ProjectRegistry,
+  WorkspaceRegistry,
+} from "../../../packages/server/src/server/workspace-registry.js";
 
 const connections: ProviderConnection[] = [];
 const roots: string[] = [];
@@ -2368,7 +2388,7 @@ test.skipIf(!REAL_MUSE_BIN)(
 );
 
 test.skipIf(!REAL_MUSE_BIN)(
-  "fetch through the manager serves a real archived native session with a deleted cwd",
+  "fetch through the session serves a real archived native session with a deleted cwd",
   async () => {
     const bin = REAL_MUSE_BIN!;
     const home = await mkdtemp(path.join(os.tmpdir(), "muse-real-manager-home-"));
@@ -2393,17 +2413,21 @@ test.skipIf(!REAL_MUSE_BIN)(
         XDG_STATE_HOME: path.join(home, ".local", "state"),
       },
     };
-    // Seed one real turn with the soon-deleted workspace as its cwd.
+    // Seed three real turns with the soon-deleted workspace as its cwd,
+    // so cursor paging below walks more than one page.
     const seed = await harness("unused", {}, undefined, launch);
     expect(await seed.open(undefined, "onRequest", null, work)).toMatchObject({
       type: "session.ready",
     });
-    await seed.prompt();
-    await seed.wait(
-      (event) => event.type === "session.turn" && event.state === "completed",
-      0,
-      30000,
-    );
+    for (let turn = 0; turn < 3; turn++) {
+      const from = seed.events.length;
+      await seed.prompt();
+      await seed.wait(
+        (event) => event.type === "session.turn" && event.state === "completed",
+        from,
+        30000,
+      );
+    }
     const saved = seed.events.findLast((event) => event.type === "session.persistence");
     if (!saved || saved.type !== "session.persistence") {
       throw new Error("Expected session persistence");
@@ -2418,8 +2442,9 @@ test.skipIf(!REAL_MUSE_BIN)(
     await expect(stat(work)).rejects.toThrow(/ENOENT/);
 
     // The full daemon read chain over the real native store: a stored
-    // archived record feeds AgentManager, which reads through a real
-    // PluginAgentClient into the real Muse provider. No resume anywhere.
+    // archived record feeds a real Session, which reads through a real
+    // AgentManager and PluginAgentClient into the real Muse provider.
+    // No resume anywhere.
     const base = registration();
     const logger = createTestLogger();
     const plugins = new PluginAgentClientRegistry(logger);
@@ -2436,6 +2461,7 @@ test.skipIf(!REAL_MUSE_BIN)(
       pluginProviders: plugins.definitions(),
     });
     const client = registry["muse"].createClient(logger);
+    const sessionMessages: SessionOutboundMessage[] = [];
     try {
       const storage = new AgentStorage(path.join(storeDir, "agents"), logger);
       const manager = new AgentManager({
@@ -2462,35 +2488,185 @@ test.skipIf(!REAL_MUSE_BIN)(
         archivedAt: now,
       });
       expect(await manager.hasStoredArchivedHistory("archived-native")).toBe(true);
-      const storedBefore = JSON.stringify(await storage.get("archived-native"));
-      const loaded = await manager.fetchArchivedTimeline("archived-native", {
-        direction: "tail",
-        limit: 10,
+      const session = new Session({
+        clientId: "test-client",
+        permissions: OWNER_PERMISSIONS,
+        onMessage: (message) => sessionMessages.push(message),
+        logger,
+        downloadTokenStore: asDownloadTokenStore(),
+        pushNotifications: asPushNotifications(),
+        paseoHome: home,
+        agentManager: manager,
+        agentStorage: storage,
+        messageReceipts: createMessageReceiptsStub(),
+        agentMessages: createAgentMessageDeliveryStub(),
+        creationService: createTestCreationService(),
+        projectRegistry: {
+          list: async () => [],
+          get: async () => undefined,
+          getOrCreateActiveByRoot: async () => undefined,
+          upsert: async () => undefined,
+          archive: async () => {},
+          remove: async () => {},
+          initialize: async () => {},
+          existsOnDisk: async () => false,
+        } as unknown as ProjectRegistry,
+        workspaceRegistry: {
+          get: () => undefined,
+          list: async () => [],
+        } as unknown as WorkspaceRegistry,
+        scheduleService: asScheduleService(),
+        checkoutDiffManager: asCheckoutDiffManager({
+          scheduleRefreshForCwd: () => {},
+        }),
+        workspaceGitService: asWorkspaceGitService({
+          getCheckout: () => undefined,
+          getCheckoutDiff: () => undefined,
+          getSnapshot: () => undefined,
+          suggestBranchesForCwd: () => undefined,
+          listStashes: () => undefined,
+          validateBranchRef: () => undefined,
+          hasLocalBranch: () => undefined,
+          resolveRepoRoot: () => undefined,
+          resolveRepoRemoteUrl: () => undefined,
+          getWorkspaceGitMetadata: () => undefined,
+          getProjectSlug: () => undefined,
+          resolveForge: async () => undefined,
+          invalidateForge: () => {},
+        }),
+        workspaceRuntimeStore: createWorkspaceRuntimeStore(),
+        daemonConfigStore: asDaemonConfigStore({
+          readServicePorts: async () => undefined,
+          get: () => ({
+            mcp: { injectIntoAgents: false },
+            providers: {},
+          }),
+          onChange: () => () => {},
+        }),
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        stt: null,
+        tts: null,
+        terminalManager: null,
       });
-      expect(loaded?.record.id).toBe("archived-native");
-      const items = loaded!.result.rows.map((row) => row.item);
-      const userIndex = items.findIndex((item) => item.type === "user_message");
-      const assistantIndex = items.findIndex((item) => item.type === "assistant_message");
-      expect(userIndex).toBeGreaterThanOrEqual(0);
-      expect(assistantIndex).toBeGreaterThan(userIndex);
-      for (const row of loaded!.result.rows) expect(row.timestamp).toBeTruthy();
-      // Stable pagination: a second narrower fetch serves the same epoch.
-      const again = await manager.fetchArchivedTimeline("archived-native", {
-        direction: "tail",
-        limit: 1,
-      });
-      expect(again!.result.epoch).toBe(loaded!.result.epoch);
-      // The stored record and the durable native session log are
-      // byte-identical: no resume, no new turn, no lingering session.
-      expect(JSON.stringify(await storage.get("archived-native"))).toBe(storedBefore);
-      expect(await snapshotSessionLogs(home)).toEqual(nativeBefore);
-      expect(await findResumedMarkers(home)).toEqual([]);
-      expect(await findResumedContent(home)).toEqual([]);
-      // The deleted workspace was not recreated by the manager read.
-      await expect(stat(work)).rejects.toThrow(/ENOENT/);
+      try {
+        // The AgentStorage record file on disk, byte for byte: the cache
+        // alone cannot prove the durable record was untouched.
+        const recordFile = await findRecordFile(storeDir, "archived-native.json");
+        const recordBefore = await readFile(recordFile, "utf8");
+        // Page backward through the archived timeline on the real client
+        // fetch path, one projected entry at a time: the tail request
+        // serves the newest entry, then each "before" request follows the
+        // previous page's start cursor toward older entries.
+        const pages: Array<Array<{ item: unknown; timestamp: unknown }>> = [];
+        let direction: "tail" | "before" = "tail";
+        let cursor: { epoch: string; seq: number } | undefined;
+        let epoch: string | undefined;
+        for (let page = 0; page < 20; page++) {
+          const requestId = `fetch-page-${page}`;
+          const from = sessionMessages.length;
+          await session.handleMessage({
+            type: "fetch_agent_timeline_request",
+            requestId,
+            agentId: "archived-native",
+            direction,
+            ...(cursor ? { cursor } : {}),
+            limit: 1,
+          });
+          const response = sessionMessages
+            .slice(from)
+            .find((message) => message.type === "fetch_agent_timeline_response");
+          expect(response?.type).toBe("fetch_agent_timeline_response");
+          if (response?.type !== "fetch_agent_timeline_response") {
+            throw new Error("Expected fetch_agent_timeline_response");
+          }
+          expect(response.payload.requestId).toBe(requestId);
+          expect(response.payload.error).toBeNull();
+          expect(response.payload.agentId).toBe("archived-native");
+          if (epoch === undefined) epoch = response.payload.epoch;
+          expect(response.payload.epoch).toBe(epoch);
+          expect(response.payload.entries.length).toBeGreaterThan(0);
+          pages.push(
+            response.payload.entries.map((entry) => ({
+              item: entry.item,
+              timestamp: entry.timestamp,
+            })),
+          );
+          if (!response.payload.hasOlder) break;
+          expect(response.payload.startCursor).not.toBeNull();
+          cursor = response.payload.startCursor ?? undefined;
+          direction = "before";
+        }
+        // The walk above must actually page: one projected entry per
+        // request over a multi-turn archived session, with every page
+        // sharing one epoch.
+        expect(pages.length).toBeGreaterThan(1);
+        const composite = pages.toReversed().flat();
+        for (const row of composite) expect(row.timestamp).toBeTruthy();
+        // The concatenated pages equal one full fetch exactly: same rows,
+        // same order, no gaps, no duplicates.
+        const fullFrom = sessionMessages.length;
+        await session.handleMessage({
+          type: "fetch_agent_timeline_request",
+          requestId: "fetch-full",
+          agentId: "archived-native",
+          direction: "tail",
+        });
+        const full = sessionMessages
+          .slice(fullFrom)
+          .find((message) => message.type === "fetch_agent_timeline_response");
+        if (full?.type !== "fetch_agent_timeline_response") {
+          throw new Error("Expected fetch_agent_timeline_response");
+        }
+        expect(full.payload.error).toBeNull();
+        expect(full.payload.epoch).toBe(epoch);
+        expect(
+          full.payload.entries.map((entry) => ({ item: entry.item, timestamp: entry.timestamp })),
+        ).toEqual(composite);
+        // Seeded content in order: the real user turn before its echo.
+        const items = composite.map((row) => row.item);
+        const userIndex = items.findIndex(
+          (item) => (item as { type?: string }).type === "user_message",
+        );
+        const assistantIndex = items.findIndex(
+          (item) => (item as { type?: string }).type === "assistant_message",
+        );
+        expect(userIndex).toBeGreaterThanOrEqual(0);
+        expect(assistantIndex).toBeGreaterThan(userIndex);
+        expect(items[userIndex]).toMatchObject({
+          type: "user_message",
+          text: expect.stringContaining("hello"),
+        });
+        // The stored record file and the durable native session log are
+        // byte-identical: no resume, no new turn, no lingering session.
+        expect(await readFile(recordFile, "utf8")).toBe(recordBefore);
+        expect(await snapshotSessionLogs(home)).toEqual(nativeBefore);
+        expect(await findResumedMarkers(home)).toEqual([]);
+        expect(await findResumedContent(home)).toEqual([]);
+        // The deleted workspace was not recreated by the session read.
+        await expect(stat(work)).rejects.toThrow(/ENOENT/);
+      } finally {
+        await session.cleanup();
+      }
     } finally {
       await client.shutdown();
     }
   },
   90000,
 );
+
+async function findRecordFile(root: string, name: string): Promise<string> {
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      try {
+        return await findRecordFile(full, name);
+      } catch {
+        // Not in this subtree; keep looking.
+      }
+    } else if (entry.isFile() && entry.name === name) {
+      return full;
+    }
+  }
+  throw new Error(`Record file ${name} not found under ${root}`);
+}

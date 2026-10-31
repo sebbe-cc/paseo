@@ -199,6 +199,33 @@ function archivedTimelineRevision(record: StoredAgentRecord): string {
   return [record.updatedAt, record.archivedAt ?? "", record.persistence?.sessionId ?? ""].join("|");
 }
 
+const MUSE_PROVIDER_ID = "muse";
+
+/**
+ * Whether an archived record belongs to the Muse family: the base `muse`
+ * provider id, a wrapper client serving it, or a derived profile id that
+ * resolves back to `muse` through the provider definitions. Only the Muse
+ * family takes the guaranteed non-reopening stored-history path; every
+ * other provider keeps its previous legacy archived route.
+ */
+function isMuseFamilyProvider(
+  provider: AgentProvider,
+  client: AgentClient | undefined,
+  definitions: Map<AgentProvider, ProviderEnabledFlag>,
+): boolean {
+  if (provider === MUSE_PROVIDER_ID) return true;
+  if (client && client.provider === MUSE_PROVIDER_ID) return true;
+  const seen = new Set<AgentProvider>([provider]);
+  let current = definitions.get(provider)?.derivedFromProviderId;
+  while (current) {
+    if (current === MUSE_PROVIDER_ID) return true;
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = definitions.get(current)?.derivedFromProviderId;
+  }
+  return false;
+}
+
 function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
   const config: AgentSessionConfig = {
     provider: record.provider,
@@ -1384,20 +1411,47 @@ export class AgentManager {
    * record is archived, no runtime is resident, and the provider client
    * offers readHistory. Callers choose the stored vs legacy path in advance
    * from this probe, never by catching a failed stored read.
+   *
+   * The stored path is Muse-only: for the Muse family an unsupported or
+   * failed probe is a loud error, never a silent return to the legacy
+   * resume path. Other providers without the capability keep their previous
+   * legacy archived route.
    */
   async hasStoredArchivedHistory(agentId: string): Promise<boolean> {
     if (this.agents.has(agentId)) return false;
     const record = await this.registry?.get(agentId);
     if (!record || !record.archivedAt) return false;
     const client = this.clients.get(record.provider);
-    if (typeof client?.readHistory !== "function") return false;
+    const museFamily = isMuseFamilyProvider(record.provider, client, this.providerDefinitions);
+    if (typeof client?.readHistory !== "function") {
+      if (museFamily) {
+        throw new Error(`Provider '${record.provider}' does not support archived history reads`);
+      }
+      return false;
+    }
     // Shared plugin clients serve providers with and without the read-only
     // capability: only route stored when the provider affirmatively
     // supports it, so capability-less providers (e.g. Antigravity) keep
     // their previous legacy archived route. Read errors still propagate
     // and never fall back to a resume; only this pre-read probe decides.
     if (typeof client.supportsStoredHistory === "function") {
-      return await client.supportsStoredHistory();
+      let supported: boolean;
+      try {
+        supported = await client.supportsStoredHistory();
+      } catch (error) {
+        // A failed probe must not become a legacy resume for Muse: a
+        // transient connection failure would otherwise reopen the archived
+        // session on the next legacy connection. Fail loudly instead.
+        if (museFamily) throw error;
+        return false;
+      }
+      if (!supported) {
+        if (museFamily) {
+          throw new Error(`Provider '${record.provider}' does not support archived history reads`);
+        }
+        return false;
+      }
+      return true;
     }
     return true;
   }

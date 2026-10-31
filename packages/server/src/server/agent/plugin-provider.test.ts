@@ -491,6 +491,151 @@ describe("PluginAgentClientRegistry", () => {
     }
   });
 
+  test("Muse without the read_history capability fails loudly instead of legacy resume", async () => {
+    const logger = createTestLogger();
+    const workdir = await mkdtemp(join(tmpdir(), "paseo-muse-unsupported-"));
+    try {
+      // A Muse connection that does not advertise session.read_history:
+      // the archived read must fail loudly, never fall back to reopening
+      // the session through the legacy resume path.
+      const museHarness = createProviderHarness({ id: "muse" });
+      const plugins = new PluginAgentClientRegistry(logger);
+      plugins.replace([museHarness.registration]);
+      const registry = buildProviderRegistry(logger, {
+        pluginProviders: plugins.definitions(),
+      });
+      const storage = new AgentStorage(join(workdir, "agents"), logger);
+      const manager = new AgentManager({
+        logger,
+        clients: { muse: registry["muse"].createClient(logger) },
+        providerDefinitions: { muse: registry["muse"] },
+        registry: storage,
+      });
+      const now = new Date().toISOString();
+      await storage.upsert({
+        id: "muse-agent",
+        provider: "muse",
+        cwd: join(workdir, "gone-workspace"),
+        createdAt: now,
+        updatedAt: now,
+        labels: {},
+        lastStatus: "closed",
+        config: null,
+        persistence: { provider: "muse", sessionId: "native-1" },
+        archivedAt: now,
+      });
+      await expect(manager.hasStoredArchivedHistory("muse-agent")).rejects.toThrow(
+        "does not support archived history reads",
+      );
+      expect(museHarness.inputs.some((input) => input.type === "session.open")).toBe(false);
+      expect(museHarness.inputs.some((input) => input.type === "session.read_history")).toBe(false);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("Muse with a failing capability probe fails loudly instead of legacy resume", async () => {
+    const logger = createTestLogger();
+    const workdir = await mkdtemp(join(tmpdir(), "paseo-muse-probe-failure-"));
+    try {
+      // A transient connection failure on the first probe must not become
+      // a legacy resume on the next connection: fail loudly instead.
+      const failing: ProviderRegistration = {
+        id: "muse",
+        label: "Muse failing",
+        async connect() {
+          throw new Error("PROBE-BOOM");
+        },
+      };
+      const plugins = new PluginAgentClientRegistry(logger);
+      plugins.replace([failing]);
+      const registry = buildProviderRegistry(logger, {
+        pluginProviders: plugins.definitions(),
+      });
+      const storage = new AgentStorage(join(workdir, "agents"), logger);
+      const manager = new AgentManager({
+        logger,
+        clients: { muse: registry["muse"].createClient(logger) },
+        providerDefinitions: { muse: registry["muse"] },
+        registry: storage,
+      });
+      const now = new Date().toISOString();
+      await storage.upsert({
+        id: "muse-agent",
+        provider: "muse",
+        cwd: join(workdir, "gone-workspace"),
+        createdAt: now,
+        updatedAt: now,
+        labels: {},
+        lastStatus: "closed",
+        config: null,
+        persistence: { provider: "muse", sessionId: "native-1" },
+        archivedAt: now,
+      });
+      await expect(manager.hasStoredArchivedHistory("muse-agent")).rejects.toThrow("PROBE-BOOM");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("Muse profile without the capability fails loudly, other providers keep legacy", async () => {
+    const logger = createTestLogger();
+    const workdir = await mkdtemp(join(tmpdir(), "paseo-muse-profile-"));
+    try {
+      // A Muse-derived profile id resolves back to muse through the
+      // provider definitions even when the serving client carries another
+      // id, so it takes the loud Muse path; an unrelated provider without
+      // the capability keeps its previous legacy archived route.
+      const museHarness = createProviderHarness({ id: "muse" });
+      const legacyHarness = createProviderHarness({ id: "plugin-legacy" });
+      const plugins = new PluginAgentClientRegistry(logger);
+      plugins.replace([museHarness.registration, legacyHarness.registration]);
+      const registry = buildProviderRegistry(logger, {
+        pluginProviders: plugins.definitions(),
+      });
+      const storage = new AgentStorage(join(workdir, "agents"), logger);
+      const manager = new AgentManager({
+        logger,
+        clients: {
+          "muse-work": registry["plugin-legacy"].createClient(logger),
+          "plugin-legacy": registry["plugin-legacy"].createClient(logger),
+        },
+        providerDefinitions: {
+          "muse-work": { enabled: true, derivedFromProviderId: "muse" },
+          "plugin-legacy": registry["plugin-legacy"],
+        },
+        registry: storage,
+      });
+      const now = new Date().toISOString();
+      for (const [agentId, provider] of [
+        ["muse-profile-agent", "muse-work"],
+        ["legacy-agent", "plugin-legacy"],
+      ] as const) {
+        await storage.upsert({
+          id: agentId,
+          provider,
+          cwd: join(workdir, "gone-workspace"),
+          createdAt: now,
+          updatedAt: now,
+          labels: {},
+          lastStatus: "closed",
+          config: null,
+          persistence: { provider, sessionId: "native-1" },
+          archivedAt: now,
+        });
+      }
+      await expect(manager.hasStoredArchivedHistory("muse-profile-agent")).rejects.toThrow(
+        "does not support archived history reads",
+      );
+      expect(await manager.hasStoredArchivedHistory("legacy-agent")).toBe(false);
+      for (const harness of [museHarness, legacyHarness]) {
+        expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   test("resume passes the recorded cwd through unchanged, even for history", async () => {
     const logger = createTestLogger();
     const harness = createProviderHarness();

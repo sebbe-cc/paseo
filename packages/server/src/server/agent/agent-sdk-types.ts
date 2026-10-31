@@ -847,7 +847,9 @@ export interface AgentClient {
    * stored reads instead of their legacy archived route. Clients without
    * this method are treated as stored-capable whenever `readHistory` is
    * defined. A read error must still propagate and never fall back to a
-   * resume; only the pre-read routing decision uses this probe.
+   * resume; only the pre-read routing decision uses this probe. A probe
+   * failure rejects so the caller can apply provider-family policy to it
+   * instead of treating an unreadable provider as capable.
    */
   supportsStoredHistory?(): boolean | Promise<boolean>;
   /**
