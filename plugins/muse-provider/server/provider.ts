@@ -14,6 +14,7 @@ import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
 import { MspConnection } from "./connection.js";
 import { MuseError, actionableError } from "./errors.js";
+import { readStoredSessionHistory } from "./history-reader.js";
 import { Sessions } from "./sessions.js";
 import { Session } from "./session.js";
 import { accountSchema } from "./wire.js";
@@ -25,6 +26,7 @@ const capabilities = [
   "prompt.steer",
   "session.configure",
   "session.persistence",
+  "session.read_history",
   "permission",
   "session.list",
 ] as const;
@@ -119,6 +121,24 @@ function connect(
     }
     if (input.type === "catalog") {
       emit({ type: "catalog", requestId: input.requestId, catalog: await catalog.read(launch) });
+      return;
+    }
+    if (input.type === "session.read_history") {
+      // Stored-history read: no session is opened, attached, or subscribed.
+      // A missing capability answers unsupported here, never a resume fallback.
+      if (!negotiated.includes("session.read_history")) {
+        throw new MuseError(
+          "unsupported",
+          "Muse does not support session.read_history",
+        );
+      }
+      const read = await readStoredSessionHistory({ launch, persistence: input.persistence });
+      emit({
+        type: "session.history",
+        requestId: input.requestId,
+        viewCursor: read.viewCursor,
+        rows: read.rows,
+      });
       return;
     }
     if (input.type === "session.open") {

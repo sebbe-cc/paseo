@@ -517,6 +517,23 @@ export interface AgentRunResult {
   canceled?: boolean;
 }
 
+/** One stored-history row: a timeline item with its recorded time and turn. */
+export interface ProviderHistoryRow {
+  item: AgentTimelineItem;
+  timestamp?: string;
+  turnId?: string;
+}
+
+/**
+ * Point-in-time read of a stored native session. `viewCursor` is the fold
+ * head the rows were read at; a projection built from these rows keeps a
+ * stable epoch for that revision.
+ */
+export interface ProviderHistoryRead {
+  viewCursor: string;
+  rows: ProviderHistoryRow[];
+}
+
 export interface AgentRuntimeInfo {
   provider: AgentProvider;
   sessionId: string | null;
@@ -825,6 +842,14 @@ export interface AgentClient {
    * Called before Paseo clears its archived flag so provider resume can succeed.
    */
   unarchiveNativeSession?(handle: AgentPersistenceHandle): Promise<void>;
+  /**
+   * Read a stored native session without opening, resuming, or attaching to
+   * it: no session/register, no live turn, no lifecycle side effects. Used
+   * for archived agents whose working directory may be gone. Providers that
+   * do not offer a read-only path leave this undefined; callers report
+   * unsupported instead of falling back to a resume.
+   */
+  readHistory?(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead>;
   /**
    * Release any provider-owned resources held by this client (background
    * processes, sockets, cached subprocesses, etc.). Called when the daemon

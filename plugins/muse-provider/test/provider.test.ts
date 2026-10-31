@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { UsageSourceRegistry } from "../../../packages/server/src/server/plugins/usage-sources/index.js";
 import { Usage as MuseUsage } from "../server/usage.js";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,15 +48,18 @@ async function harness(
   scenario = "text-reasoning",
   env: Record<string, string> = {},
   providerOptions?: Record<string, unknown>,
+  launchOverride?: ProviderLaunch,
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "muse-provider-test-"));
   roots.push(root);
   const requests = path.join(root, "requests.ndjson");
-  const launch: ProviderLaunch = {
-    command: process.execPath,
-    args: [fileURLToPath(new URL("./fake-muse.mjs", import.meta.url))],
-    env: { MUSE_TEST_SCENARIO: scenario, MUSE_TEST_REQUESTS: requests, ...env },
-  };
+  const launch: ProviderLaunch =
+    launchOverride ??
+    ({
+      command: process.execPath,
+      args: [fileURLToPath(new URL("./fake-muse.mjs", import.meta.url))],
+      env: { MUSE_TEST_SCENARIO: scenario, MUSE_TEST_REQUESTS: requests, ...env },
+    } satisfies ProviderLaunch);
   await writeFile(requests, "");
   let usageSource!: UsageSourceRegistration;
   const provider = registration((source) => {
@@ -1932,3 +1937,299 @@ test("an opened closed session closes its idle Muse host and the next prompt res
   expect((await h.recorded()).filter((frame) => frame.method === "session/resume")).toHaveLength(2);
   expect(h.events.some((event) => event.type === "session.runtime_failed")).toBe(false);
 }, 15000);
+test("session.read_history serves stored user, assistant, and tool rows without attaching", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-history-"));
+  roots.push(dir);
+  const historyPath = path.join(dir, "native-history.ndjson");
+  const seed = await harness("tools-edit", { MUSE_TEST_HISTORY: historyPath });
+  await seed.open();
+  await seed.prompt();
+  await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const saved = seed.events.findLast((event) => event.type === "session.persistence");
+  if (!saved || saved.type !== "session.persistence") {
+    throw new Error("Expected session persistence");
+  }
+  await seed.connection.close();
+  // The archived workspace is gone; only the native session record remains.
+  await rm(seed.root, { recursive: true, force: true });
+
+  const reader = await harness("tools-edit", { MUSE_TEST_READ_HISTORY: historyPath });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: saved.persistence,
+  });
+  const history = await reader.wait((event) => event.type === "session.history");
+  if (history.type !== "session.history") throw new Error("Expected session history");
+  expect(history.requestId).toBe("read-1");
+  expect(history.viewCursor).toBeTruthy();
+  const items = history.rows.map((row) => row.item);
+  const userIndex = items.findIndex((item) => item.type === "user_message");
+  const toolIndex = items.findIndex((item) => item.type === "tool_call");
+  const assistantIndex = items.findIndex((item) => item.type === "assistant_message");
+  expect(userIndex).toBeGreaterThanOrEqual(0);
+  expect(toolIndex).toBeGreaterThan(userIndex);
+  expect(assistantIndex).toBeGreaterThan(toolIndex);
+  expect(items[userIndex]).toMatchObject({
+    type: "user_message",
+    text: expect.stringContaining("Use read_file"),
+  });
+  expect(items[assistantIndex]).toMatchObject({
+    type: "assistant_message",
+    text: expect.stringContaining("Done."),
+  });
+  expect(items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "read", filePath: "f" }),
+      }),
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "shell", command: "wc -l f" }),
+      }),
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "edit" }),
+      }),
+    ]),
+  );
+  // Stored rows carry their recorded times and turns.
+  for (const row of history.rows.slice(0, 5)) {
+    expect(row.timestamp).toBeTruthy();
+  }
+  expect(history.rows.some((row) => row.turnId !== undefined)).toBe(true);
+
+  const log = await reader.recorded();
+  const methods = log.filter((entry) => entry.method).map((entry) => entry.method);
+  expect(methods).toContain("initialize");
+  expect(methods).toContain("session/read");
+  expect(methods).toContain("view/page");
+  const readCall = log.find((entry) => entry.method === "session/read");
+  expect(readCall.params).toMatchObject({ excludeItems: false });
+  for (const forbidden of [
+    "session/resume",
+    "session/start",
+    "view/subscribe",
+    "turn/start",
+    "approval/decide",
+    "session/setModel",
+    "session/setApprovalMode",
+  ]) {
+    expect(methods).not.toContain(forbidden);
+  }
+  // The reader host is closed by the read itself: one spawn, one exit, no linger.
+  const starts = log.filter((entry) => entry.event === "hostStarted");
+  const closes = log.filter((entry) => entry.event === "hostClosed");
+  expect(starts).toHaveLength(1);
+  expect(closes).toHaveLength(1);
+});
+
+// --- Real native-store acceptance (pa-zuuvf) ---
+//
+// The fake-host test above proves row mapping and the forbidden-RPC set.
+// This test proves the same `session.read_history` dispatch against a real
+// `muse serve` binary with an owned isolated native store: seed one echo
+// turn, delete the workspace, then read the archived session back without
+// reopening it. Skipped where no `muse` binary is on PATH (desvio gate);
+// runs wherever the binary exists (`MUSE_TEST_BIN` overrides PATH search).
+// The echo provider emits no tool calls, so tool-call mapping stays covered
+// by the fake-host test through the same `Timeline.fold` path.
+
+function realMuseBinary(): string | undefined {
+  const override = process.env.MUSE_TEST_BIN;
+  if (override) return override;
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "muse");
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Keep looking.
+    }
+  }
+  return undefined;
+}
+const REAL_MUSE_BIN = realMuseBinary();
+
+async function snapshotSessionLogs(home: string): Promise<Map<string, string>> {
+  // Durable session logs only: the empty maintenance lock
+  // (.msp-maintenance-owner.lock) and the read-side head cache
+  // (head-currency.json) are touched by mere host starts/reads and are
+  // excluded by design. Host-lifecycle files outside sessions/
+  // (serve-exit.jsonl, local-tracing) are out of scope by construction.
+  const out = new Map<string, string>();
+  async function walk(dir: string, rel: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const key = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(full, key);
+      else if (
+        entry.isFile() &&
+        entry.name !== "session.head-currency.json" &&
+        entry.name !== ".msp-maintenance-owner.lock"
+      ) {
+        out.set(
+          key,
+          createHash("sha256")
+            .update(await readFile(full))
+            .digest("hex"),
+        );
+      }
+    }
+  }
+  await walk(path.join(home, ".local", "share", "muse", "sessions"), "");
+  return out;
+}
+
+async function findResumedContent(home: string): Promise<string[]> {
+  // A resume stamps a durable `session.resumed` marker into the session log;
+  // a live non-resumed log contains no "resumed" mention at all.
+  const hits: string[] = [];
+  async function walk(dir: string, rel: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const key = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(full, key);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        const text = await readFile(full, "utf8");
+        if (/resumed/i.test(text)) hits.push(key);
+      }
+    }
+  }
+  await walk(path.join(home, ".local", "share", "muse", "sessions"), "");
+  return hits;
+}
+
+async function findResumedMarkers(home: string): Promise<string[]> {
+  const hits: string[] = [];
+  async function walk(dir: string, rel: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const key = rel ? `${rel}/${entry.name}` : entry.name;
+      // The durable marker a resume writes is `session.resumed`; unrelated
+      // bundled skill names like `resume-claude` must not match.
+      if (/resumed/i.test(entry.name)) hits.push(key);
+      if (entry.isDirectory()) await walk(full, key);
+    }
+  }
+  await walk(home, "");
+  return hits;
+}
+
+test.skipIf(!REAL_MUSE_BIN)(
+  "session.read_history reads a real archived native session with a deleted cwd",
+  async () => {
+    const bin = REAL_MUSE_BIN!;
+    const home = await mkdtemp(path.join(os.tmpdir(), "muse-real-store-home-"));
+    const work = await mkdtemp(path.join(os.tmpdir(), "muse-real-store-work-"));
+    roots.push(home, work);
+    // MspConnection runs [command, ...args, "serve", ...serveArgs], but the
+    // real binary only accepts `serve` first with serve flags after it
+    // (`muse serve --provider echo`). The wrapper drops that inserted
+    // "serve" and re-adds it after the serve-scoped provider flag.
+    const wrapper = path.join(home, "muse-serve.sh");
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = "serve" ]; then shift; fi\nexec "${bin}" serve --provider echo "$@"\n`,
+    );
+    await chmod(wrapper, 0o755);
+    const launch: ProviderLaunch = {
+      command: wrapper,
+      args: [],
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_DATA_HOME: path.join(home, ".local", "share"),
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        XDG_CACHE_HOME: path.join(home, ".cache"),
+        XDG_STATE_HOME: path.join(home, ".local", "state"),
+      },
+    };
+    const seed = await harness("unused", {}, undefined, launch);
+    expect(await seed.open(undefined, "onRequest", null)).toMatchObject({ type: "session.ready" });
+    await seed.prompt();
+    await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+    const saved = seed.events.findLast((event) => event.type === "session.persistence");
+    if (!saved || saved.type !== "session.persistence") {
+      throw new Error("Expected session persistence");
+    }
+    await seed.connection.close();
+    const before = await snapshotSessionLogs(home);
+    expect(before.size).toBeGreaterThan(0);
+    expect(await findResumedMarkers(home)).toEqual([]);
+    expect(await findResumedContent(home)).toEqual([]);
+    // The archived workspace is gone; the read must never touch it.
+    await rm(work, { recursive: true, force: true });
+
+    const reader = await harness("unused", {}, undefined, launch);
+    await reader.send({
+      type: "session.read_history",
+      requestId: "read-1",
+      persistence: saved.persistence,
+    });
+    const history = await reader.wait((event) => event.type === "session.history");
+    if (history.type !== "session.history") throw new Error("Expected session history");
+    expect(history.requestId).toBe("read-1");
+    expect(history.viewCursor).toBeTruthy();
+    const items = history.rows.map((row) => row.item);
+    const userIndex = items.findIndex((item) => item.type === "user_message");
+    const assistantIndex = items.findIndex((item) => item.type === "assistant_message");
+    expect(userIndex).toBeGreaterThanOrEqual(0);
+    expect(assistantIndex).toBeGreaterThan(userIndex);
+    expect(items[userIndex]).toMatchObject({
+      type: "user_message",
+      text: expect.stringContaining("hello"),
+    });
+    for (const row of history.rows) expect(row.timestamp).toBeTruthy();
+    // Stable revision: a second read serves the same cursor and rows.
+    await reader.send({
+      type: "session.read_history",
+      requestId: "read-2",
+      persistence: saved.persistence,
+    });
+    const again = await reader.wait(
+      (event) => event.type === "session.history" && event.requestId === "read-2",
+    );
+    if (again.type !== "session.history") throw new Error("Expected session history");
+    expect(again.viewCursor).toBe(history.viewCursor);
+    expect(again.rows.map((row) => row.item)).toEqual(items);
+    // The durable session log is byte-identical: no resume, no new turn.
+    expect(await snapshotSessionLogs(home)).toEqual(before);
+    expect(await findResumedMarkers(home)).toEqual([]);
+    expect(await findResumedContent(home)).toEqual([]);
+    // The deleted workspace was not recreated.
+    await expect(readFile(path.join(work, "probe"))).rejects.toThrow(/ENOENT/);
+    // A failing read leaves a usable connection: unknown session, no linger.
+    await reader.send({
+      type: "session.read_history",
+      requestId: "read-bad",
+      persistence: { version: 1, data: { sessionId: "00000000-0000-7000-8000-000000000000" } },
+    });
+    const failed = await reader.wait(
+      (event) => event.type === "request.failed" && event.requestId === "read-bad",
+    );
+    expect(failed.type).toBe("request.failed");
+    await reader.connection.close();
+  },
+  90000,
+);
