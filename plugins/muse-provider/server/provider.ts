@@ -102,6 +102,11 @@ function connect(
   const sessions = new Map<string, Session>();
   const catalog = new Catalog();
   const imports = new Sessions();
+  // Read-only history hosts owned by this connection (R1): a provider close
+  // stops and awaits them instead of leaving them to their request timeouts.
+  // Active agent sessions have their own hosts and are never touched here.
+  const readers = new Set<MspConnection>();
+  const inflight = new Set<Promise<void>>();
   let closed = false;
   function emit(event: ProviderEvent): void {
     if (!closed) for (const listener of listeners) listener(event);
@@ -123,18 +128,27 @@ function connect(
       // Stored-history read: no session is opened, attached, or subscribed.
       // A missing capability answers unsupported here, never a resume fallback.
       if (!negotiated.includes("session.read_history")) {
-        throw new MuseError(
-          "unsupported",
-          "Muse does not support session.read_history",
-        );
+        throw new MuseError("unsupported", "Muse does not support session.read_history");
       }
-      const read = await readStoredSessionHistory({ launch, persistence: input.persistence });
-      emit({
-        type: "session.history",
-        requestId: input.requestId,
-        viewCursor: read.viewCursor,
-        rows: read.rows,
-      });
+      let reader: MspConnection | undefined;
+      try {
+        const read = await readStoredSessionHistory({
+          launch,
+          persistence: input.persistence,
+          onHost: (host) => {
+            reader = host;
+            readers.add(host);
+          },
+        });
+        emit({
+          type: "session.history",
+          requestId: input.requestId,
+          viewCursor: read.viewCursor,
+          rows: read.rows,
+        });
+      } finally {
+        if (reader) readers.delete(reader);
+      }
       return;
     }
     if (input.type === "session.open") {
@@ -212,7 +226,18 @@ function connect(
       if (closed) throw new MuseError("closed", "Muse connection is closed");
       requireProviderCapabilities(negotiated, input);
       queueMicrotask(() => {
-        if (!closed) void dispatch(input).catch((error: unknown) => failed(input, error));
+        if (closed) return;
+        const task = (async () => {
+          try {
+            await dispatch(input);
+          } catch (error: unknown) {
+            failed(input, error);
+          }
+        })();
+        inflight.add(task);
+        void task.finally(() => {
+          inflight.delete(task);
+        });
       });
     },
     onEvent(listener) {
@@ -222,11 +247,17 @@ function connect(
     async close() {
       if (closed) return;
       closed = true;
+      // Stop owned read-only history hosts first so no read outlives the
+      // connection; then await every in-flight dispatch so close only
+      // returns once no reader process can linger.
+      const stopping = [...readers].map((reader) => reader.close());
       await Promise.all([
         catalog.close(),
         imports.close(),
         ...[...sessions.values()].map((session) => session.close()),
+        ...stopping,
       ]);
+      await Promise.all(inflight);
       for (const id of sessions.keys()) usage.detach(id);
       sessions.clear();
       listeners.clear();

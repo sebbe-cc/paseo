@@ -7794,16 +7794,29 @@ export class Session {
       : undefined;
 
     try {
-      // A stored closed/archived agent reads through a read-only history
-      // projection: no resume, no session, no lifecycle side effects. The
-      // branch lives before ensureAgentLoaded so a deleted workspace never
-      // triggers a provider spawn for a pure history read.
-      const archived = await this.agentManager.fetchArchivedTimeline(msg.agentId, {
-        direction,
-        cursor,
-        limit: msg.limit,
-        wholeTurns: msg.wholeTurns,
-      });
+      // The guaranteed non-reopening stored path is Muse-only and is chosen
+      // in advance by provider capability, never by catching a failed read.
+      // Other providers keep their previous legacy path below. A Muse read
+      // error propagates to the caller and never falls through to a resume:
+      // the stored branch lives before ensureAgentLoaded so a deleted
+      // workspace never triggers a provider spawn for a pure history read.
+      const stored = await this.agentManager.hasStoredArchivedHistory(msg.agentId);
+      const archived = stored
+        ? await this.agentManager.fetchArchivedTimeline(msg.agentId, {
+            direction,
+            cursor,
+            limit: msg.limit,
+            wholeTurns: msg.wholeTurns,
+          })
+        : null;
+      if (!archived && stored) {
+        // Still archived and capable, but the read lost a generation race:
+        // fail loudly instead of resuming. Records that left the archived
+        // state mid-read take the legacy path below.
+        if (await this.agentManager.hasStoredArchivedHistory(msg.agentId)) {
+          throw new Error("History changed; fetch again");
+        }
+      }
       const snapshot = archived
         ? null
         : await ensureAgentLoaded(msg.agentId, {
@@ -7942,13 +7955,20 @@ export class Session {
     source?: object,
   ): Promise<void> {
     try {
-      const archived = await this.agentManager.getArchivedTimelineRows(msg.agentId);
+      // Same Muse-only routing as the fetch branch: stored search for
+      // capable providers, previous legacy path for the rest, no
+      // catch-driven fallback between them.
+      const stored = await this.agentManager.hasStoredArchivedHistory(msg.agentId);
+      const archived = stored ? await this.agentManager.getArchivedTimelineRows(msg.agentId) : null;
       let rows;
       let epoch;
       if (archived) {
         rows = archived.rows;
         epoch = archived.epoch;
       } else {
+        if (stored && (await this.agentManager.hasStoredArchivedHistory(msg.agentId))) {
+          throw new Error("History changed; search again");
+        }
         await ensureAgentLoaded(msg.agentId, {
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,

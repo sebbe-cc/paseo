@@ -5886,3 +5886,108 @@ test("a failing direct source observes fire-and-forget file replies without unha
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+describe("archived timeline fetch routing (pa-zuuvf product decision)", () => {
+  function fetchMessages(messages: SessionOutboundMessage[]) {
+    return messages.filter((message) => message.type === "fetch_agent_timeline_response");
+  }
+
+  test("non-Muse archived agents keep the legacy path, never unsupported", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const fetchArchivedTimeline = vi.fn();
+    const storageGet = vi.fn(async () => {
+      throw new Error("LEGACY-MARKER");
+    });
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        hasStoredArchivedHistory: vi.fn(async () => false),
+        fetchArchivedTimeline,
+        waitForAgentClose: vi.fn(async () => {}),
+        getAgent: vi.fn(() => undefined),
+        getRegisteredProviderIds: vi.fn(() => ["codex"]),
+      },
+      agentStorage: { get: storageGet },
+    });
+
+    await session.handleMessage({
+      type: "fetch_agent_timeline_request",
+      requestId: "fetch-1",
+      agentId: "agent-1",
+    });
+
+    // The stored branch is never attempted for a provider without
+    // readHistory; the request reaches the previous legacy load instead.
+    expect(fetchArchivedTimeline).not.toHaveBeenCalled();
+    expect(storageGet).toHaveBeenCalledWith("agent-1");
+    const responses = fetchMessages(messages);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      payload: expect.objectContaining({ requestId: "fetch-1", error: "LEGACY-MARKER" }),
+    });
+    await session.cleanup();
+  });
+
+  test("a Muse stored-read error never reaches the legacy resume path", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const fetchArchivedTimeline = vi.fn(async () => {
+      throw new Error("NATIVE-BOOM");
+    });
+    const storageGet = vi.fn(async () => undefined);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        hasStoredArchivedHistory: vi.fn(async () => true),
+        fetchArchivedTimeline,
+      },
+      agentStorage: { get: storageGet },
+    });
+
+    await session.handleMessage({
+      type: "fetch_agent_timeline_request",
+      requestId: "fetch-1",
+      agentId: "agent-1",
+    });
+
+    expect(fetchArchivedTimeline).toHaveBeenCalledTimes(1);
+    expect(storageGet).not.toHaveBeenCalled();
+    const responses = fetchMessages(messages);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      payload: expect.objectContaining({ requestId: "fetch-1", error: "NATIVE-BOOM" }),
+    });
+    await session.cleanup();
+  });
+
+  test("a lost Muse generation race fails loudly instead of resuming", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const hasStored = vi.fn(async () => true);
+    const storageGet = vi.fn(async () => undefined);
+    const session = createSessionForTest({
+      messages,
+      agentManager: {
+        hasStoredArchivedHistory: hasStored,
+        fetchArchivedTimeline: vi.fn(async () => null),
+      },
+      agentStorage: { get: storageGet },
+    });
+
+    await session.handleMessage({
+      type: "fetch_agent_timeline_request",
+      requestId: "fetch-1",
+      agentId: "agent-1",
+    });
+
+    expect(hasStored).toHaveBeenCalledTimes(2);
+    expect(storageGet).not.toHaveBeenCalled();
+    const responses = fetchMessages(messages);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      payload: expect.objectContaining({
+        requestId: "fetch-1",
+        error: "History changed; fetch again",
+      }),
+    });
+    await session.cleanup();
+  });
+});

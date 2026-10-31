@@ -12464,3 +12464,96 @@ test("fetchArchivedTimeline serves stored history without resuming or mutating t
     rmSync(workdir, { recursive: true, force: true });
   }
 });
+
+class RacyHistoryClient extends TestAgentClient {
+  calls = 0;
+  private gate: Promise<void> | null = null;
+  private releaseGate: (() => void) | null = null;
+
+  constructor() {
+    super("muse");
+  }
+
+  armPause(): void {
+    this.gate = new Promise<void>((resolve) => {
+      this.releaseGate = resolve;
+    });
+  }
+
+  release(): void {
+    this.releaseGate?.();
+    this.gate = null;
+    this.releaseGate = null;
+  }
+
+  override async readHistory() {
+    this.calls += 1;
+    const n = this.calls;
+    if (this.gate) await this.gate;
+    return {
+      viewCursor: `v:race:${n}`,
+      rows: [
+        {
+          item: { type: "user_message", text: `gen-${n}` },
+          timestamp: `2026-10-31T00:00:0${n}.000Z`,
+          turnId: `turn-${n}`,
+        },
+      ],
+    };
+  }
+}
+
+test("an unarchive/rearchive race never publishes older rows as the newer archive", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archived-race-"));
+  const deletedCwd = join(workdir, "gone-workspace");
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new RacyHistoryClient();
+  const manager = new AgentManager({ clients: { muse: client }, registry: storage, logger });
+  const base = {
+    id: "racing-agent",
+    provider: "muse",
+    cwd: deletedCwd,
+    createdAt: "2026-10-31T00:00:00.000Z",
+    labels: {},
+    lastStatus: "closed",
+    config: null,
+    persistence: { provider: "muse", sessionId: "native-1" },
+  } as const;
+  await storage.upsert({
+    ...base,
+    updatedAt: "2026-10-31T00:00:01.000Z",
+    archivedAt: "2026-10-31T00:00:01.000Z",
+  });
+  try {
+    client.armPause();
+    const first = manager.fetchArchivedTimeline("racing-agent", { direction: "tail", limit: 10 });
+    while (client.calls < 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    // Unarchive, add history, and rearchive while the first read is paused:
+    // generation B replaces generation A mid-flight.
+    await storage.upsert({ ...base, updatedAt: "2026-10-31T00:00:02.000Z", archivedAt: null });
+    await storage.upsert({
+      ...base,
+      updatedAt: "2026-10-31T00:00:03.000Z",
+      archivedAt: "2026-10-31T00:00:03.000Z",
+    });
+    // A second waiter arriving at generation B shares the in-flight load.
+    const second = manager.fetchArchivedTimeline("racing-agent", { direction: "tail", limit: 10 });
+    client.release();
+    const [one, two] = await Promise.all([first, second]);
+    // The stale first read is discarded and retried: both callers serve B.
+    expect(client.calls).toBe(2);
+    for (const loaded of [one, two]) {
+      expect(loaded?.result.rows.map((row) => row.item)).toMatchObject([{ text: "gen-2" }]);
+      expect(loaded!.result.epoch).toBe("v:race:2");
+    }
+    // Generation B is cached under its own revision: no further reads.
+    const third = await manager.fetchArchivedTimeline("racing-agent", {
+      direction: "tail",
+      limit: 1,
+    });
+    expect(third!.result.epoch).toBe("v:race:2");
+    expect(client.calls).toBe(2);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});

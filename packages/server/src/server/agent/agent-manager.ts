@@ -1379,42 +1379,66 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Whether the guaranteed non-reopening stored-history path applies: the
+   * record is archived, no runtime is resident, and the provider client
+   * offers readHistory. Callers choose the stored vs legacy path in advance
+   * from this probe, never by catching a failed stored read.
+   */
+  async hasStoredArchivedHistory(agentId: string): Promise<boolean> {
+    if (this.agents.has(agentId)) return false;
+    const record = await this.registry?.get(agentId);
+    if (!record || !record.archivedAt) return false;
+    const client = this.clients.get(record.provider);
+    return typeof client?.readHistory === "function";
+  }
+
   private async readArchivedHistory(
     agentId: string,
   ): Promise<{ record: StoredAgentRecord; store: InMemoryAgentTimelineStore } | null> {
-    const record = await this.registry?.get(agentId);
-    if (!record || !record.archivedAt) return null;
-    const client = this.clients.get(record.provider);
-    if (!client) {
-      throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
+    // Bounded attempts: an unarchive/rearchive generation change under a
+    // read must never cache or serve the older generation's rows as the
+    // newer one. Persistent contention returns null so the caller fails
+    // loudly instead of looping forever.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const record = await this.registry?.get(agentId);
+      if (!record || !record.archivedAt) return null;
+      if (this.agents.has(agentId)) return null;
+      const client = this.clients.get(record.provider);
+      if (!client) {
+        throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
+      }
+      if (typeof client.readHistory !== "function") {
+        throw new Error(`Provider '${record.provider}' does not support archived history reads`);
+      }
+      const handle = toAgentPersistenceHandle(this.getRegisteredProviderIds(), record.persistence);
+      if (!handle) {
+        throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
+      }
+      const before = archivedTimelineRevision(record);
+      const read = await client.readHistory(handle);
+      // An explicit unarchive raced this read: drop the result so the caller
+      // takes the resident path instead of serving a stale stored projection.
+      const current = await this.registry?.get(agentId);
+      if (!current || !current.archivedAt || this.agents.has(agentId)) return null;
+      if (archivedTimelineRevision(current) !== before) continue;
+      const store = new InMemoryAgentTimelineStore();
+      store.initialize(agentId, {
+        rows: read.rows.map((row, index) => ({
+          seq: index + 1,
+          timestamp: row.timestamp ?? current.updatedAt,
+          item: row.item,
+          ...(row.turnId !== undefined ? { turnId: row.turnId } : {}),
+        })),
+        epoch: read.viewCursor || undefined,
+      });
+      this.archivedTimelineStores.set(agentId, {
+        revision: before,
+        store,
+      });
+      return { record: current, store };
     }
-    if (typeof client.readHistory !== "function") {
-      throw new Error(`Provider '${record.provider}' does not support archived history reads`);
-    }
-    const handle = toAgentPersistenceHandle(this.getRegisteredProviderIds(), record.persistence);
-    if (!handle) {
-      throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
-    }
-    const read = await client.readHistory(handle);
-    // An explicit unarchive raced this read: drop the result so the caller
-    // takes the resident path instead of serving a stale stored projection.
-    const current = await this.registry?.get(agentId);
-    if (!current || !current.archivedAt || this.agents.has(agentId)) return null;
-    const store = new InMemoryAgentTimelineStore();
-    store.initialize(agentId, {
-      rows: read.rows.map((row, index) => ({
-        seq: index + 1,
-        timestamp: row.timestamp ?? current.updatedAt,
-        item: row.item,
-        ...(row.turnId !== undefined ? { turnId: row.turnId } : {}),
-      })),
-      epoch: read.viewCursor || undefined,
-    });
-    this.archivedTimelineStores.set(agentId, {
-      revision: archivedTimelineRevision(current),
-      store,
-    });
-    return { record: current, store };
+    return null;
   }
 
   listProviderSubagents(parentAgentId: string): ProviderSubagentDescriptor[] {

@@ -44,6 +44,12 @@ export interface StoredHistoryRead {
 export async function readStoredSessionHistory(input: {
   launch: ProviderLaunch;
   persistence: ProviderPersistence;
+  /**
+   * Called with the read-only host as soon as it exists, so the owning
+   * provider connection can stop it on close/abort instead of leaving it
+   * to its request timeouts. The reader still closes the host in `finally`.
+   */
+  onHost?: (host: MspConnection) => void;
 }): Promise<StoredHistoryRead> {
   const saved = persistenceSchema.parse(input.persistence.data);
   const host = new MspConnection({
@@ -51,6 +57,7 @@ export async function readStoredSessionHistory(input: {
     cwd: tmpdir(),
     serveArgs: serveArgs(undefined),
   });
+  input.onHost?.(host);
   try {
     await host.initialize();
     const read = await host.request(
@@ -81,17 +88,22 @@ export async function readStoredSessionHistory(input: {
       }
     };
     if (read.history.mode === "inline") {
+      // Complete point-in-time snapshot: the rows describe exactly
+      // read.viewCursor. No suffix walk: paging past the snapshot could
+      // serve rows newer than the returned revision. Opaque cursors are
+      // never interpreted, only echoed.
       if (!read.history.items) {
         throw new MuseError("invalidHistory", "Muse inline history has no items");
       }
       for (const item of read.history.items) await fold(item);
+      return { viewCursor: read.viewCursor, rows };
     }
-    // Page the durable view to the read's fold head. Inline history already
-    // covers the fold; a suffix walk only picks up stragglers, while every
-    // other mode walks the whole view from genesis. Revision dedupe in
+    // Paged fallback for snapshot/anchoredSnapshot/none/unknown modes: walk
+    // the whole view from genesis, then revalidate the revision with a
+    // metadata read so the returned rows and cursor stay consistent even if
+    // rows arrived between the first read and the walk. Revision dedupe in
     // `Timeline.fold` keeps replays idempotent.
-    let cursor: string | null | undefined =
-      read.history.mode === "inline" ? read.viewCursor : undefined;
+    let cursor: string | null | undefined;
     do {
       const page: z.infer<typeof pageSchema> = await host.request(
         "view/page",
@@ -125,7 +137,12 @@ export async function readStoredSessionHistory(input: {
       }
       cursor = gapAfter ?? page.nextCursor;
     } while (cursor !== null);
-    return { viewCursor: read.viewCursor, rows };
+    const revalidated = await host.request(
+      "session/read",
+      { sessionId: saved.sessionId },
+      sessionReadSchema,
+    );
+    return { viewCursor: revalidated.viewCursor, rows };
   } finally {
     await host.close();
   }

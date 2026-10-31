@@ -77,8 +77,9 @@ async function harness(
   async function wait(
     predicate: (event: ProviderEvent) => boolean,
     from = 0,
+    timeoutMs = 5000,
   ): Promise<ProviderEvent> {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const event = events.slice(from).find(predicate);
       if (event) return event;
@@ -1816,7 +1817,6 @@ test("session.read_history serves stored user, assistant, and tool rows without 
   const methods = log.filter((entry) => entry.method).map((entry) => entry.method);
   expect(methods).toContain("initialize");
   expect(methods).toContain("session/read");
-  expect(methods).toContain("view/page");
   const readCall = log.find((entry) => entry.method === "session/read");
   expect(readCall.params).toMatchObject({ excludeItems: false });
   for (const forbidden of [
@@ -1831,10 +1831,249 @@ test("session.read_history serves stored user, assistant, and tool rows without 
     expect(methods).not.toContain(forbidden);
   }
   // The reader host is closed by the read itself: one spawn, one exit, no linger.
+  // Inline is a complete point-in-time snapshot: exactly one session/read,
+  // no view/page suffix walk, and the returned cursor is the read's own.
   const starts = log.filter((entry) => entry.event === "hostStarted");
   const closes = log.filter((entry) => entry.event === "hostClosed");
   expect(starts).toHaveLength(1);
   expect(closes).toHaveLength(1);
+  expect(methods.filter((method) => method === "session/read")).toHaveLength(1);
+  expect(methods).not.toContain("view/page");
+  expect(items.map((item) => item.type)).toEqual([
+    "user_message",
+    "tool_call",
+    "tool_call",
+    "tool_call",
+    "assistant_message",
+  ]);
+});
+
+test("closing during a delayed read stops the read host and awaits it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-close-"));
+  roots.push(dir);
+  const historyPath = path.join(dir, "native-history.ndjson");
+  const seed = await harness("tools-edit", { MUSE_TEST_HISTORY: historyPath });
+  await seed.open();
+  await seed.prompt();
+  await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const saved = seed.events.findLast((event) => event.type === "session.persistence");
+  if (!saved || saved.type !== "session.persistence") {
+    throw new Error("Expected session persistence");
+  }
+  await seed.connection.close();
+
+  const reader = await harness("tools-edit", {
+    MUSE_TEST_READ_HISTORY: historyPath,
+    MUSE_TEST_READ_DELAY_MS: "2000",
+  });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: saved.persistence,
+  });
+  // Wait until the read host is up and initializing. The native session/read
+  // itself stays delayed, so closing now always lands mid-read: receipt and
+  // response share one delayed fake frame, which can never separate them.
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const seen = await reader.recorded();
+    if (seen.some((entry) => entry.method === "initialize")) break;
+    if (Date.now() > deadline) throw new Error("Delayed read never started");
+    await delay(10);
+  }
+  await reader.connection.close();
+  // Close returned only after the read host was stopped: no history event
+  // escapes a closed connection, and the host exited exactly once without
+  // ever attempting a resume.
+  expect(reader.events.some((event) => event.type === "session.history")).toBe(false);
+  const log = await reader.recorded();
+  expect(log.filter((entry) => entry.event === "hostStarted")).toHaveLength(1);
+  expect(log.filter((entry) => entry.event === "hostClosed")).toHaveLength(1);
+  expect(log.filter((entry) => entry.method === "session/resume")).toEqual([]);
+});
+
+test("a failing read still closes its read host", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-fail-"));
+  roots.push(dir);
+  const historyPath = path.join(dir, "native-history.ndjson");
+  const seed = await harness("tools-edit", { MUSE_TEST_HISTORY: historyPath });
+  await seed.open();
+  await seed.prompt();
+  await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const saved = seed.events.findLast((event) => event.type === "session.persistence");
+  if (!saved || saved.type !== "session.persistence") {
+    throw new Error("Expected session persistence");
+  }
+  await seed.connection.close();
+
+  const reader = await harness("tools-edit", {
+    MUSE_TEST_READ_HISTORY: historyPath,
+    MUSE_TEST_READ_ERROR: "1",
+  });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-bad",
+    persistence: saved.persistence,
+  });
+  const failed = await reader.wait(
+    (event) => event.type === "request.failed" && event.requestId === "read-bad",
+  );
+  expect(failed.type).toBe("request.failed");
+  const log = await reader.recorded();
+  expect(log.filter((entry) => entry.event === "hostStarted")).toHaveLength(1);
+  expect(log.filter((entry) => entry.event === "hostClosed")).toHaveLength(1);
+  await reader.connection.close();
+});
+
+test("a paged fallback serves appended rows under the revalidated revision", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-appended-"));
+  roots.push(dir);
+  const pagesPath = path.join(dir, "pages.ndjson");
+  await writeFile(
+    pagesPath,
+    JSON.stringify({
+      events: [
+        {
+          method: "item/completed",
+          params: {
+            item: {
+              itemId: "a1",
+              revision: 1,
+              kind: "userMessage",
+              status: "completed",
+              message: "appended hello",
+              text: "appended hello",
+              turnId: "t9",
+              recordedAt: "2026-10-31T00:00:01.000Z",
+            },
+          },
+        },
+      ],
+      nextCursor: null,
+    }) + "\n",
+  );
+  const reader = await harness("tools-edit", {
+    MUSE_TEST_READ_MODE: "none",
+    MUSE_TEST_READ_CURSOR: "v:read:1",
+    MUSE_TEST_READ_FINAL_CURSOR: "v:read:2",
+    MUSE_TEST_READ_PAGES: pagesPath,
+  });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: { version: 1, data: { sessionId: "stored-1" } },
+  });
+  const history = await reader.wait((event) => event.type === "session.history");
+  if (history.type !== "session.history") throw new Error("Expected session history");
+  // The appended row is served, but under the revalidated revision, never
+  // the stale read cursor.
+  expect(history.viewCursor).toBe("v:read:2");
+  expect(history.rows).toHaveLength(1);
+  expect(history.rows[0]?.item).toMatchObject({
+    type: "user_message",
+    text: "appended hello",
+  });
+  expect(history.rows[0]?.timestamp).toBe("2026-10-31T00:00:01.000Z");
+  expect(history.rows[0]?.turnId).toBe("t9");
+  const log = await reader.recorded();
+  const reads = log.filter((entry) => entry.method === "session/read");
+  expect(reads).toHaveLength(2);
+  expect(reads[0]?.params).toMatchObject({ excludeItems: false });
+  expect(reads[1]?.params).not.toHaveProperty("excludeItems");
+  expect(log.filter((entry) => entry.method === "view/page")).toHaveLength(1);
+  for (const forbidden of ["session/resume", "session/start", "view/subscribe", "turn/start"]) {
+    expect(log.filter((entry) => entry.method === forbidden)).toEqual([]);
+  }
+  await reader.connection.close();
+});
+
+test("a paged fallback walks multiple pages with exact content, order, and epoch", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-pages-"));
+  roots.push(dir);
+  const pagesPath = path.join(dir, "pages.ndjson");
+  const user = {
+    itemId: "u1",
+    revision: 1,
+    kind: "userMessage",
+    status: "completed",
+    message: "first",
+    text: "first",
+    turnId: "t1",
+    recordedAt: "2026-10-31T00:00:01.000Z",
+  };
+  const assistant = {
+    itemId: "a1",
+    revision: 1,
+    kind: "agentMessage",
+    status: "completed",
+    message: "second",
+    text: "second",
+    turnId: "t1",
+    recordedAt: "2026-10-31T00:00:02.000Z",
+  };
+  const tool = {
+    itemId: "t1",
+    revision: 1,
+    kind: "toolCall",
+    status: "completed",
+    tool: "read",
+    callId: "c1",
+    args: "{}",
+    message: "",
+    text: "",
+    turnId: "t1",
+    recordedAt: "2026-10-31T00:00:03.000Z",
+  };
+  const page = (events: unknown[], nextCursor: string | null) => ({ events, nextCursor });
+  await writeFile(
+    pagesPath,
+    [
+      page(
+        [
+          { method: "item/completed", params: { item: user } },
+          { method: "item/completed", params: { item: assistant } },
+        ],
+        "c1",
+      ),
+      page([{ method: "item/completed", params: { item: tool } }], null),
+    ]
+      .map((line) => JSON.stringify(line))
+      .join("\n") + "\n",
+  );
+  const reader = await harness("tools-edit", {
+    MUSE_TEST_READ_MODE: "none",
+    MUSE_TEST_READ_CURSOR: "v:read:1",
+    MUSE_TEST_READ_FINAL_CURSOR: "v:read:3",
+    MUSE_TEST_READ_PAGES: pagesPath,
+  });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: { version: 1, data: { sessionId: "stored-1" } },
+  });
+  const history = await reader.wait((event) => event.type === "session.history");
+  if (history.type !== "session.history") throw new Error("Expected session history");
+  expect(history.viewCursor).toBe("v:read:3");
+  expect(history.rows.map((row) => row.item.type)).toEqual([
+    "user_message",
+    "assistant_message",
+    "tool_call",
+  ]);
+  expect(history.rows[0]?.item).toMatchObject({ type: "user_message", text: "first" });
+  expect(history.rows[1]?.item).toMatchObject({ type: "assistant_message", text: "second" });
+  expect(history.rows[2]?.item).toMatchObject({ type: "tool_call", name: "read" });
+  expect(history.rows.map((row) => row.timestamp)).toEqual([
+    "2026-10-31T00:00:01.000Z",
+    "2026-10-31T00:00:02.000Z",
+    "2026-10-31T00:00:03.000Z",
+  ]);
+  expect(history.rows.map((row) => row.turnId)).toEqual(["t1", "t1", "t1"]);
+  const log = await reader.recorded();
+  const pages = log.filter((entry) => entry.method === "view/page");
+  expect(pages).toHaveLength(2);
+  expect(pages[0]?.params).not.toHaveProperty("cursor");
+  expect(pages[1]?.params).toMatchObject({ cursor: "c1" });
+  await reader.connection.close();
 });
 
 // --- Real native-store acceptance (pa-zuuvf) ---
@@ -1980,7 +2219,13 @@ test.skipIf(!REAL_MUSE_BIN)(
     const seed = await harness("unused", {}, undefined, launch);
     expect(await seed.open(undefined, "onRequest", null)).toMatchObject({ type: "session.ready" });
     await seed.prompt();
-    await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+    // A fresh isolated HOME makes the real host copy bundled skills on first
+    // start; allow the seed turn beyond the default 5s event deadline.
+    await seed.wait(
+      (event) => event.type === "session.turn" && event.state === "completed",
+      0,
+      30000,
+    );
     const saved = seed.events.findLast((event) => event.type === "session.persistence");
     if (!saved || saved.type !== "session.persistence") {
       throw new Error("Expected session persistence");
