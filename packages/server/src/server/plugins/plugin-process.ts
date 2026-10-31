@@ -330,6 +330,13 @@ export function createPluginWorker(options: {
       registerSettings,
       on: hooks.on,
       before: hooks.before,
+      // Provenance + fallback-safety contract (pa-vtgw9). Plugins that
+      // need source-owned observation age or a honored skipNativeFallback
+      // must check these flags and stay dormant when theirs is absent.
+      daemonCapabilities: {
+        usageObservedAt: true,
+        usageSkipNativeFallback: true,
+      },
     });
     if (typeof contributedCleanup !== "function") {
       throw new Error("Plugin contribution must return a cleanup function");
@@ -345,6 +352,7 @@ export function createPluginWorker(options: {
             ? await readPluginProviderIcon(message.pluginDirectory, source.icon)
             : undefined,
           replaces: source.replaces,
+          skipNativeFallback: source.skipNativeFallback,
         })),
     );
     send({

@@ -302,8 +302,8 @@ test("a plugin takeover replaces the codex card and falls back when it throws", 
     `import { z } from 'zod';
 export default function contribute(server) {
   server.registerUsageSource({ id: 'codex', label: 'Codex', input: z.object({}),
-    discover: async () => [{ key: 'shared', input: {} }],
-    fetch: async () => ({ status: 'available', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] }),
+    discover: async () => [{ key: 'shared', identity: 'test:shared', input: {} }],
+    fetch: async () => ({ status: 'available', accountIdentity: 'test:shared', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] }),
   });
   return () => {};
 }`,
@@ -323,7 +323,7 @@ export default function contribute(server) {
   server.registerUsageSource({
     id: 'takeover', label: 'Takeover', input: z.object({ fail: z.boolean() }),
     replaces: ['codex'],
-    discover: async () => [{ key: 'shared', input: { fail: existsSync(flag) } }],
+    discover: async () => [{ key: 'shared', identity: 'test:shared', input: { fail: existsSync(flag) } }],
     fetch: async (input) => {
       if (input.fail) throw new Error('proxy down');
       return { status: 'available', windows: [{ id: 'session', label: 'Override', usedPct: 42 }] };
@@ -361,6 +361,100 @@ export default function contribute(server) {
     await rm(flag, { force: true });
     const recovered = (await client.listUsageReports({ forceRefresh: true })).reports;
     expect(recovered[0]?.report.windows?.[0]).toMatchObject({ usedPct: 42 });
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("an opted-out plugin takeover never calls the native source", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "usage-optout-"));
+  const flag = path.join(root, "fail");
+  const discoveredMarker = path.join(root, "native-discovered");
+  const fetchedMarker = path.join(root, "native-fetched");
+  const plugins = path.join(root, "plugins");
+  const builtin = path.join(plugins, "codex-usage-source");
+  await mkdir(builtin, { recursive: true });
+  await writeFile(
+    path.join(builtin, "paseo-plugin.json"),
+    JSON.stringify({ id: "codex-usage-source", requirements: { paseo: ">=0.9.2" } }),
+  );
+  await writeFile(
+    path.join(builtin, "index.server.ts"),
+    `import { z } from 'zod';
+import { appendFileSync } from 'node:fs';
+const discovered = ${JSON.stringify(discoveredMarker)};
+const fetched = ${JSON.stringify(fetchedMarker)};
+export default function contribute(server) {
+  server.registerUsageSource({ id: 'codex', label: 'Codex', input: z.object({}),
+    discover: async () => {
+      appendFileSync(discovered, 'x');
+      return [{ key: 'native', input: {} }];
+    },
+    fetch: async () => {
+      appendFileSync(fetched, 'x');
+      return { status: 'available', windows: [{ id: 'builtin', label: 'Builtin', usedPct: 11 }] };
+    },
+  });
+  return () => {};
+}`,
+  );
+  const takeover = path.join(root, "takeover");
+  await mkdir(takeover, { recursive: true });
+  await writeFile(
+    path.join(takeover, "paseo-plugin.json"),
+    JSON.stringify({ id: "takeover", requirements: { paseo: ">=0.9.2" } }),
+  );
+  await writeFile(
+    path.join(takeover, "index.server.ts"),
+    `import { z } from 'zod';
+import { existsSync } from 'node:fs';
+const flag = ${JSON.stringify(flag)};
+export default function contribute(server) {
+  server.registerUsageSource({
+    id: 'takeover', label: 'Takeover', input: z.object({ fail: z.boolean() }),
+    replaces: ['codex'],
+    skipNativeFallback: true,
+    discover: async () => [{ key: 'cpa', input: { fail: existsSync(flag) } }],
+    fetch: async (input) => {
+      if (input.fail) throw new Error('proxy down');
+      return { status: 'available', windows: [{ id: 'session', label: 'Override', usedPct: 42 }] };
+    },
+  });
+  return () => {};
+}`,
+  );
+  const daemon = await createTestPaseoDaemon({
+    daemonVersion: "0.9.2",
+    pluginsEnabled: false,
+    builtinPlugins: new BuiltinPluginLoader(plugins, ["codex-usage-source"]),
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.9.2" });
+  const { existsSync } = await import("node:fs");
+  try {
+    await client.connect();
+    expect((await client.listUsageReports()).reports.map((entry) => entry.id)).toEqual([
+      "codex:native",
+    ]);
+    await client.patchDaemonConfig({ pluginsEnabled: true });
+    await client.installDirectoryPlugin(takeover, "takeover");
+    await rm(discoveredMarker, { force: true });
+    await rm(fetchedMarker, { force: true });
+    const taken = (await client.listUsageReports({ forceRefresh: true })).reports;
+    // The mismatched native account never serves the taken-over card, and
+    // the opted-out takeover never calls the native source at all.
+    expect(taken.map((entry) => entry.id)).toEqual(["codex:cpa"]);
+    expect(taken[0]?.report.windows?.[0]).toMatchObject({ label: "Override", usedPct: 42 });
+    expect(existsSync(discoveredMarker)).toBe(false);
+    expect(existsSync(fetchedMarker)).toBe(false);
+    await writeFile(flag, "");
+    const failed = (await client.listUsageReports({ forceRefresh: true })).reports;
+    expect(failed.map((entry) => entry.id)).toEqual(["codex:cpa"]);
+    expect(failed[0]?.report).toMatchObject({ status: "error", error: "proxy down" });
+    expect(JSON.stringify(failed[0])).not.toContain("Builtin");
+    expect(existsSync(discoveredMarker)).toBe(false);
+    expect(existsSync(fetchedMarker)).toBe(false);
   } finally {
     await client.close();
     await daemon.close();

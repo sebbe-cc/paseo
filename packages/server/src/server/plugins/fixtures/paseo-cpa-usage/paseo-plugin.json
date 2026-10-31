@@ -1,0 +1,7 @@
+{
+	"id": "paseo-cpa-usage",
+	"description": "Fills Paseo's native plan usage cards with real CLIProxyAPI subscription quotas per account (Claude, Codex).",
+	"requirements": {
+		"paseo": ">=0.14.0 <0.15.0"
+	}
+}

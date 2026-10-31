@@ -6466,6 +6466,24 @@ export const ProviderUsageListResponseMessageSchema = z.object({
   }),
 });
 
+/**
+ * Source-owned historical quota snapshot (pa-vtgw9 R1). A failing source
+ * whose backend still holds a fresh validated vendor observation may attach
+ * its last-known quota here so the card can show the error WITH its recent
+ * history — including after a daemon/plugin restart, when the registry has
+ * no local last-successful snapshot. The current error status always stays
+ * visible; history is never rendered as live quota. The registry and app
+ * enforce the same observation-age ceiling on `observedAt` as for live
+ * reports, and reject future timestamps. Generic and additive: any source
+ * may attach it, and older readers ignore it.
+ */
+export const UsageHistorySnapshotSchema = z.object({
+  observedAt: z.iso.datetime(),
+  planLabel: z.string().optional(),
+  windows: z.array(ProviderUsageWindowSchema),
+  balances: z.array(ProviderUsageBalanceSchema).optional(),
+  details: z.array(ProviderUsageDetailSchema).optional(),
+});
 export const UsageProblemSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("expired"),
@@ -6485,11 +6503,32 @@ const AvailableUsageReportSchema = z.object({
   windows: z.array(ProviderUsageWindowSchema),
   balances: z.array(ProviderUsageBalanceSchema).optional(),
   details: z.array(ProviderUsageDetailSchema).optional(),
+  // Verified account identity whose credentials were read for this response
+  // (`vendor:rest`). The usage registry only serves a taken-over card from a
+  // native login whose attested identity equals the expected one; anything
+  // else fails closed. Optional: older sources omit it.
+  accountIdentity: z.string().optional(),
+  // Last successful validated vendor observation (RFC3339 UTC), owned by the
+  // source — never poll time. The registry and app enforce the 1800 s
+  // ceiling on this timestamp, not on fetch/poll time, so repeated
+  // failures can never reintroduce older quota or stamp a new observation.
+  // Optional: older sources omit it and keep poll-time semantics.
+  observedAt: z.iso.datetime().optional(),
+});
+export const UnavailableUsageReportSchema = z.object({
+  status: z.literal("unavailable"),
+  problem: UsageProblemSchema,
+  history: UsageHistorySnapshotSchema.optional(),
+});
+export const ErrorUsageReportSchema = z.object({
+  status: z.literal("error"),
+  error: z.string(),
+  history: UsageHistorySnapshotSchema.optional(),
 });
 export const UsageReportSchema = z.discriminatedUnion("status", [
   AvailableUsageReportSchema,
-  z.object({ status: z.literal("unavailable"), problem: UsageProblemSchema }),
-  z.object({ status: z.literal("error"), error: z.string() }),
+  UnavailableUsageReportSchema,
+  ErrorUsageReportSchema,
 ]);
 export const UsageReportEntrySchema = z.object({
   id: z.string(),
@@ -6509,8 +6548,8 @@ export const UsageReportEntrySchema = z.object({
       z.object({
         harness: z.string(),
         report: z.discriminatedUnion("status", [
-          z.object({ status: z.literal("unavailable"), problem: UsageProblemSchema }),
-          z.object({ status: z.literal("error"), error: z.string() }),
+          UnavailableUsageReportSchema,
+          ErrorUsageReportSchema,
         ]),
       }),
     )
