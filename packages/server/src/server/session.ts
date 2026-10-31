@@ -7841,19 +7841,49 @@ export class Session {
       : undefined;
 
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
+      // The guaranteed non-reopening stored path is Muse-only and is chosen
+      // in advance by provider capability, never by catching a failed read.
+      // Other providers keep their previous legacy path below. A Muse read
+      // error propagates to the caller and never falls through to a resume:
+      // the stored branch lives before ensureAgentLoaded so a deleted
+      // workspace never triggers a provider spawn for a pure history read.
+      const stored = await this.agentManager.hasStoredArchivedHistory(msg.agentId);
+      const archived = stored
+        ? await this.agentManager.fetchArchivedTimeline(msg.agentId, {
+            direction,
+            cursor,
+            limit: msg.limit,
+            wholeTurns: msg.wholeTurns,
+          })
+        : null;
+      if (!archived && stored) {
+        // Still archived and capable, but the read lost a generation race:
+        // fail loudly instead of resuming. Records that left the archived
+        // state mid-read take the legacy path below.
+        if (await this.agentManager.hasStoredArchivedHistory(msg.agentId)) {
+          throw new Error("History changed; fetch again");
+        }
+      }
+      const snapshot = archived
+        ? null
+        : await ensureAgentLoaded(msg.agentId, {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.sessionLogger,
+          });
+      const agentPayload = archived
+        ? this.buildStoredAgentPayload(archived.record)
+        : await this.buildAgentPayload(snapshot!);
 
-      const fetchedControlTimeline = this.agentManager.fetchTimeline(msg.agentId, {
-        direction,
-        cursor,
-        limit: msg.limit,
-        wholeTurns: msg.wholeTurns,
-      });
+      const fetchedControlTimeline = archived
+        ? archived.result
+        : this.agentManager.fetchTimeline(msg.agentId, {
+            direction,
+            cursor,
+            limit: msg.limit,
+            wholeTurns: msg.wholeTurns,
+          });
+      const provider = archived ? archived.record.provider : snapshot!.provider;
       const selectedTimeline = {
         timeline: fetchedControlTimeline,
         entries: fetchedControlTimeline.rows,
@@ -7895,7 +7925,7 @@ export class Session {
             ...(msg.mergeWindow === true ? { mergeWindow: true } : {}),
             entries: entries.map((entry) => {
               const payloadEntry = {
-                provider: snapshot.provider,
+                provider,
                 item: entry.item,
                 timestamp: entry.timestamp,
                 seqStart: entry.seqStart,
@@ -7972,18 +8002,38 @@ export class Session {
     source?: object,
   ): Promise<void> {
     try {
-      await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const rows = await this.agentManager.getTimelineRows(msg.agentId);
-      const { epoch } = this.agentManager.fetchTimeline(msg.agentId, {
-        direction: "tail",
-        limit: 1,
-      });
+      // Same Muse-only routing as the fetch branch: stored search for
+      // capable providers, previous legacy path for the rest, no
+      // catch-driven fallback between them.
+      const stored = await this.agentManager.hasStoredArchivedHistory(msg.agentId);
+      const archived = stored ? await this.agentManager.getArchivedTimelineRows(msg.agentId) : null;
+      let rows;
+      let epoch;
+      if (archived) {
+        rows = archived.rows;
+        epoch = archived.epoch;
+      } else {
+        if (stored && (await this.agentManager.hasStoredArchivedHistory(msg.agentId))) {
+          throw new Error("History changed; search again");
+        }
+        await ensureAgentLoaded(msg.agentId, {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.sessionLogger,
+        });
+        rows = await this.agentManager.getTimelineRows(msg.agentId);
+        epoch = this.agentManager.fetchTimeline(msg.agentId, {
+          direction: "tail",
+          limit: 1,
+        }).epoch;
+      }
       const result = await searchTimeline({ rows, query: msg.query, cursor: msg.cursor });
-      if (
+      if (archived) {
+        const reloaded = await this.agentManager.getArchivedTimelineRows(msg.agentId);
+        if (!reloaded || reloaded.epoch !== epoch) {
+          throw new Error("History changed; search again");
+        }
+      } else if (
         this.agentManager.fetchTimeline(msg.agentId, { direction: "tail", limit: 1 }).epoch !==
         epoch
       ) {

@@ -38,6 +38,7 @@ import type {
   AgentPermissionResponse,
   AgentPersistenceHandle,
   AgentPromptInput,
+  AgentResumeSessionOptions,
   AgentRunOptions,
   AgentRunResult,
   AgentSession,
@@ -52,6 +53,8 @@ import type {
   ImportProviderSessionInput,
   ListImportableSessionsOptions,
   ProviderCatalog,
+  ProviderHistoryRead,
+  ProviderHistoryRow,
   ProviderRefreshContext,
   SteerActiveTurnOptions,
   SteerResult,
@@ -115,13 +118,21 @@ function isProviderRequestReply(
   event: ProviderEvent,
 ): event is Extract<
   ProviderEvent,
-  { type: "request.completed" | "catalog" | "sessions" | "session.can_stop_runtime" }
+  {
+    type:
+      | "request.completed"
+      | "catalog"
+      | "sessions"
+      | "session.can_stop_runtime"
+      | "session.history";
+  }
 > {
   return (
     event.type === "request.completed" ||
     event.type === "catalog" ||
     event.type === "sessions" ||
-    event.type === "session.can_stop_runtime"
+    event.type === "session.can_stop_runtime" ||
+    event.type === "session.history"
   );
 }
 
@@ -275,6 +286,23 @@ class ProviderRuntime {
       this.providerSessions.delete(input.sessionId);
       throw error;
     }
+  }
+
+  async readHistory(
+    persistence: ProviderPersistence,
+  ): Promise<Extract<ProviderEvent, { type: "session.history" }>> {
+    const connection = await this.getConnection();
+    if (!connection.capabilities.includes("session.read_history")) {
+      throw new Error("Provider does not support session.read_history");
+    }
+    const event = await this.complete({
+      type: "session.read_history",
+      requestId: randomUUID(),
+      persistence,
+    });
+    if (event.type !== "session.history")
+      throw new Error("Provider returned an invalid history response");
+    return event;
   }
 
   async archive(persistence: ProviderPersistence): Promise<void> {
@@ -572,7 +600,14 @@ class ProviderRuntime {
   private finishRequest(
     event: Extract<
       ProviderEvent,
-      { type: "request.completed" | "catalog" | "sessions" | "session.can_stop_runtime" }
+      {
+        type:
+          | "request.completed"
+          | "catalog"
+          | "sessions"
+          | "session.can_stop_runtime"
+          | "session.history";
+      }
     >,
   ): void {
     const request = this.requests.get(event.requestId);
@@ -973,6 +1008,7 @@ class PluginAgentClient implements AgentClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
+    _options?: AgentResumeSessionOptions,
   ): Promise<AgentSession> {
     if (!overrides?.cwd) {
       throw new Error(`Plugin provider '${this.provider}' requires cwd to resume a session`);
@@ -984,6 +1020,22 @@ class PluginAgentClient implements AgentClient {
       history: "replay",
       persist: true,
     });
+  }
+
+  async readHistory(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead> {
+    const event = await this.runtime.readHistory(decodePersistence(handle));
+    const snapshots = new Map<string, ProviderTimelineItem>();
+    const rows: ProviderHistoryRow[] = [];
+    for (const row of event.rows) {
+      const item = mapTimelineItem(row.item, snapshots, undefined);
+      if (!item) continue;
+      rows.push({
+        item,
+        ...(row.timestamp !== undefined ? { timestamp: row.timestamp } : {}),
+        ...(row.turnId !== undefined ? { turnId: row.turnId } : {}),
+      });
+    }
+    return { viewCursor: event.viewCursor, rows };
   }
 
   async fetchCatalog(

@@ -44,6 +44,7 @@ if (process.env.MUSE_TEST_REQUESTS)
 const catalogRows = readFixture("catalog-controls");
 const replacements = new Map();
 const counts = new Map();
+const controlCounts = new Map();
 const receipts = new Set();
 let liveTurnId;
 const lines = createInterface({ input: process.stdin });
@@ -54,7 +55,84 @@ function receive(line) {
     setTimeout(() => receiveFrame(line), Number(process.env.MUSE_TEST_INITIALIZE_DELAY_MS));
     return;
   }
+  if (
+    (parsed.method === "session/read" || parsed.method === "view/page") &&
+    process.env.MUSE_TEST_READ_DELAY_MS
+  ) {
+    setTimeout(() => receiveFrame(line), Number(process.env.MUSE_TEST_READ_DELAY_MS));
+    return;
+  }
   receiveFrame(line);
+}
+function readHistoryResponse(frame) {
+  const n = controlCounts.get("session/read") || 0;
+  controlCounts.set("session/read", n + 1);
+  if (n === 0 && process.env.MUSE_TEST_READ_ERROR) {
+    rpcError(frame, -32020, "sessionNotFound", "missing");
+    return true;
+  }
+  const result = responseFor(readFixture("phase3-child-read"), "session/read");
+  result.session.sessionId = frame.params.sessionId;
+  // The first read serves the stored snapshot; later reads revalidate the
+  // revision metadata-only, like a real host serves excludeItems reads.
+  const mode = n === 0 ? process.env.MUSE_TEST_READ_MODE || "inline" : "none";
+  const cursor =
+    (n === 0 ? process.env.MUSE_TEST_READ_CURSOR : process.env.MUSE_TEST_READ_FINAL_CURSOR) ||
+    result.viewCursor;
+  result.viewCursor = cursor;
+  result.history = {
+    mode,
+    items:
+      mode === "inline"
+        ? readFileSync(process.env.MUSE_TEST_READ_HISTORY, "utf8")
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line))
+        : null,
+    snapshot: null,
+  };
+  respond(frame, result);
+  return true;
+}
+function scriptedPage(frame) {
+  // Scripted pages for read-revision tests: each ndjson line is one
+  // {events, nextCursor} page served in call order; the last repeats.
+  // Event params without a sessionId are stamped with the request's.
+  const pages = readFileSync(process.env.MUSE_TEST_READ_PAGES, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const n = controlCounts.get("view/page") || 0;
+  controlCounts.set("view/page", n + 1);
+  const result = pages[Math.min(n, pages.length - 1)];
+  for (const event of result.events) {
+    if (event.params && event.params.sessionId === undefined) {
+      event.params.sessionId = frame.params.sessionId;
+    }
+  }
+  return result;
+}
+function initializeProbe(frame) {
+  if (frame.method === "initialize" && process.env.MUSE_TEST_EXIT) {
+    process.stderr.write("diagnostic tail, not protocol\n");
+    process.exit(Number(process.env.MUSE_TEST_EXIT));
+  }
+  if (frame.method === "initialize" && process.env.MUSE_TEST_NULL_ERROR_ID) {
+    send({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Cannot recover request id", data: { kind: "parseError" } },
+    });
+    return true;
+  }
+  return false;
+}
+function usageResponse() {
+  return process.env.MUSE_TEST_USAGE
+    ? JSON.parse(process.env.MUSE_TEST_USAGE)
+    : responseFor(catalogRows, "usage/read");
 }
 function receiveFrame(line) {
   const frame = JSON.parse(line);
@@ -96,6 +174,12 @@ function receiveFrame(line) {
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
 function controlResponse(frame) {
+  if (
+    frame.method === "session/read" &&
+    (process.env.MUSE_TEST_READ_HISTORY || process.env.MUSE_TEST_READ_MODE)
+  ) {
+    return readHistoryResponse(frame);
+  }
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;
@@ -113,18 +197,7 @@ function controlResponse(frame) {
     return true;
   }
   if (frame.method === "initialized") return true;
-  if (frame.method === "initialize" && process.env.MUSE_TEST_EXIT) {
-    process.stderr.write("diagnostic tail, not protocol\n");
-    process.exit(Number(process.env.MUSE_TEST_EXIT));
-  }
-  if (frame.method === "initialize" && process.env.MUSE_TEST_NULL_ERROR_ID) {
-    send({
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32700, message: "Cannot recover request id", data: { kind: "parseError" } },
-    });
-    return true;
-  }
+  if (initializeProbe(frame)) return true;
   if (process.env.MUSE_TEST_HANG === frame.method) return true;
   if (frame.method === "session/setReasoningEffort") {
     respond(frame, { status: "accepted", commandId: frame.params.commandId });
@@ -181,16 +254,17 @@ function gapPageResult(frame) {
 function parityResponse(frame) {
   if (workflowResponse(frame)) return true;
   if (frame.method === "view/page") {
+    if (process.env.MUSE_TEST_READ_PAGES) {
+      respond(frame, scriptedPage(frame));
+      return true;
+    }
     respond(frame, gapPageResult(frame));
     return true;
   }
   if (frame.method === "session/read" && sessionReadResponse(frame)) return true;
   if (frame.method === "turn/interrupt" && interruptCancelResponse(frame)) return true;
   if (frame.method === "usage/read") {
-    const result = process.env.MUSE_TEST_USAGE
-      ? JSON.parse(process.env.MUSE_TEST_USAGE)
-      : responseFor(catalogRows, "usage/read");
-    respond(frame, result);
+    respond(frame, usageResponse());
     return true;
   }
   if (frame.method === "session/list") {
