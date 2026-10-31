@@ -481,6 +481,35 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
   } satisfies ForwardedAgentSession;
 }
 
+function forwardOptionalHistoryMethods(
+  inner: AgentClient,
+): Pick<
+  AgentClient,
+  "archiveNativeSession" | "unarchiveNativeSession" | "readHistory" | "supportsStoredHistory"
+> {
+  const archiveNativeSession = inner.archiveNativeSession?.bind(inner);
+  const unarchiveNativeSession = inner.unarchiveNativeSession?.bind(inner);
+  const readHistory = inner.readHistory?.bind(inner);
+  const supportsStoredHistory = inner.supportsStoredHistory?.bind(inner);
+  return {
+    archiveNativeSession: archiveNativeSession
+      ? async (handle) => await archiveNativeSession({ ...handle, provider: inner.provider })
+      : undefined,
+    unarchiveNativeSession: unarchiveNativeSession
+      ? async (handle) => await unarchiveNativeSession({ ...handle, provider: inner.provider })
+      : undefined,
+    readHistory: readHistory
+      ? async (handle) => await readHistory({ ...handle, provider: inner.provider })
+      : undefined,
+    // A shared plugin client serves providers with and without the
+    // read-only capability: forward the negotiated probe so profiles of
+    // capable providers keep the stored path and the rest keep legacy.
+    supportsStoredHistory: supportsStoredHistory
+      ? async () => await supportsStoredHistory()
+      : undefined,
+  };
+}
+
 function wrapClientProvider(
   provider: AgentProvider,
   inner: AgentClient,
@@ -492,9 +521,6 @@ function wrapClientProvider(
   const listImportableSessions = inner.listImportableSessions?.bind(inner);
   const importSession = inner.importSession?.bind(inner);
   const listFeatures = inner.listFeatures?.bind(inner);
-  const archiveNativeSession = inner.archiveNativeSession?.bind(inner);
-  const unarchiveNativeSession = inner.unarchiveNativeSession?.bind(inner);
-  const readHistory = inner.readHistory?.bind(inner);
   const configuredModelIds = [...profileModels, ...additionalModels].map((model) => model.id);
 
   return {
@@ -602,15 +628,7 @@ function wrapClientProvider(
           };
         }
       : undefined,
-    archiveNativeSession: archiveNativeSession
-      ? async (handle) => await archiveNativeSession({ ...handle, provider: inner.provider })
-      : undefined,
-    unarchiveNativeSession: unarchiveNativeSession
-      ? async (handle) => await unarchiveNativeSession({ ...handle, provider: inner.provider })
-      : undefined,
-    readHistory: readHistory
-      ? async (handle) => await readHistory({ ...handle, provider: inner.provider })
-      : undefined,
+    ...forwardOptionalHistoryMethods(inner),
     getCatalogCacheKey: inner.getCatalogCacheKey?.bind(inner),
     isAvailable: (signal, options) => inner.isAvailable(signal, options),
     getDiagnostic: inner.getDiagnostic?.bind(inner),

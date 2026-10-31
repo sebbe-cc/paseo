@@ -98,10 +98,21 @@ function readHistoryResponse(frame) {
   result.session.sessionId = frame.params.sessionId;
   // The first read serves the stored snapshot; later reads revalidate the
   // revision metadata-only, like a real host serves excludeItems reads.
+  // MUSE_TEST_READ_CURSORS overrides every read's cursor in call order
+  // (last repeats) to script an interleaved writer between attempts.
   const mode = n === 0 ? process.env.MUSE_TEST_READ_MODE || "inline" : "none";
-  const cursor =
-    (n === 0 ? process.env.MUSE_TEST_READ_CURSOR : process.env.MUSE_TEST_READ_FINAL_CURSOR) ||
-    result.viewCursor;
+  const scripted = (process.env.MUSE_TEST_READ_CURSORS || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  let cursor = result.viewCursor;
+  if (scripted.length > 0) {
+    cursor = scripted[Math.min(n, scripted.length - 1)];
+  } else if (n === 0 && process.env.MUSE_TEST_READ_CURSOR) {
+    cursor = process.env.MUSE_TEST_READ_CURSOR;
+  } else if (n > 0 && process.env.MUSE_TEST_READ_FINAL_CURSOR) {
+    cursor = process.env.MUSE_TEST_READ_FINAL_CURSOR;
+  }
   result.viewCursor = cursor;
   result.history = {
     mode,
