@@ -14,7 +14,7 @@ import path from "node:path";
 import pino from "pino";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 
 import type { AgentSession, AgentSessionConfig, AgentStreamEvent } from "../../agent-sdk-types.js";
 import {
@@ -23,7 +23,15 @@ import {
   PiRpcAgentSession,
   transformPiModels,
 } from "./agent.js";
-import { FakePi } from "./test-utils/fake-pi.js";
+import { FakePi, type FakePiSession } from "./test-utils/fake-pi.js";
+
+function promptMessages(session: FakePiSession): string[] {
+  return session.prompts.map((prompt) => prompt.message);
+}
+
+function completedTurnEvents(events: AgentStreamEvent[]): AgentStreamEvent[] {
+  return events.filter((event) => event.type === "turn_completed");
+}
 import { createPiExtensionHost } from "./extensions/index.js";
 import { PiExtensionHost } from "./extensions/host.js";
 import type { PiModel, PiThinkingLevel } from "./rpc-types.js";
@@ -1180,9 +1188,44 @@ describe("PiRpcAgentSession", () => {
       { message: "/silent-search", imageCount: 0 },
       { message: "next request", imageCount: 0 },
     ]);
-    await expect(session.startTurn("overlapping request")).rejects.toThrow(
-      "A Pi turn is already active",
-    );
+    // The follow-up turn is still active: the next message waits its turn
+    // instead of throwing, and delivers when the turn ends.
+    const queued = await session.startTurn("overlapping request");
+    expect(queued.turnId).toBeTruthy();
+    fakeSession.finishTurn();
+    await vi.waitFor(() => {
+      expect(promptMessages(fakeSession)).toEqual([
+        "/silent-search",
+        "next request",
+        "overlapping request",
+      ]);
+    });
+  });
+
+  test("a process exit mid-turn fails the turn and the next messages still deliver", async () => {
+    const { pi, session } = await createSession();
+    onTestFinished(() => session.close());
+    const fakeSession = pi.latestSession();
+    const seen: AgentStreamEvent[] = [];
+    session.subscribe((event) => seen.push(event));
+
+    await session.startTurn("doomed");
+    fakeSession.emit({ type: "process_exit", error: "restart" });
+    await vi.waitFor(() => {
+      expect(seen).toContainEqual(expect.objectContaining({ type: "turn_failed" }));
+    });
+
+    for (const text of ["one", "two", "three"]) {
+      await session.startTurn(text);
+      await vi.waitFor(() => {
+        expect(promptMessages(fakeSession)).toContain(text);
+      });
+      fakeSession.finishTurn();
+    }
+    await vi.waitFor(() => {
+      expect(completedTurnEvents(seen)).toHaveLength(3);
+    });
+    expect(promptMessages(fakeSession)).toEqual(["doomed", "one", "two", "three"]);
   });
 
   test("treats Pi's aborted terminal response as cancellation after an interrupt", async () => {
@@ -3604,15 +3647,24 @@ test("pi runtime safety protects queued replies and runtime-owned activity", asy
   await expect(session.canStopRuntime!()).rejects.toThrow("Unable to prove idle");
 });
 
-test("reserves the Pi turn while an image prompt is materialized", async () => {
+test("queues a Pi prompt sent while an image prompt is materializing", async () => {
   const { pi, session } = await createSession();
   onTestFinished(() => session.close());
   const first = session.startTurn([
     { type: "image", data: ONE_BY_ONE_PNG_BASE64, mimeType: "image/png" },
   ]);
-  await expect(session.startTurn("overlapping prompt")).rejects.toThrow("already active");
-  await first;
+  // The image is still materializing, but the turn is already reserved: the
+  // overlapping prompt waits instead of throwing.
+  const queued = await session.startTurn("overlapping prompt");
+  const started = await first;
+  expect(queued.turnId).not.toBe(started.turnId);
   expect(pi.latestSession().prompts).toHaveLength(1);
+  // Finishing the first turn starts the queued message in order.
+  pi.latestSession().finishTurn();
+  await vi.waitFor(() => {
+    expect(pi.latestSession().prompts).toHaveLength(2);
+  });
+  expect(pi.latestSession().prompts[1]).toMatchObject({ message: "overlapping prompt" });
 });
 
 test("interrupting Pi during image conversion cancels the admitted turn and permits a follow-up", async () => {
