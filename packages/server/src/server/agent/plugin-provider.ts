@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import type { Logger } from "pino";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
@@ -38,6 +40,8 @@ import type {
   AgentPermissionResponse,
   AgentPersistenceHandle,
   AgentPromptInput,
+  AgentResumePurpose,
+  AgentResumeSessionOptions,
   AgentRunOptions,
   AgentRunResult,
   AgentSession,
@@ -973,12 +977,17 @@ class PluginAgentClient implements AgentClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
+    options?: AgentResumeSessionOptions,
   ): Promise<AgentSession> {
     if (!overrides?.cwd) {
       throw new Error(`Plugin provider '${this.provider}' requires cwd to resume a session`);
     }
     return await this.openSession({
-      config: { ...overrides, provider: this.provider, cwd: overrides.cwd },
+      config: {
+        ...overrides,
+        provider: this.provider,
+        cwd: await resolveResumeCwd(overrides.cwd, options?.purpose),
+      },
       launchContext,
       persistence: decodePersistence(handle),
       history: "replay",
@@ -1657,6 +1666,30 @@ function mapModel(
     thinkingOptions: thinkingOptions?.map((option) => Object.assign({}, option)),
     defaultThinkingOptionId: model.defaultThinkingOptionId ?? catalogDefaultThinkingOption,
   };
+}
+
+/**
+ * A history resume replays the provider's stored session without running a turn, so it
+ * must survive the workspace it ran in being archived and removed. When the recorded cwd
+ * is gone, the provider host process starts in a safe existing directory instead of the
+ * deleted one (a missing spawn cwd surfaces as ENOENT naming the provider binary).
+ * Interactive resumes keep failing loudly: the working directory of a live session is
+ * never recreated or silently swapped. The agent record keeps the original cwd; only
+ * the host process working directory is substituted.
+ */
+async function resolveResumeCwd(cwd: string, purpose?: AgentResumePurpose): Promise<string> {
+  if (purpose !== "history" || (await isUsableDirectory(cwd))) {
+    return cwd;
+  }
+  return tmpdir();
+}
+
+async function isUsableDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function mapSessionConfig(

@@ -321,6 +321,57 @@ describe("PluginAgentClientRegistry", () => {
     await agent.session?.close();
   });
 
+  test("history resume with a deleted cwd replays without the removed directory", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness();
+    const plugins = new PluginAgentClientRegistry(logger);
+    plugins.replace([harness.registration]);
+    const registry = buildProviderRegistry(logger, {
+      pluginProviders: plugins.definitions(),
+    });
+    const client = registry["plugin-direct"].createClient(logger);
+    const liveCwd = await mkdtemp(join(tmpdir(), "paseo-history-cwd-"));
+    try {
+      const seed = await client.createSession({ provider: "plugin-direct", cwd: liveCwd });
+      const handle = seed.describePersistence()!;
+      await seed.close();
+      // The archived workspace is gone: history must still replay, from a safe directory.
+      const deletedCwd = join(tmpdir(), "paseo-history-deleted-cwd");
+      await rm(deletedCwd, { recursive: true, force: true });
+      const resumed = await client.resumeSession(
+        handle,
+        { provider: "plugin-direct", cwd: deletedCwd },
+        undefined,
+        { purpose: "history" },
+      );
+      const historyOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
+      expect(historyOpen).toMatchObject({ history: "replay" });
+      expect(historyOpen.config.cwd).toBe(tmpdir());
+      await resumed.close();
+      // A live (interactive) resume keeps the recorded cwd untouched: refusing a missing
+      // working directory stays the caller's job, never a silent swap.
+      const interactive = await client.resumeSession(handle, {
+        provider: "plugin-direct",
+        cwd: deletedCwd,
+      });
+      const interactiveOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
+      expect(interactiveOpen.config.cwd).toBe(deletedCwd);
+      await interactive.close();
+      // History with an existing cwd is unchanged.
+      const existing = await client.resumeSession(
+        handle,
+        { provider: "plugin-direct", cwd: liveCwd },
+        undefined,
+        { purpose: "history" },
+      );
+      const existingOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
+      expect(existingOpen.config.cwd).toBe(liveCwd);
+      await existing.close();
+    } finally {
+      await rm(liveCwd, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     { options: { nested: { base: true, replace: "config" }, list: [1, 2], scalar: "config" } },
     { params: { nested: { base: true, replace: "config" }, list: [1, 2], scalar: "config" } },
