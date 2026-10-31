@@ -38,6 +38,7 @@ const CAPABILITIES = [
 ] as const;
 
 interface ProviderHarnessOptions {
+  id?: string;
   capabilities?: ProviderConnection["capabilities"];
   completeTurn?: boolean;
   openChildren?: (rootSessionId: string, emit: (event: ProviderEvent) => void) => void;
@@ -246,7 +247,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
   };
 
   const registration: ProviderRegistration = {
-    id: "plugin-direct",
+    id: options.id ?? "plugin-direct",
     label: "Plugin direct",
     async connect() {
       return connection;
@@ -425,6 +426,69 @@ describe("PluginAgentClientRegistry", () => {
     );
     expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
     expect(harness.inputs.some((input) => input.type === "session.read_history")).toBe(false);
+  });
+
+  test("stored routing follows the negotiated read_history capability", async () => {
+    const logger = createTestLogger();
+    const workdir = await mkdtemp(join(tmpdir(), "paseo-stored-capability-"));
+    try {
+      // The legacy harness advertises persistence without read_history,
+      // mirroring the Antigravity provider; the stored harness adds it.
+      const legacyHarness = createProviderHarness({ id: "plugin-legacy" });
+      const storedHarness = createProviderHarness({
+        id: "plugin-stored",
+        capabilities: [...CAPABILITIES, "session.read_history"],
+      });
+      const plugins = new PluginAgentClientRegistry(logger);
+      plugins.replace([legacyHarness.registration, storedHarness.registration]);
+      const registry = buildProviderRegistry(logger, {
+        pluginProviders: plugins.definitions(),
+      });
+      const storage = new AgentStorage(join(workdir, "agents"), logger);
+      const manager = new AgentManager({
+        logger,
+        clients: {
+          "plugin-legacy": registry["plugin-legacy"].createClient(logger),
+          "plugin-stored": registry["plugin-stored"].createClient(logger),
+        },
+        providerDefinitions: {
+          "plugin-legacy": registry["plugin-legacy"],
+          "plugin-stored": registry["plugin-stored"],
+        },
+        registry: storage,
+      });
+      const now = new Date().toISOString();
+      for (const [agentId, provider] of [
+        ["legacy-agent", "plugin-legacy"],
+        ["stored-agent", "plugin-stored"],
+      ] as const) {
+        await storage.upsert({
+          id: agentId,
+          provider,
+          cwd: join(workdir, "gone-workspace"),
+          createdAt: now,
+          updatedAt: now,
+          labels: {},
+          lastStatus: "closed",
+          config: null,
+          persistence: { provider, sessionId: "native-1" },
+          archivedAt: now,
+        });
+      }
+      // A real plugin client without the capability keeps the legacy
+      // archived route instead of failing stored reads as unsupported.
+      expect(await manager.hasStoredArchivedHistory("legacy-agent")).toBe(false);
+      // The capable provider takes the stored non-reopening path.
+      expect(await manager.hasStoredArchivedHistory("stored-agent")).toBe(true);
+      // Probing negotiates the connection but never issues a stored read
+      // or opens a session on either provider.
+      for (const harness of [legacyHarness, storedHarness]) {
+        expect(harness.inputs.some((input) => input.type === "session.read_history")).toBe(false);
+        expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
   });
 
   test("resume passes the recorded cwd through unchanged, even for history", async () => {

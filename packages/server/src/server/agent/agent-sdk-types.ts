@@ -851,6 +851,18 @@ export interface AgentClient {
    */
   readHistory?(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead>;
   /**
+   * Whether the stored non-reopening history path applies to this client
+   * right now. Shared clients that serve several providers with one method
+   * (e.g. every plugin provider through PluginAgentClient) must report the
+   * actually negotiated provider capability here: method presence alone
+   * would route providers without the read-only path into unsupported
+   * stored reads instead of their legacy archived route. Clients without
+   * this method are treated as stored-capable whenever `readHistory` is
+   * defined. A read error must still propagate and never fall back to a
+   * resume; only the pre-read routing decision uses this probe.
+   */
+  supportsStoredHistory?(): boolean | Promise<boolean>;
+  /**
    * Release any provider-owned resources held by this client (background
    * processes, sockets, cached subprocesses, etc.). Called when the daemon
    * shuts down. Must be idempotent.

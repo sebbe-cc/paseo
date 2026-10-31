@@ -1433,7 +1433,16 @@ export class AgentManager {
     const record = await this.registry?.get(agentId);
     if (!record || !record.archivedAt) return false;
     const client = this.clients.get(record.provider);
-    return typeof client?.readHistory === "function";
+    if (typeof client?.readHistory !== "function") return false;
+    // Shared plugin clients serve providers with and without the read-only
+    // capability: only route stored when the provider affirmatively
+    // supports it, so capability-less providers (e.g. Antigravity) keep
+    // their previous legacy archived route. Read errors still propagate
+    // and never fall back to a resume; only this pre-read probe decides.
+    if (typeof client.supportsStoredHistory === "function") {
+      return await client.supportsStoredHistory();
+    }
+    return true;
   }
 
   private async readArchivedHistory(

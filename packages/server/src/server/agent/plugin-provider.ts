@@ -204,6 +204,12 @@ class ProviderRuntime {
     return this.connection?.capabilities ?? [];
   }
 
+  /** Negotiated provider capabilities, establishing the connection first. */
+  async connectedCapabilities(): Promise<readonly string[]> {
+    const connection = await this.getConnection();
+    return connection.capabilities;
+  }
+
   get isClosed(): boolean {
     return this.closed;
   }
@@ -1020,6 +1026,21 @@ class PluginAgentClient implements AgentClient {
       history: "replay",
       persist: true,
     });
+  }
+
+  async supportsStoredHistory(): Promise<boolean> {
+    // This one method serves every plugin provider, but only some
+    // advertise session.read_history (Muse does; Antigravity does not).
+    // Report the negotiated capability so providers without the read-only
+    // path keep their legacy archived route instead of failing stored
+    // reads as unsupported. An unreadable provider answers false here and
+    // fails through the legacy path like before, never as a stored read.
+    try {
+      const capabilities = await this.runtime.connectedCapabilities();
+      return capabilities.includes("session.read_history");
+    } catch {
+      return false;
+    }
   }
 
   async readHistory(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead> {

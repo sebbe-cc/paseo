@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { UsageSourceRegistry } from "../../../packages/server/src/server/plugins/usage-sources/index.js";
 import { Usage as MuseUsage } from "../server/usage.js";
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -22,6 +22,11 @@ import type { UsageSourceRegistration } from "@getpaseo/plugin/server";
 import { execCommand } from "@getpaseo/plugin/server";
 import contribute from "../index.server.js";
 import { IDLE_MS } from "../server/idle-host.js";
+import { AgentManager } from "../../../packages/server/src/server/agent/agent-manager.js";
+import { AgentStorage } from "../../../packages/server/src/server/agent/agent-storage.js";
+import { PluginAgentClientRegistry } from "../../../packages/server/src/server/agent/plugin-provider.js";
+import { buildProviderRegistry } from "../../../packages/server/src/server/agent/provider-registry.js";
+import { createTestLogger } from "../../../packages/server/src/test-utils/test-logger.js";
 
 const connections: ProviderConnection[] = [];
 const roots: string[] = [];
@@ -97,13 +102,14 @@ async function harness(
     persistence?: Extract<ProviderInput, { type: "session.open" }>["persistence"],
     mode = "onRequest",
     model: string | null = "meta/muse-spark-1.3",
+    cwd = root,
   ) {
     await send({
       type: "session.open",
       requestId: "open",
       sessionId: "paseo-session",
       config: {
-        cwd: root,
+        cwd,
         providerOptions,
         env: {},
         settings: {},
@@ -2113,8 +2119,8 @@ test("a failing read still closes its read host", async () => {
   await reader.connection.close();
 });
 
-test("a paged fallback serves appended rows under the revalidated revision", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-appended-"));
+test("a paged fallback serves walked rows under the stable reread revision", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-stable-"));
   roots.push(dir);
   const pagesPath = path.join(dir, "pages.ndjson");
   await writeFile(
@@ -2142,7 +2148,7 @@ test("a paged fallback serves appended rows under the revalidated revision", asy
   );
   const reader = await harness("tools-edit", {
     MUSE_TEST_READ_MODE: "none",
-    MUSE_TEST_READ_CURSOR: "v:read:1",
+    MUSE_TEST_READ_CURSOR: "v:read:2",
     MUSE_TEST_READ_FINAL_CURSOR: "v:read:2",
     MUSE_TEST_READ_PAGES: pagesPath,
   });
@@ -2153,8 +2159,8 @@ test("a paged fallback serves appended rows under the revalidated revision", asy
   });
   const history = await reader.wait((event) => event.type === "session.history");
   if (history.type !== "session.history") throw new Error("Expected session history");
-  // The appended row is served, but under the revalidated revision, never
-  // the stale read cursor.
+  // Nothing arrived mid-walk: header and reread agree, so the walked rows
+  // are published under that shared revision with no retry.
   expect(history.viewCursor).toBe("v:read:2");
   expect(history.rows).toHaveLength(1);
   expect(history.rows[0]?.item).toMatchObject({
@@ -2169,6 +2175,65 @@ test("a paged fallback serves appended rows under the revalidated revision", asy
   expect(reads[0]?.params).toMatchObject({ excludeItems: false });
   expect(reads[1]?.params).not.toHaveProperty("excludeItems");
   expect(log.filter((entry) => entry.method === "view/page")).toHaveLength(1);
+  for (const forbidden of ["session/resume", "session/start", "view/subscribe", "turn/start"]) {
+    expect(log.filter((entry) => entry.method === forbidden)).toEqual([]);
+  }
+  await reader.connection.close();
+});
+
+test("a paged fallback fails loudly when a row lands after the last page", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-appended-"));
+  roots.push(dir);
+  const pagesPath = path.join(dir, "pages.ndjson");
+  await writeFile(
+    pagesPath,
+    JSON.stringify({
+      events: [
+        {
+          method: "item/completed",
+          params: {
+            item: {
+              itemId: "a1",
+              revision: 1,
+              kind: "userMessage",
+              status: "completed",
+              message: "walked hello",
+              text: "walked hello",
+              turnId: "t9",
+              recordedAt: "2026-10-31T00:00:01.000Z",
+            },
+          },
+        },
+      ],
+      nextCursor: null,
+    }) + "\n",
+  );
+  // Every metadata read reports a newer cursor than the walk header, as if
+  // a writer appended a row after the final page and before the reread.
+  const reader = await harness("tools-edit", {
+    MUSE_TEST_READ_MODE: "none",
+    MUSE_TEST_READ_CURSORS: "v:1,v:2,v:3,v:4,v:5,v:6,v:7",
+    MUSE_TEST_READ_PAGES: pagesPath,
+  });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: { version: 1, data: { sessionId: "stored-1" } },
+  });
+  const failed = await reader.wait((event) => event.type === "request.failed");
+  if (failed.type !== "request.failed") throw new Error("Expected request failure");
+  expect(failed).toMatchObject({
+    requestId: "read-1",
+    error: { code: "historyChanged", message: expect.stringMatching(/changed while reading/) },
+  });
+  const log = await reader.recorded();
+  // Bounded retries: three full attempts (header walk plus metadata read
+  // each), then a loud failure. The stale rows are never published under a
+  // newer revision.
+  expect(log.filter((entry) => entry.method === "session/read")).toHaveLength(6);
+  expect(log.filter((entry) => entry.method === "view/page")).toHaveLength(3);
+  expect(log.filter((entry) => entry.event === "session.history")).toEqual([]);
+  expect(log.filter((entry) => entry.event === "hostClosed")).toHaveLength(1);
   for (const forbidden of ["session/resume", "session/start", "view/subscribe", "turn/start"]) {
     expect(log.filter((entry) => entry.method === forbidden)).toEqual([]);
   }
@@ -2231,7 +2296,7 @@ test("a paged fallback walks multiple pages with exact content, order, and epoch
   const reader = await harness("tools-edit", {
     MUSE_TEST_READ_MODE: "none",
     MUSE_TEST_READ_CURSOR: "v:read:1",
-    MUSE_TEST_READ_FINAL_CURSOR: "v:read:3",
+    MUSE_TEST_READ_FINAL_CURSOR: "v:read:1",
     MUSE_TEST_READ_PAGES: pagesPath,
   });
   await reader.send({
@@ -2241,7 +2306,7 @@ test("a paged fallback walks multiple pages with exact content, order, and epoch
   });
   const history = await reader.wait((event) => event.type === "session.history");
   if (history.type !== "session.history") throw new Error("Expected session history");
-  expect(history.viewCursor).toBe("v:read:3");
+  expect(history.viewCursor).toBe("v:read:1");
   expect(history.rows.map((row) => row.item.type)).toEqual([
     "user_message",
     "assistant_message",
@@ -2261,6 +2326,8 @@ test("a paged fallback walks multiple pages with exact content, order, and epoch
   expect(pages).toHaveLength(2);
   expect(pages[0]?.params).not.toHaveProperty("cursor");
   expect(pages[1]?.params).toMatchObject({ cursor: "c1" });
+  // Stable revision: exactly one header read plus one metadata reread.
+  expect(log.filter((entry) => entry.method === "session/read")).toHaveLength(2);
   await reader.connection.close();
 });
 
@@ -2404,8 +2471,13 @@ test.skipIf(!REAL_MUSE_BIN)(
         XDG_STATE_HOME: path.join(home, ".local", "state"),
       },
     };
+    // The archived workspace is `work` itself: the seed session opens with
+    // the deleted directory as its working directory, so removing it
+    // reproduces the incident instead of deleting an unrelated directory.
     const seed = await harness("unused", {}, undefined, launch);
-    expect(await seed.open(undefined, "onRequest", null)).toMatchObject({ type: "session.ready" });
+    expect(await seed.open(undefined, "onRequest", null, work)).toMatchObject({
+      type: "session.ready",
+    });
     await seed.prompt();
     // A fresh isolated HOME makes the real host copy bundled skills on first
     // start; allow the seed turn beyond the default 5s event deadline.
@@ -2423,8 +2495,12 @@ test.skipIf(!REAL_MUSE_BIN)(
     expect(before.size).toBeGreaterThan(0);
     expect(await findResumedMarkers(home)).toEqual([]);
     expect(await findResumedContent(home)).toEqual([]);
-    // The archived workspace is gone; the read must never touch it.
+    // The archived workspace is gone; the read must never touch it. The
+    // check is on the directory itself, not on a probe file that never
+    // existed there.
+    expect((await stat(work)).isDirectory()).toBe(true);
     await rm(work, { recursive: true, force: true });
+    await expect(stat(work)).rejects.toThrow(/ENOENT/);
 
     const reader = await harness("unused", {}, undefined, launch);
     await reader.send({
@@ -2462,8 +2538,8 @@ test.skipIf(!REAL_MUSE_BIN)(
     expect(await snapshotSessionLogs(home)).toEqual(before);
     expect(await findResumedMarkers(home)).toEqual([]);
     expect(await findResumedContent(home)).toEqual([]);
-    // The deleted workspace was not recreated.
-    await expect(readFile(path.join(work, "probe"))).rejects.toThrow(/ENOENT/);
+    // The deleted workspace was not recreated by any of the reads above.
+    await expect(stat(work)).rejects.toThrow(/ENOENT/);
     // A failing read leaves a usable connection: unknown session, no linger.
     await reader.send({
       type: "session.read_history",
@@ -2475,6 +2551,134 @@ test.skipIf(!REAL_MUSE_BIN)(
     );
     expect(failed.type).toBe("request.failed");
     await reader.connection.close();
+  },
+  90000,
+);
+
+test.skipIf(!REAL_MUSE_BIN)(
+  "fetch through the manager serves a real archived native session with a deleted cwd",
+  async () => {
+    const bin = REAL_MUSE_BIN!;
+    const home = await mkdtemp(path.join(os.tmpdir(), "muse-real-manager-home-"));
+    const work = await mkdtemp(path.join(os.tmpdir(), "muse-real-manager-work-"));
+    const storeDir = await mkdtemp(path.join(os.tmpdir(), "muse-real-manager-agents-"));
+    roots.push(home, work, storeDir);
+    const wrapper = path.join(home, "muse-serve.sh");
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = "serve" ]; then shift; fi\nexec "${bin}" serve --provider echo "$@"\n`,
+    );
+    await chmod(wrapper, 0o755);
+    const launch: ProviderLaunch = {
+      command: wrapper,
+      args: [],
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_DATA_HOME: path.join(home, ".local", "share"),
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        XDG_CACHE_HOME: path.join(home, ".cache"),
+        XDG_STATE_HOME: path.join(home, ".local", "state"),
+      },
+    };
+    // Seed one real turn with the soon-deleted workspace as its cwd.
+    const seed = await harness("unused", {}, undefined, launch);
+    expect(await seed.open(undefined, "onRequest", null, work)).toMatchObject({
+      type: "session.ready",
+    });
+    await seed.prompt();
+    await seed.wait(
+      (event) => event.type === "session.turn" && event.state === "completed",
+      0,
+      30000,
+    );
+    const saved = seed.events.findLast((event) => event.type === "session.persistence");
+    if (!saved || saved.type !== "session.persistence") {
+      throw new Error("Expected session persistence");
+    }
+    await seed.connection.close();
+    const nativeBefore = await snapshotSessionLogs(home);
+    expect(nativeBefore.size).toBeGreaterThan(0);
+    expect(await findResumedMarkers(home)).toEqual([]);
+    // The archived workspace is gone before the daemon-side read runs.
+    expect((await stat(work)).isDirectory()).toBe(true);
+    await rm(work, { recursive: true, force: true });
+    await expect(stat(work)).rejects.toThrow(/ENOENT/);
+
+    // The full daemon read chain over the real native store: a stored
+    // archived record feeds AgentManager, which reads through a real
+    // PluginAgentClient into the real Muse provider. No resume anywhere.
+    const base = registration();
+    const logger = createTestLogger();
+    const plugins = new PluginAgentClientRegistry(logger);
+    plugins.replace([
+      {
+        ...base,
+        id: "muse",
+        async connect(request) {
+          return base.connect({ ...request, launch });
+        },
+      },
+    ]);
+    const registry = buildProviderRegistry(logger, {
+      pluginProviders: plugins.definitions(),
+    });
+    const client = registry["muse"].createClient(logger);
+    try {
+      const storage = new AgentStorage(path.join(storeDir, "agents"), logger);
+      const manager = new AgentManager({
+        logger,
+        clients: { muse: client },
+        providerDefinitions: { muse: registry["muse"] },
+        registry: storage,
+      });
+      const now = new Date().toISOString();
+      await storage.upsert({
+        id: "archived-native",
+        provider: "muse",
+        cwd: work,
+        createdAt: now,
+        updatedAt: now,
+        labels: {},
+        lastStatus: "closed",
+        config: null,
+        persistence: {
+          provider: "muse",
+          sessionId: `plugin:${JSON.stringify(saved.persistence)}`,
+          metadata: { pluginProviderPersistence: saved.persistence },
+        },
+        archivedAt: now,
+      });
+      expect(await manager.hasStoredArchivedHistory("archived-native")).toBe(true);
+      const storedBefore = JSON.stringify(await storage.get("archived-native"));
+      const loaded = await manager.fetchArchivedTimeline("archived-native", {
+        direction: "tail",
+        limit: 10,
+      });
+      expect(loaded?.record.id).toBe("archived-native");
+      const items = loaded!.result.rows.map((row) => row.item);
+      const userIndex = items.findIndex((item) => item.type === "user_message");
+      const assistantIndex = items.findIndex((item) => item.type === "assistant_message");
+      expect(userIndex).toBeGreaterThanOrEqual(0);
+      expect(assistantIndex).toBeGreaterThan(userIndex);
+      for (const row of loaded!.result.rows) expect(row.timestamp).toBeTruthy();
+      // Stable pagination: a second narrower fetch serves the same epoch.
+      const again = await manager.fetchArchivedTimeline("archived-native", {
+        direction: "tail",
+        limit: 1,
+      });
+      expect(again!.result.epoch).toBe(loaded!.result.epoch);
+      // The stored record and the durable native session log are
+      // byte-identical: no resume, no new turn, no lingering session.
+      expect(JSON.stringify(await storage.get("archived-native"))).toBe(storedBefore);
+      expect(await snapshotSessionLogs(home)).toEqual(nativeBefore);
+      expect(await findResumedMarkers(home)).toEqual([]);
+      expect(await findResumedContent(home)).toEqual([]);
+      // The deleted workspace was not recreated by the manager read.
+      await expect(stat(work)).rejects.toThrow(/ENOENT/);
+    } finally {
+      await client.shutdown();
+    }
   },
   90000,
 );
