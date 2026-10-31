@@ -1,5 +1,5 @@
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { MspConnection, type Notification } from "./connection.js";
+import type { MspHost, Notification } from "./connection.js";
 import { Timeline } from "./timeline.js";
 import {
   childSessionSchema,
@@ -17,7 +17,7 @@ interface Child {
 export class Children {
   private readonly children = new Map<string, Child>();
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly parentId: string,
     private readonly cwd: string,
     private readonly emit: (event: ProviderEvent) => void,
