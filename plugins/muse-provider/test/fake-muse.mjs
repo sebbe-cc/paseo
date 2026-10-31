@@ -80,6 +80,21 @@ function receiveFrame(line) {
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
 function controlResponse(frame) {
+  if (frame.method === "session/read" && process.env.MUSE_TEST_READ_HISTORY) {
+    const result = responseFor(readFixture("phase3-child-read"), "session/read");
+    result.session.sessionId = frame.params.sessionId;
+    result.history = {
+      mode: "inline",
+      items: readFileSync(process.env.MUSE_TEST_READ_HISTORY, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+      snapshot: null,
+    };
+    respond(frame, result);
+    return true;
+  }
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;

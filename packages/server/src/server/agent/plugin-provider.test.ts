@@ -14,7 +14,11 @@ import type {
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, test } from "vitest";
 import { createTestLogger } from "../../test-utils/test-logger.js";
-import type { AgentClient, AgentStreamEvent } from "./agent-sdk-types.js";
+import type {
+  AgentClient,
+  AgentPersistenceHandle,
+  AgentStreamEvent,
+} from "./agent-sdk-types.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import { AgentManager } from "./agent-manager.js";
 import { buildProviderRegistry } from "./provider-registry.js";
@@ -125,6 +129,39 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
         emit({ type: "session.ready", sessionId: "child-1" });
         options.openChildren?.(input.sessionId, emit);
         emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+        return;
+      }
+      if (input.type === "session.read_history") {
+        emit({
+          type: "session.history",
+          requestId: input.requestId,
+          viewCursor: "v:read:1",
+          rows: [
+            {
+              item: { type: "user_message", id: "u1", text: "hello" },
+              timestamp: "2026-10-31T00:00:01.000Z",
+              turnId: "turn-1",
+            },
+            {
+              item: { type: "assistant_message", id: "a1", text: "hi" },
+              timestamp: "2026-10-31T00:00:02.000Z",
+              turnId: "turn-1",
+            },
+            {
+              item: {
+                type: "tool_call",
+                id: "t1",
+                callId: "c1",
+                name: "read_file",
+                status: "completed",
+                error: null,
+                detail: { type: "read", filePath: "a.txt", content: "x" },
+              },
+              timestamp: "2026-10-31T00:00:03.000Z",
+              turnId: "turn-1",
+            },
+          ],
+        });
         return;
       }
       if (input.type === "session.prompt") {
@@ -321,7 +358,76 @@ describe("PluginAgentClientRegistry", () => {
     await agent.session?.close();
   });
 
-  test("history resume with a deleted cwd replays without the removed directory", async () => {
+  test("readHistory returns stored rows without opening a session", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness({
+      capabilities: [
+        "prompt.message",
+        "session.configure",
+        "session.persistence",
+        "session.subsession",
+        "session.read_history",
+        "permission",
+      ],
+    });
+    const plugins = new PluginAgentClientRegistry(logger);
+    plugins.replace([harness.registration]);
+    const registry = buildProviderRegistry(logger, {
+      pluginProviders: plugins.definitions(),
+    });
+    const client = registry["plugin-direct"].createClient(logger);
+    const handle = {
+      provider: "plugin-direct",
+      sessionId: 'plugin:{"version":1,"data":{"token":"root"}}',
+    } as AgentPersistenceHandle;
+    const read = await client.readHistory!(handle);
+    expect(read.viewCursor).toBe("v:read:1");
+    expect(read.rows.map((row) => row.item)).toEqual([
+      { type: "user_message", text: "hello", messageId: "u1" },
+      { type: "assistant_message", text: "hi", messageId: "a1" },
+      {
+        type: "tool_call",
+        callId: "c1",
+        name: "read_file",
+        status: "completed",
+        error: null,
+        detail: { type: "read", filePath: "a.txt", content: "x" },
+      },
+    ]);
+    expect(read.rows.map((row) => row.turnId)).toEqual(["turn-1", "turn-1", "turn-1"]);
+    expect(read.rows.map((row) => row.timestamp)).toEqual([
+      "2026-10-31T00:00:01.000Z",
+      "2026-10-31T00:00:02.000Z",
+      "2026-10-31T00:00:03.000Z",
+    ]);
+    // A stored-history read is request-scoped: no session is ever opened.
+    expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+    expect(harness.inputs.find((input) => input.type === "session.read_history")).toMatchObject({
+      persistence: { version: 1, data: { token: "root" } },
+    });
+  });
+
+  test("readHistory without the capability reports unsupported", async () => {
+    const logger = createTestLogger();
+    const harness = createProviderHarness();
+    const plugins = new PluginAgentClientRegistry(logger);
+    plugins.replace([harness.registration]);
+    const registry = buildProviderRegistry(logger, {
+      pluginProviders: plugins.definitions(),
+    });
+    const client = registry["plugin-direct"].createClient(logger);
+    const handle = {
+      provider: "plugin-direct",
+      sessionId: 'plugin:{"version":1,"data":{"token":"root"}}',
+    } as AgentPersistenceHandle;
+    await expect(client.readHistory!(handle)).rejects.toThrow(
+      "Provider does not support session.read_history",
+    );
+    expect(harness.inputs.some((input) => input.type === "session.open")).toBe(false);
+    expect(harness.inputs.some((input) => input.type === "session.read_history")).toBe(false);
+  });
+
+  test("resume passes the recorded cwd through unchanged, even for history", async () => {
     const logger = createTestLogger();
     const harness = createProviderHarness();
     const plugins = new PluginAgentClientRegistry(logger);
@@ -335,7 +441,9 @@ describe("PluginAgentClientRegistry", () => {
       const seed = await client.createSession({ provider: "plugin-direct", cwd: liveCwd });
       const handle = seed.describePersistence()!;
       await seed.close();
-      // The archived workspace is gone: history must still replay, from a safe directory.
+      // No silent swap: a stored-history read goes through readHistory, never
+      // through a resume with a substituted directory. Refusing a missing
+      // working directory stays the caller's job.
       const deletedCwd = join(tmpdir(), "paseo-history-deleted-cwd");
       await rm(deletedCwd, { recursive: true, force: true });
       const resumed = await client.resumeSession(
@@ -345,28 +453,8 @@ describe("PluginAgentClientRegistry", () => {
         { purpose: "history" },
       );
       const historyOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
-      expect(historyOpen).toMatchObject({ history: "replay" });
-      expect(historyOpen.config.cwd).toBe(tmpdir());
+      expect(historyOpen).toMatchObject({ history: "replay", config: { cwd: deletedCwd } });
       await resumed.close();
-      // A live (interactive) resume keeps the recorded cwd untouched: refusing a missing
-      // working directory stays the caller's job, never a silent swap.
-      const interactive = await client.resumeSession(handle, {
-        provider: "plugin-direct",
-        cwd: deletedCwd,
-      });
-      const interactiveOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
-      expect(interactiveOpen.config.cwd).toBe(deletedCwd);
-      await interactive.close();
-      // History with an existing cwd is unchanged.
-      const existing = await client.resumeSession(
-        handle,
-        { provider: "plugin-direct", cwd: liveCwd },
-        undefined,
-        { purpose: "history" },
-      );
-      const existingOpen = harness.inputs.findLast((input) => input.type === "session.open")!;
-      expect(existingOpen.config.cwd).toBe(liveCwd);
-      await existing.close();
     } finally {
       await rm(liveCwd, { recursive: true, force: true });
     }

@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import type { Logger } from "pino";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
@@ -40,7 +38,6 @@ import type {
   AgentPermissionResponse,
   AgentPersistenceHandle,
   AgentPromptInput,
-  AgentResumePurpose,
   AgentResumeSessionOptions,
   AgentRunOptions,
   AgentRunResult,
@@ -56,6 +53,8 @@ import type {
   ImportProviderSessionInput,
   ListImportableSessionsOptions,
   ProviderCatalog,
+  ProviderHistoryRead,
+  ProviderHistoryRow,
   ProviderRefreshContext,
   SteerActiveTurnOptions,
   SteerResult,
@@ -119,13 +118,21 @@ function isProviderRequestReply(
   event: ProviderEvent,
 ): event is Extract<
   ProviderEvent,
-  { type: "request.completed" | "catalog" | "sessions" | "session.can_stop_runtime" }
+  {
+    type:
+      | "request.completed"
+      | "catalog"
+      | "sessions"
+      | "session.can_stop_runtime"
+      | "session.history";
+  }
 > {
   return (
     event.type === "request.completed" ||
     event.type === "catalog" ||
     event.type === "sessions" ||
-    event.type === "session.can_stop_runtime"
+    event.type === "session.can_stop_runtime" ||
+    event.type === "session.history"
   );
 }
 
@@ -279,6 +286,23 @@ class ProviderRuntime {
       this.providerSessions.delete(input.sessionId);
       throw error;
     }
+  }
+
+  async readHistory(
+    persistence: ProviderPersistence,
+  ): Promise<Extract<ProviderEvent, { type: "session.history" }>> {
+    const connection = await this.getConnection();
+    if (!connection.capabilities.includes("session.read_history")) {
+      throw new Error("Provider does not support session.read_history");
+    }
+    const event = await this.complete({
+      type: "session.read_history",
+      requestId: randomUUID(),
+      persistence,
+    });
+    if (event.type !== "session.history")
+      throw new Error("Provider returned an invalid history response");
+    return event;
   }
 
   async archive(persistence: ProviderPersistence): Promise<void> {
@@ -576,7 +600,14 @@ class ProviderRuntime {
   private finishRequest(
     event: Extract<
       ProviderEvent,
-      { type: "request.completed" | "catalog" | "sessions" | "session.can_stop_runtime" }
+      {
+        type:
+          | "request.completed"
+          | "catalog"
+          | "sessions"
+          | "session.can_stop_runtime"
+          | "session.history";
+      }
     >,
   ): void {
     const request = this.requests.get(event.requestId);
@@ -977,22 +1008,34 @@ class PluginAgentClient implements AgentClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
-    options?: AgentResumeSessionOptions,
+    _options?: AgentResumeSessionOptions,
   ): Promise<AgentSession> {
     if (!overrides?.cwd) {
       throw new Error(`Plugin provider '${this.provider}' requires cwd to resume a session`);
     }
     return await this.openSession({
-      config: {
-        ...overrides,
-        provider: this.provider,
-        cwd: await resolveResumeCwd(overrides.cwd, options?.purpose),
-      },
+      config: { ...overrides, provider: this.provider, cwd: overrides.cwd },
       launchContext,
       persistence: decodePersistence(handle),
       history: "replay",
       persist: true,
     });
+  }
+
+  async readHistory(handle: AgentPersistenceHandle): Promise<ProviderHistoryRead> {
+    const event = await this.runtime.readHistory(decodePersistence(handle));
+    const snapshots = new Map<string, ProviderTimelineItem>();
+    const rows: ProviderHistoryRow[] = [];
+    for (const row of event.rows) {
+      const item = mapTimelineItem(row.item, snapshots, undefined);
+      if (!item) continue;
+      rows.push({
+        item,
+        ...(row.timestamp !== undefined ? { timestamp: row.timestamp } : {}),
+        ...(row.turnId !== undefined ? { turnId: row.turnId } : {}),
+      });
+    }
+    return { viewCursor: event.viewCursor, rows };
   }
 
   async fetchCatalog(
@@ -1666,30 +1709,6 @@ function mapModel(
     thinkingOptions: thinkingOptions?.map((option) => Object.assign({}, option)),
     defaultThinkingOptionId: model.defaultThinkingOptionId ?? catalogDefaultThinkingOption,
   };
-}
-
-/**
- * A history resume replays the provider's stored session without running a turn, so it
- * must survive the workspace it ran in being archived and removed. When the recorded cwd
- * is gone, the provider host process starts in a safe existing directory instead of the
- * deleted one (a missing spawn cwd surfaces as ENOENT naming the provider binary).
- * Interactive resumes keep failing loudly: the working directory of a live session is
- * never recreated or silently swapped. The agent record keeps the original cwd; only
- * the host process working directory is substituted.
- */
-async function resolveResumeCwd(cwd: string, purpose?: AgentResumePurpose): Promise<string> {
-  if (purpose !== "history" || (await isUsableDirectory(cwd))) {
-    return cwd;
-  }
-  return tmpdir();
-}
-
-async function isUsableDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
 }
 
 function mapSessionConfig(

@@ -14,6 +14,7 @@ export const PROVIDER_CAPABILITIES = [
   "session.configure",
   "session.list",
   "session.persistence",
+  "session.read_history",
   "session.revert.both",
   "session.revert.conversation",
   "session.revert.files",
@@ -278,6 +279,11 @@ export type ProviderInput =
     }
   | { type: "session.archive"; requestId: string; persistence: ProviderPersistence }
   | { type: "session.unarchive"; requestId: string; persistence: ProviderPersistence }
+  | {
+      type: "session.read_history";
+      requestId: string;
+      persistence: ProviderPersistence;
+    }
   | { type: "session.can_stop_runtime"; requestId: string; sessionId: string }
   | { type: "session.close"; requestId: string; sessionId: string };
 
@@ -553,8 +559,25 @@ export type ProviderTimelineItem =
       data: JsonValue;
     });
 
+/**
+ * One stored-history row served by `session.history`: a timeline item with
+ * the provider's recorded timestamp and turn, at the response's read revision.
+ * No session is opened, attached, or subscribed.
+ */
+export interface ProviderHistoryRow {
+  item: ProviderTimelineItem;
+  timestamp?: string;
+  turnId?: string;
+}
+
 export type ProviderEvent =
   | { type: "session.can_stop_runtime"; requestId: string; sessionId: string; canStop: boolean }
+  | {
+      type: "session.history";
+      requestId: string;
+      viewCursor: string;
+      rows: ProviderHistoryRow[];
+    }
   | { type: "catalog"; requestId: string; catalog: ProviderCatalog }
   | { type: "sessions"; requestId: string; sessions: ProviderSessionSummary[] }
   | { type: "request.completed"; requestId: string }
@@ -663,6 +686,8 @@ export function requiredProviderCapabilities(input: ProviderInput): readonly Pro
       return ["session.archive"];
     case "session.unarchive":
       return ["session.unarchive"];
+    case "session.read_history":
+      return ["session.read_history"];
   }
 }
 
@@ -965,6 +990,13 @@ export const ProviderInputSchema: z.ZodType<ProviderInput> = z.discriminatedUnio
       type: z.literal("session.can_stop_runtime"),
       requestId: idSchema,
       sessionId: idSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("session.read_history"),
+      requestId: idSchema,
+      persistence: persistenceSchema,
     })
     .strict(),
   z.object({ type: z.literal("session.close"), requestId: idSchema, sessionId: idSchema }).strict(),
@@ -1344,6 +1376,22 @@ export const ProviderEventSchema: z.ZodType<ProviderEvent> = z.discriminatedUnio
       requestId: idSchema,
       sessionId: idSchema,
       canStop: z.boolean(),
+    })
+    .strip(),
+  z
+    .object({
+      type: z.literal("session.history"),
+      requestId: idSchema,
+      viewCursor: z.string(),
+      rows: z.array(
+        z
+          .object({
+            item: timelineItemSchema,
+            timestamp: z.string().optional(),
+            turnId: idSchema.optional(),
+          })
+          .strip(),
+      ),
     })
     .strip(),
   z

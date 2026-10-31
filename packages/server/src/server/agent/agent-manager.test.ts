@@ -12364,3 +12364,103 @@ test("an out-of-band command racing idle cleanup waits for the resumed runtime",
   expect(h.commands).toEqual(["/maintenance"]);
   expect(h.prompts).toEqual([]);
 });
+
+class ArchivedHistoryClient extends TestAgentClient {
+  readonly readHistoryCalls: AgentPersistenceHandle[] = [];
+  resumeCalls = 0;
+
+  constructor() {
+    super("muse");
+  }
+
+  override async readHistory(handle: AgentPersistenceHandle) {
+    this.readHistoryCalls.push(handle);
+    return {
+      viewCursor: "v:archived:1",
+      rows: [
+        {
+          item: { type: "user_message", text: "hello" },
+          timestamp: "2026-10-30T15:00:00.000Z",
+          turnId: "turn-1",
+        },
+        {
+          item: { type: "assistant_message", text: "hi" },
+          timestamp: "2026-10-30T15:00:01.000Z",
+          turnId: "turn-1",
+        },
+        {
+          item: {
+            type: "tool_call",
+            callId: "c1",
+            name: "read_file",
+            status: "completed",
+            error: null,
+            detail: { type: "read", filePath: "f", content: "x" },
+          },
+          timestamp: "2026-10-30T15:00:02.000Z",
+          turnId: "turn-1",
+        },
+      ],
+    };
+  }
+
+  override async resumeSession(
+    handle: AgentPersistenceHandle,
+    config?: Partial<AgentSessionConfig>,
+    launchContext?: AgentLaunchContext,
+  ): Promise<AgentSession> {
+    this.resumeCalls += 1;
+    return super.resumeSession(handle, config, launchContext);
+  }
+}
+
+test("fetchArchivedTimeline serves stored history without resuming or mutating the record", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archived-history-"));
+  // The archived workspace is gone: the read must never touch it.
+  const deletedCwd = join(workdir, "gone-workspace");
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new ArchivedHistoryClient();
+  const manager = new AgentManager({ clients: { muse: client }, registry: storage, logger });
+  const now = new Date().toISOString();
+  await storage.upsert({
+    id: "archived-agent",
+    provider: "muse",
+    cwd: deletedCwd,
+    createdAt: now,
+    updatedAt: now,
+    labels: {},
+    lastStatus: "closed",
+    config: null,
+    persistence: { provider: "muse", sessionId: "native-1" },
+    archivedAt: now,
+  });
+  const before = JSON.stringify(await storage.get("archived-agent"));
+  try {
+    const loaded = await manager.fetchArchivedTimeline("archived-agent", {
+      direction: "tail",
+      limit: 10,
+    });
+    expect(loaded?.record.id).toBe("archived-agent");
+    expect(loaded?.record.archivedAt).toBe(now);
+    expect(loaded!.result.rows.map((row) => row.item.type)).toEqual([
+      "user_message",
+      "assistant_message",
+      "tool_call",
+    ]);
+    expect(loaded!.result.rows.map((row) => row.turnId)).toEqual(["turn-1", "turn-1", "turn-1"]);
+    // Stable pagination: the same record revision keeps one epoch.
+    const again = await manager.fetchArchivedTimeline("archived-agent", {
+      direction: "tail",
+      limit: 1,
+    });
+    expect(again!.result.epoch).toBe(loaded!.result.epoch);
+    // No resume, no registration: the agent stays a stored record.
+    expect(client.resumeCalls).toBe(0);
+    expect(client.readHistoryCalls).toHaveLength(1);
+    expect(() => manager.fetchTimeline("archived-agent")).toThrow();
+    // The stored record is byte-identical: no SessionResumed side effects.
+    expect(JSON.stringify(await storage.get("archived-agent"))).toBe(before);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});

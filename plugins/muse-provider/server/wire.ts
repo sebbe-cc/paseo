@@ -146,6 +146,31 @@ export const persistenceSchema = z.object({
   model: z.string().optional(),
   thinkingOption: effortSchema.optional(),
 });
+/**
+ * `session/read` result: a point-in-time read of one stored session without
+ * attaching. No writer lease, no load, no subscription, no SessionResumed.
+ * Callers pass `excludeItems: false` to carry the folded item history;
+ * without it the result is metadata-only (`history.mode: "none"`).
+ */
+export const sessionReadSchema = z.object({
+  session: z.object({
+    sessionId: z.string(),
+    modelId: z.string().nullable().optional(),
+    providerId: z.string().nullable().optional(),
+    workspaceRoot: z.string().nullable().optional(),
+    title: z.string().optional(),
+  }),
+  viewCursor: z.string(),
+  history: z.object({
+    mode: z.string(),
+    items: z.array(itemSchema).nullable().default([]),
+  }),
+  pendingRequests: z
+    .array(
+      z.object({ kind: z.string(), approvalId: z.string().optional(), viewCursor: z.string() }),
+    )
+    .default([]),
+});
 export const deltaSchema = z.object({
   itemId: z.string(),
   field: z.string().default("text"),

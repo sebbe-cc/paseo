@@ -60,6 +60,7 @@ import {
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
+import { toAgentPersistenceHandle } from "../persistence-hooks.js";
 import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
 import type { AgentOwner } from "./agent-owner.js";
 import {
@@ -192,6 +193,10 @@ interface TimeoutOptions {
 
 function formatProviderList(providers: readonly string[]): string {
   return providers.length > 0 ? providers.join(", ") : "none";
+}
+
+function archivedTimelineRevision(record: StoredAgentRecord): string {
+  return [record.updatedAt, record.archivedAt ?? "", record.persistence?.sessionId ?? ""].join("|");
 }
 
 function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
@@ -754,6 +759,14 @@ export class AgentManager {
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore: InMemoryAgentTimelineStore;
+  private readonly archivedTimelineStores = new Map<
+    string,
+    { revision: string; store: InMemoryAgentTimelineStore }
+  >();
+  private readonly archivedHistoryLoads = new Map<
+    string,
+    Promise<{ record: StoredAgentRecord; store: InMemoryAgentTimelineStore } | null>
+  >();
   private readonly providerSubagents = new ProviderSubagentStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
@@ -1307,6 +1320,101 @@ export class AgentManager {
   fetchTimeline(id: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
     this.requireAgent(id);
     return this.timelineStore.fetch(id, options);
+  }
+
+  /**
+   * Read-only timeline for a stored closed/archived agent, without resuming
+   * it: no session is opened, registered, hydrated, or persisted, and the
+   * agent record is never modified. Returns null when the agent is not in a
+   * stored archived state (active, missing, or already unarchived), so callers
+   * fall back to the resident path. The projection lives in a store separate
+   * from active agent residency and keeps a stable epoch per record revision
+   * across paginated reads.
+   */
+  async fetchArchivedTimeline(
+    agentId: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<{ record: StoredAgentRecord; result: AgentTimelineFetchResult } | null> {
+    const loaded = await this.loadArchivedTimeline(agentId);
+    if (!loaded) return null;
+    return { record: loaded.record, result: loaded.store.fetch(agentId, options) };
+  }
+
+  async getArchivedTimelineRows(
+    agentId: string,
+  ): Promise<{ record: StoredAgentRecord; rows: AgentTimelineRow[]; epoch: string } | null> {
+    const loaded = await this.loadArchivedTimeline(agentId);
+    if (!loaded) return null;
+    return {
+      record: loaded.record,
+      rows: loaded.store.getRows(agentId),
+      epoch: loaded.store.getEpoch(agentId),
+    };
+  }
+
+  private async loadArchivedTimeline(
+    agentId: string,
+  ): Promise<{ record: StoredAgentRecord; store: InMemoryAgentTimelineStore } | null> {
+    if (this.agents.has(agentId)) return null;
+    const record = await this.registry?.get(agentId);
+    if (!record || !record.archivedAt) return null;
+    const revision = archivedTimelineRevision(record);
+    const cached = this.archivedTimelineStores.get(agentId);
+    if (cached && cached.revision === revision) {
+      return { record, store: cached.store };
+    }
+    const inflight = this.archivedHistoryLoads.get(agentId);
+    if (inflight) {
+      const loaded = await inflight;
+      return loaded && archivedTimelineRevision(loaded.record) === revision ? loaded : null;
+    }
+    const load = this.readArchivedHistory(agentId);
+    this.archivedHistoryLoads.set(agentId, load);
+    try {
+      return await load;
+    } finally {
+      if (this.archivedHistoryLoads.get(agentId) === load) {
+        this.archivedHistoryLoads.delete(agentId);
+      }
+    }
+  }
+
+  private async readArchivedHistory(
+    agentId: string,
+  ): Promise<{ record: StoredAgentRecord; store: InMemoryAgentTimelineStore } | null> {
+    const record = await this.registry?.get(agentId);
+    if (!record || !record.archivedAt) return null;
+    const client = this.clients.get(record.provider);
+    if (!client) {
+      throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
+    }
+    if (typeof client.readHistory !== "function") {
+      throw new Error(`Provider '${record.provider}' does not support archived history reads`);
+    }
+    const handle = toAgentPersistenceHandle(this.getRegisteredProviderIds(), record.persistence);
+    if (!handle) {
+      throw new Error(`Agent ${agentId} references unavailable provider '${record.provider}'`);
+    }
+    const read = await client.readHistory(handle);
+    // An explicit unarchive raced this read: drop the result so the caller
+    // takes the resident path instead of serving a stale stored projection.
+    const current = await this.registry?.get(agentId);
+    if (!current || !current.archivedAt || this.agents.has(agentId)) return null;
+    const store = new InMemoryAgentTimelineStore();
+    store.initialize(agentId, {
+      rows: read.rows.map((row, index) => ({
+        seq: index + 1,
+        timestamp: row.timestamp ?? current.updatedAt,
+        item: row.item,
+        ...(row.turnId !== undefined ? { turnId: row.turnId } : {}),
+      })),
+      epoch: read.viewCursor || undefined,
+    });
+    this.archivedTimelineStores.set(agentId, {
+      revision: archivedTimelineRevision(current),
+      store,
+    });
+    return { record: current, store };
   }
 
   listProviderSubagents(parentAgentId: string): ProviderSubagentDescriptor[] {

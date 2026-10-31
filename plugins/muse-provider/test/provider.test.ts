@@ -1743,3 +1743,91 @@ test("Muse reports belong only to the session's account and remain available glo
   expect(await registry.listReports({ agentId: "muse-unknown" })).toEqual([]);
   expect((await registry.listReports()).map((report) => report.id)).toEqual(accountIds);
 });
+
+test("session.read_history serves stored user, assistant, and tool rows without attaching", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-read-history-"));
+  roots.push(dir);
+  const historyPath = path.join(dir, "native-history.ndjson");
+  const seed = await harness("tools-edit", { MUSE_TEST_HISTORY: historyPath });
+  await seed.open();
+  await seed.prompt();
+  await seed.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const saved = seed.events.findLast((event) => event.type === "session.persistence");
+  if (!saved || saved.type !== "session.persistence") {
+    throw new Error("Expected session persistence");
+  }
+  await seed.connection.close();
+  // The archived workspace is gone; only the native session record remains.
+  await rm(seed.root, { recursive: true, force: true });
+
+  const reader = await harness("tools-edit", { MUSE_TEST_READ_HISTORY: historyPath });
+  await reader.send({
+    type: "session.read_history",
+    requestId: "read-1",
+    persistence: saved.persistence,
+  });
+  const history = await reader.wait((event) => event.type === "session.history");
+  if (history.type !== "session.history") throw new Error("Expected session history");
+  expect(history.requestId).toBe("read-1");
+  expect(history.viewCursor).toBeTruthy();
+  const items = history.rows.map((row) => row.item);
+  const userIndex = items.findIndex((item) => item.type === "user_message");
+  const toolIndex = items.findIndex((item) => item.type === "tool_call");
+  const assistantIndex = items.findIndex((item) => item.type === "assistant_message");
+  expect(userIndex).toBeGreaterThanOrEqual(0);
+  expect(toolIndex).toBeGreaterThan(userIndex);
+  expect(assistantIndex).toBeGreaterThan(toolIndex);
+  expect(items[userIndex]).toMatchObject({
+    type: "user_message",
+    text: expect.stringContaining("Use read_file"),
+  });
+  expect(items[assistantIndex]).toMatchObject({
+    type: "assistant_message",
+    text: expect.stringContaining("Done."),
+  });
+  expect(items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "read", filePath: "f" }),
+      }),
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "shell", command: "wc -l f" }),
+      }),
+      expect.objectContaining({
+        type: "tool_call",
+        detail: expect.objectContaining({ type: "edit" }),
+      }),
+    ]),
+  );
+  // Stored rows carry their recorded times and turns.
+  for (const row of history.rows.slice(0, 5)) {
+    expect(row.timestamp).toBeTruthy();
+  }
+  expect(history.rows.some((row) => row.turnId !== undefined)).toBe(true);
+
+  const log = await reader.recorded();
+  const methods = log.filter((entry) => entry.method).map((entry) => entry.method);
+  expect(methods).toContain("initialize");
+  expect(methods).toContain("session/read");
+  expect(methods).toContain("view/page");
+  const readCall = log.find((entry) => entry.method === "session/read");
+  expect(readCall.params).toMatchObject({ excludeItems: false });
+  for (const forbidden of [
+    "session/resume",
+    "session/start",
+    "view/subscribe",
+    "turn/start",
+    "approval/decide",
+    "session/setModel",
+    "session/setApprovalMode",
+  ]) {
+    expect(methods).not.toContain(forbidden);
+  }
+  // The reader host is closed by the read itself: one spawn, one exit, no linger.
+  const starts = log.filter((entry) => entry.event === "hostStarted");
+  const closes = log.filter((entry) => entry.event === "hostClosed");
+  expect(starts).toHaveLength(1);
+  expect(closes).toHaveLength(1);
+});
