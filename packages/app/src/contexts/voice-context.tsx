@@ -9,6 +9,7 @@ import {
 } from "react";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { useSessionStore } from "@/stores/session-store";
+import { useSettings } from "@/hooks/use-settings";
 import { createAudioEngine } from "@/audio";
 import type { AudioEngine } from "@/audio";
 import {
@@ -17,6 +18,8 @@ import {
   type VoiceRuntimeSnapshot,
   type VoiceRuntimeTelemetrySnapshot,
 } from "@/voice/voice-runtime";
+
+import { useVoiceTargetStore } from "@/voice/voice-target-store";
 
 interface VoiceContextValue extends VoiceRuntimeSnapshot {
   startVoice: (serverId: string, agentId: string) => Promise<void>;
@@ -115,6 +118,8 @@ interface VoiceProviderProps {
 export function VoiceProvider({ children }: VoiceProviderProps) {
   const engineRef = useRef<AudioEngine | null>(null);
   const runtimeRef = useRef<VoiceRuntime | null>(null);
+  const thinkingToneRef = useRef(false);
+  thinkingToneRef.current = useSettings((settings) => settings.voiceThinkingTone);
 
   if (!engineRef.current) {
     let runtime: VoiceRuntime | null = null;
@@ -137,8 +142,21 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
 
     runtime = createVoiceRuntime({
       engine,
+      onTargetChanged(serverId, agentId) {
+        const session = useSessionStore.getState().getSession(serverId);
+        const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+        const previous = useVoiceTargetStore.getState().target;
+        const previousTitle =
+          previous?.serverId === serverId && previous.agentId === agentId
+            ? previous.title
+            : agentId;
+        useVoiceTargetStore
+          .getState()
+          .setTarget({ serverId, agentId, title: agent?.title || previousTitle });
+      },
       getServerInfo: (serverId) =>
         useSessionStore.getState().getSession(serverId)?.serverInfo ?? null,
+      isThinkingToneEnabled: () => thinkingToneRef.current,
       activateKeepAwake: async (tag) => {
         await activateKeepAwakeAsync(tag);
       },

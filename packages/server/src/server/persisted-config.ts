@@ -143,6 +143,10 @@ const FeatureDictationSchema = z
 
 const FeatureVoiceModeSchema = z
   .object({
+    provider: z
+      .object({ pluginId: z.string().min(1), providerId: z.string().min(1) })
+      .strict()
+      .optional(),
     enabled: z.boolean().optional(),
     llm: z
       .object({

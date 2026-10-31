@@ -1,4 +1,10 @@
-import type { PluginHookAgent } from "@getpaseo/plugin/server";
+import {
+  VoiceProviderCommandSchema,
+  VoiceProviderEventSchema,
+  type PluginHookAgent,
+  type VoiceProviderCommand,
+  type VoiceProviderEvent,
+} from "@getpaseo/plugin/server";
 import { UsageScopeSchema, type UsageScope } from "@getpaseo/plugin/server/usage";
 import type {
   ProviderConnectRequest,
@@ -35,6 +41,7 @@ export type PluginProcessRequest =
   | { type: "tool.call"; requestId: string; agent: PluginHookAgent; name: string; input: unknown }
   | { type: "tool.cancel"; requestId: string }
   | { type: "tools.detach"; agentId: string }
+  | { type: "voice.request"; requestId: string; sessionId: string; command: VoiceProviderCommand }
   | {
       type: "provider.status";
       requestId: string;
@@ -78,12 +85,14 @@ export type PluginProcessRequest =
   | { type: "paseo_close" };
 
 export type PluginProcessMessage =
+  | { type: "voice.event"; sessionId: string; event: VoiceProviderEvent }
   | { type: "settings.changed"; settingsId: string }
   | { type: "hooks.changed"; hooks: { events: string[]; before: string[] } }
   | {
       type: "ready";
       methods: string[];
       providers: PluginProviderMetadata[];
+      voiceProviders?: Array<{ id: string; label: string }>;
       usageSources?: PluginUsageSourceMetadata[];
       hooks?: { events: string[]; before: string[] };
     }
@@ -165,6 +174,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
       .strict(),
     z.object({ type: z.literal("tool.cancel"), requestId: z.string() }).strict(),
     z.object({ type: z.literal("tools.detach"), agentId: z.string() }).strict(),
+    z
+      .object({
+        type: z.literal("voice.request"),
+        requestId: z.string(),
+        sessionId: z.string(),
+        command: VoiceProviderCommandSchema,
+      })
+      .strict(),
     z
       .object({
         type: z.literal("provider.status"),
@@ -267,6 +284,13 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
 export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.discriminatedUnion(
   "type",
   [
+    z
+      .object({
+        type: z.literal("voice.event"),
+        sessionId: z.string(),
+        event: VoiceProviderEventSchema,
+      })
+      .strict(),
     z.object({ type: z.literal("settings.changed"), settingsId: z.string() }).strict(),
     z.object({ type: z.literal("hooks.changed"), hooks: hooksSchema }).strict(),
     z
@@ -274,6 +298,9 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
         type: z.literal("ready"),
         methods: z.array(z.string()),
         providers: z.array(providerMetadataSchema),
+        voiceProviders: z
+          .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
+          .optional(),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
         hooks: hooksSchema.optional(),
       })
