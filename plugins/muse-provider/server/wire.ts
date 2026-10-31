@@ -152,7 +152,7 @@ export const persistenceSchema = z.object({
  * Callers pass `excludeItems: false` to carry the folded item history;
  * without it the result is metadata-only (`history.mode: "none"`).
  */
-export const sessionReadSchema = z.object({
+export const storedSessionReadSchema = z.object({
   session: z.object({
     sessionId: z.string(),
     modelId: z.string().nullable().optional(),

@@ -16,7 +16,7 @@ import {
   notificationSchema,
   pageSchema,
   persistenceSchema,
-  sessionReadSchema,
+  storedSessionReadSchema,
   type WireItem,
 } from "./wire.js";
 
@@ -63,7 +63,7 @@ export async function readStoredSessionHistory(input: {
     const read = await host.request(
       "session/read",
       { sessionId: saved.sessionId, excludeItems: false },
-      sessionReadSchema,
+      storedSessionReadSchema,
     );
     const rows: ProviderHistoryRow[] = [];
     const turnsByItem = new Map<string, string | undefined>();
@@ -140,7 +140,7 @@ export async function readStoredSessionHistory(input: {
     const revalidated = await host.request(
       "session/read",
       { sessionId: saved.sessionId },
-      sessionReadSchema,
+      storedSessionReadSchema,
     );
     return { viewCursor: revalidated.viewCursor, rows };
   } finally {
