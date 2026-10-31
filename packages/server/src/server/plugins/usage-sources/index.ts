@@ -78,6 +78,22 @@ function historyCandidate(
   return { at };
 }
 
+/**
+ * R3: every published source-owned history obeys the same observation
+ * validation and ceiling as live quota. A history that is not a usable
+ * candidate (missing, empty, invalid/future, or past the ceiling) is
+ * removed from the report; anything else — status, error text, problem
+ * details, and fresh history — passes through untouched.
+ */
+function stripUnauthorizedHistory<T extends UsageReport>(report: T, now: number): T {
+  if (!("history" in report)) return report;
+  const history = (report as { history?: { observedAt: string; windows: unknown[] } }).history;
+  if (historyCandidate(history, now)) return report;
+  const copy = { ...report } as Record<string, unknown>;
+  delete copy.history;
+  return copy as T;
+}
+
 export interface UsageSource {
   id: string;
   label: string;
@@ -396,17 +412,31 @@ export class UsageSourceRegistry {
    * R3: re-applies the source-owned observation ceiling to an already-built
    * entry. Available reports with an invalid/future observation or an
    * observation past the ceiling become visible errors; a stale or
-   * invalid/future retained snapshot is dropped. Idempotent: safe to apply
-   * at the warm hit, the callback, and the final return.
+   * invalid/future retained snapshot is dropped. The same observation
+   * validation and ceiling also govern every published source-owned
+   * history — on the main report and on every loginErrors report — at all
+   * three boundaries: an unauthorized history is removed while the
+   * current error status, error text, and problem details stay visible.
+   * Idempotent: safe to apply at the warm hit, the callback, and the
+   * final return.
    */
   private toPublishable(entry: UsageReportEntry, now: number): UsageReportEntry {
-    const report = this.enforceReportCeiling(entry.report, now);
+    const report = stripUnauthorizedHistory(this.enforceReportCeiling(entry.report, now), now);
     const lastSuccessful =
       entry.lastSuccessful && lastSuccessfulStillFresh(entry.lastSuccessful, now)
         ? entry.lastSuccessful
         : undefined;
-    if (report === entry.report && lastSuccessful === entry.lastSuccessful) return entry;
-    return { ...entry, report, lastSuccessful };
+    const loginErrors = entry.loginErrors?.map((loginError) => {
+      const cleaned = stripUnauthorizedHistory(loginError.report, now);
+      return cleaned === loginError.report ? loginError : { ...loginError, report: cleaned };
+    });
+    if (
+      report === entry.report &&
+      lastSuccessful === entry.lastSuccessful &&
+      loginErrors === entry.loginErrors
+    )
+      return entry;
+    return { ...entry, report, lastSuccessful, ...(loginErrors ? { loginErrors } : {}) };
   }
 
   private pruneAgents(): void {
