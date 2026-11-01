@@ -183,6 +183,131 @@ describe("tmux persistence helpers", () => {
     }
   }, 60_000);
 
+  it("passes session env as new-session -e flags", () => {
+    const binding = { tmuxBin: "/usr/bin/tmux", socketPath: "/h/tmux.sock", sessionName: "paseo-x" };
+    const spawn = persistentSpawnArgs({
+      binding,
+      cwd: "/work",
+      shell: "/bin/bash",
+      cols: 80,
+      rows: 24,
+      env: { PASEO_PORT: "45873", PASEO_WORKSPACE_ID: "wks_1" },
+    });
+    expect(spawn.args).toEqual([
+      "-S",
+      "/h/tmux.sock",
+      "new-session",
+      "-A",
+      "-s",
+      "paseo-x",
+      "-c",
+      "/work",
+      "-x",
+      "80",
+      "-y",
+      "24",
+      "-e",
+      "PASEO_PORT=45873",
+      "-e",
+      "PASEO_WORKSPACE_ID=wks_1",
+      "/bin/bash",
+    ]);
+  });
+
+  tmuxIt("two simultaneous sessions each see their own PASEO_PORT (pa-q85sdm)", async () => {
+    // Production shape: the tmux server's global environment carries the
+    // PASEO_PORT of whichever service started the server (35885 here), and
+    // two more services start later with their own allocated ports. Without
+    // per-session -e env both panes would see 35885 while the health check
+    // waits on their own ports.
+    const { dir, binding } = tempBinding("paseo-poisoned-global");
+    const second: PersistentTerminalBinding = { ...binding, sessionName: "paseo-second-service" };
+    const third: PersistentTerminalBinding = { ...binding, sessionName: "paseo-third-service" };
+    const clients: pty.IPty[] = [];
+    try {
+      const spawnPoisoner = persistentSpawnArgs({
+        binding,
+        cwd: dir,
+        shell: "/bin/sh",
+        cols: 80,
+        rows: 24,
+      });
+      clients.push(
+        pty.spawn(spawnPoisoner.command, spawnPoisoner.args, {
+          name: "xterm-256color",
+          cols: 80,
+          rows: 24,
+          cwd: dir,
+          env: { ...process.env, PASEO_PORT: "35885" },
+        }),
+      );
+      await delay(1500);
+      expect(tmuxSessionAlive(binding)).toBe(true);
+
+      const spawnFor = (target: PersistentTerminalBinding, port: string) =>
+        persistentSpawnArgs({
+          binding: target,
+          cwd: dir,
+          shell: "/bin/sh",
+          cols: 80,
+          rows: 24,
+          env: { PASEO_PORT: port },
+        });
+      const spawnSecond = spawnFor(second, "45873");
+      const spawnThird = spawnFor(third, "45383");
+      clients.push(
+        pty.spawn(spawnSecond.command, spawnSecond.args, {
+          name: "xterm-256color",
+          cols: 80,
+          rows: 24,
+          cwd: dir,
+        }),
+      );
+      clients.push(
+        pty.spawn(spawnThird.command, spawnThird.args, {
+          name: "xterm-256color",
+          cols: 80,
+          rows: 24,
+          cwd: dir,
+        }),
+      );
+      await delay(1500);
+      expect(tmuxSessionAlive(second)).toBe(true);
+      expect(tmuxSessionAlive(third)).toBe(true);
+
+      // Deterministic: the session environment carries the service's port.
+      for (const [target, port] of [
+        [second, "45873"],
+        [third, "45383"],
+      ] as const) {
+        const show = tmuxInvoke(target, ["show-environment", "-t", target.sessionName]);
+        expect(show.code).toBe(0);
+        expect(show.stdout.split("\n")).toContain(`PASEO_PORT=${port}`);
+      }
+
+      // Behavioral: each pane shell sees its own port, not the poisoned global.
+      const paneSees = async (target: PersistentTerminalBinding, port: string) => {
+        const marker = `PANE_PORT_${port}_`;
+        tmuxInvoke(target, ["send-keys", "-t", target.sessionName, `echo ${marker}$PASEO_PORT`, "Enter"]);
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const capture = tmuxInvoke(target, ["capture-pane", "-p", "-t", target.sessionName]);
+          if (capture.stdout.includes(`${marker}${port}`)) return;
+          if (Date.now() >= deadline) {
+            throw new Error(`pane ${target.sessionName} never showed ${marker}${port}:\n${capture.stdout}`);
+          }
+          await delay(250);
+        }
+      };
+      await paneSees(second, "45873");
+      await paneSees(third, "45383");
+    } finally {
+      for (const client of clients) client.kill();
+      tmuxInvoke(binding, ["kill-server"]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   tmuxIt("ensureTmuxServer detaches orphaned clients instead of moving them", async () => {
     // pa-vbhcu: without detach-on-destroy, killing a session moves its
     // attached clients to another session (dead terminals serving another
