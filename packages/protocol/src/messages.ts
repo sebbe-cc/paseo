@@ -1241,7 +1241,14 @@ const ImageAttachmentSchema = z.object({
   mimeType: z.string(), // e.g., "image/jpeg", "image/png"
 });
 
-export const ActiveTurnBehaviorSchema = z.enum(["interrupt", "steer"]);
+/**
+ * How a message addresses an agent with an active turn. `interrupt` replaces
+ * the turn, `steer` joins it, and `queue` starts a new turn at the next turn
+ * boundary without touching the active turn (pa-r6a9i): a busy provider holds
+ * the message in its foreground-turn queue and drains it when the turn ends,
+ * so mail wakes and follow-ups never abort a running tool call.
+ */
+export const ActiveTurnBehaviorSchema = z.enum(["interrupt", "steer", "queue"]);
 export type ActiveTurnBehavior = z.infer<typeof ActiveTurnBehaviorSchema>;
 
 export const SendAgentMessageSchema = z.object({

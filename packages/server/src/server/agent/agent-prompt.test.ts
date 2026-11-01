@@ -14,9 +14,12 @@ import { join } from "node:path";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
-import { waitForAgentRunStartWithTimeout } from "./agent-prompt.js";
+import { sendPreparedPromptToAgent, waitForAgentRunStartWithTimeout } from "./agent-prompt.js";
+import type { AgentStorage } from "./agent-storage.js";
 import type {
   AgentClient,
+  AgentPromptInput,
+  AgentRunOptions,
   AgentRunResult,
   AgentSession,
   AgentStreamEvent,
@@ -374,4 +377,183 @@ test("schedule trigger identity survives the provider assigning a message ID", (
   expect(projectAgentMessages({ type: "user_message", text })).toEqual(
     projectAgentMessages({ type: "user_message", text, messageId: "provider-message" }),
   );
+});
+
+// pa-r6a9i: "queue" sends start at the next turn boundary and never touch the
+// active turn — no steer into it, no replace/interrupt of it.
+class QueueProbeSession implements AgentSession {
+  readonly provider = "codex" as const;
+  readonly capabilities = RUN_START_TEST_CAPABILITIES;
+  readonly id = randomUUID();
+  readonly startTurnCalls: Array<{ prompt: unknown; options: unknown }> = [];
+  steers = 0;
+  interrupts = 0;
+  private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
+  private turnSeq = 0;
+
+  async run(): Promise<AgentRunResult> {
+    return { sessionId: this.id, finalText: "", timeline: [] };
+  }
+
+  async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }> {
+    this.startTurnCalls.push({ prompt, options });
+    const turnId = `turn-${++this.turnSeq}`;
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+    }, 0);
+    return { turnId };
+  }
+
+  async steerActiveTurn(): Promise<{ status: "accepted" }> {
+    this.steers += 1;
+    return { status: "accepted" };
+  }
+
+  subscribe(callback: (event: AgentStreamEvent) => void): () => void {
+    this.subscribers.add(callback);
+    return () => {
+      this.subscribers.delete(callback);
+    };
+  }
+
+  pushEvent(event: AgentStreamEvent): void {
+    for (const callback of this.subscribers) {
+      callback(event);
+    }
+  }
+
+  async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+
+  async getRuntimeInfo() {
+    return { provider: this.provider, sessionId: this.id, model: null, modeId: null };
+  }
+
+  async getAvailableModes() {
+    return [];
+  }
+
+  async getCurrentMode() {
+    return null;
+  }
+
+  async setMode(): Promise<void> {}
+
+  getPendingPermissions() {
+    return [];
+  }
+
+  async respondToPermission(): Promise<void> {}
+
+  describePersistence() {
+    return { provider: this.provider, sessionId: this.id };
+  }
+
+  async interrupt(): Promise<void> {
+    this.interrupts += 1;
+  }
+
+  async close(): Promise<void> {}
+}
+
+class QueueProbeClient implements AgentClient {
+  readonly provider = "codex" as const;
+  readonly capabilities = RUN_START_TEST_CAPABILITIES;
+  readonly sessions: QueueProbeSession[] = [];
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  async createSession(): Promise<AgentSession> {
+    const session = new QueueProbeSession();
+    this.sessions.push(session);
+    return session;
+  }
+
+  async fetchCatalog() {
+    return { models: [], modes: [] };
+  }
+
+  async resumeSession(): Promise<AgentSession> {
+    return await this.createSession();
+  }
+}
+
+async function createQueueScenario(): Promise<{
+  agentManager: AgentManager;
+  agentId: string;
+  session: QueueProbeSession;
+  storage: AgentStorage;
+  cleanup: () => Promise<void>;
+}> {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-queue-behavior-"));
+  const client = new QueueProbeClient();
+  const agentManager = new AgentManager({
+    clients: { codex: client },
+    logger: createTestLogger(),
+  });
+  const snapshot = await agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const storage = { get: async () => null } as unknown as AgentStorage;
+  return {
+    agentManager,
+    agentId: snapshot.id,
+    session: client.sessions[0]!,
+    storage,
+    cleanup: async () => {
+      await agentManager.closeAgent(snapshot.id).catch(() => undefined);
+      rmSync(workdir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("queue send to a busy agent reaches the provider queue without steering or replacing", async () => {
+  const scenario = await createQueueScenario();
+  try {
+    // Register an in-flight run without advancing it: the pending run alone
+    // marks the agent busy, exactly what a queue send must survive.
+    const run = scenario.agentManager.streamAgent(scenario.agentId, "busy work");
+    expect(scenario.agentManager.hasInFlightRun(scenario.agentId)).toBe(true);
+
+    const result = await sendPreparedPromptToAgent({
+      agentManager: scenario.agentManager,
+      agentStorage: scenario.storage,
+      agentId: scenario.agentId,
+      prompt: "mail wake",
+      activeTurnBehavior: "queue",
+      logger: createTestLogger(),
+    });
+
+    expect(result.disposition).toBe("queued");
+    expect(scenario.session.startTurnCalls).toHaveLength(1);
+    expect(scenario.session.startTurnCalls[0]!.prompt).toBe("mail wake");
+    expect(scenario.session.steers).toBe(0);
+    expect(scenario.session.interrupts).toBe(0);
+    await run.return?.(undefined);
+  } finally {
+    await scenario.cleanup();
+  }
+});
+
+test("queue send to an idle agent starts a turn normally", async () => {
+  const scenario = await createQueueScenario();
+  try {
+    const result = await sendPreparedPromptToAgent({
+      agentManager: scenario.agentManager,
+      agentStorage: scenario.storage,
+      agentId: scenario.agentId,
+      prompt: "mail wake",
+      activeTurnBehavior: "queue",
+      logger: createTestLogger(),
+    });
+
+    expect(result.disposition).toBe("turn_started");
+    expect(scenario.session.startTurnCalls).toHaveLength(1);
+    expect(scenario.session.steers).toBe(0);
+    expect(scenario.session.interrupts).toBe(0);
+  } finally {
+    await scenario.cleanup();
+  }
 });
