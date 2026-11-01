@@ -358,6 +358,19 @@ async function maybeRemoveDirectory(
     return false;
   }
 
+  // Another active workspace on this checkout still runs in it: tearing it down
+  // would stop that workspace's environment, so skip teardown and removal alike.
+  if (
+    !(await isDirectoryUnreferenced(
+      await dependencies.listActiveWorkspaces(),
+      backing.path,
+      new Set(archivedWorkspaceIds),
+      dependencies,
+    ))
+  ) {
+    return false;
+  }
+
   const archivedWorkspaceIdSet = new Set(archivedWorkspaceIds);
   const teardownTargets = target.teardownTargets.filter(
     (teardownTarget) =>
@@ -387,10 +400,10 @@ async function maybeRemoveDirectory(
     throw error;
   }
 
-  const remainingActive = await dependencies.listActiveWorkspaces();
+  // Teardown may run for a while; re-check before deleting the directory.
   if (
     !(await isDirectoryUnreferenced(
-      remainingActive,
+      await dependencies.listActiveWorkspaces(),
       backing.path,
       new Set(archivedWorkspaceIds),
       dependencies,
