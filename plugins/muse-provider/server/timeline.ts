@@ -1,4 +1,4 @@
-import { MspConnection } from "./connection.js";
+import type { MspHost } from "./connection.js";
 import { MuseError } from "./errors.js";
 import { todoSchema, outputSchema } from "./wire.js";
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
@@ -169,7 +169,7 @@ export function appendDelta(
 export class Timeline {
   private readonly items = new Map<string, WireItem>();
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly nativeId: string,
     private readonly id: string,
     private readonly emit: (event: ProviderEvent) => void,
