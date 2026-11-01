@@ -32,6 +32,9 @@ export interface SynthesizedToolCallEnd {
  * - a terminal row with no prior `running` row and no settled record still
  *   decides "ended" (providers may compact the running row away); no
  *   `started` is synthesized for it;
+ * - a `running` row for an already-settled callId is a resume/replay
+ *   re-emission, never a new call: it decides nothing, so the replayed
+ *   terminal row cannot decide a second "ended" (pa-thec6a, ft-fz9e);
  * - `closeTurn` synthesizes one end per still-open call of that turn, so
  *   every `started` is eventually followed by exactly one `ended`.
  *
@@ -82,6 +85,7 @@ export class ToolCallHookTracker {
     const calls = this.callsFor(agentId);
     if (item.status === "running") {
       if (calls.has(item.callId)) return null;
+      if (this.settled.get(agentId)?.has(item.callId)) return null;
       calls.set(item.callId, { name: item.name, turnId, detail: detail ?? item.detail });
       return "started";
     }

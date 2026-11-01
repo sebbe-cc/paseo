@@ -39,6 +39,19 @@ test("repeated running rows emit started once, terminal rows emit ended once", (
   expect(tracker.openCallCount("a")).toBe(0);
 });
 
+test("replayed running row after a terminal row does not resurrect the call (pa-thec6a)", () => {
+  const tracker = new ToolCallHookTracker();
+  expect(tracker.noteTimelineItem("a", running("c1"), "t1")).toBe("started");
+  expect(tracker.noteTimelineItem("a", terminal("c1", "completed"), "t1")).toBe("ended");
+  // Resume/replay re-sends the running row, then the terminal row again: the
+  // running row is a re-emission of the settled call, not a new call, so the
+  // replayed terminal row must not emit a second "ended".
+  expect(tracker.noteTimelineItem("a", running("c1"), "t1")).toBeNull();
+  expect(tracker.openCallCount("a")).toBe(0);
+  expect(tracker.noteTimelineItem("a", terminal("c1", "completed"), "t1")).toBeNull();
+  expect(tracker.openCallCount("a")).toBe(0);
+});
+
 test("a terminal row without a prior running row still ends once", () => {
   const tracker = new ToolCallHookTracker();
   expect(tracker.noteTimelineItem("a", terminal("c9", "failed"), "t1")).toBe("ended");
