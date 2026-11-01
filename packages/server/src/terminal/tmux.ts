@@ -198,6 +198,13 @@ export function requireTmuxSession(
 /**
  * Spawn arguments that attach the daemon-held PTY to the session, creating
  * it (detached, running `shell` in `cwd`) when it does not exist yet.
+ *
+ * `env` is passed as `new-session -e KEY=VALUE` session environment (pa-q85sdm):
+ * the pane shell runs in the tmux *server*, so the PTY client's environment
+ * never reaches it — without `-e` every session inherits the server-global
+ * environment from whichever client started the server (one service's
+ * PASEO_PORT leaked into every other service's shell, and the health check
+ * waited on a different port). Requires tmux 3.2+.
  */
 export function persistentSpawnArgs(options: {
   binding: PersistentTerminalBinding;
@@ -207,9 +214,16 @@ export function persistentSpawnArgs(options: {
   args?: string[];
   cols: number;
   rows: number;
+  env?: Record<string, string>;
 }): { command: string; args: string[] } {
-  const { binding, cwd, shell, command, args = [], cols, rows } = options;
+  const { binding, cwd, shell, command, args = [], cols, rows, env } = options;
   const sessionCommand = command ? [command, ...args] : [shell];
+  const sessionEnvArgs =
+    env === undefined
+      ? []
+      : Object.keys(env)
+          .sort()
+          .flatMap((key) => ["-e", `${key}=${env[key]}`]);
   return {
     command: binding.tmuxBin,
     args: [
@@ -225,6 +239,7 @@ export function persistentSpawnArgs(options: {
       String(cols),
       "-y",
       String(rows),
+      ...sessionEnvArgs,
       ...sessionCommand,
     ],
   };

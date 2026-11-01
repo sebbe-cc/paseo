@@ -1042,6 +1042,18 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     if (process.platform === "win32") {
       throw new Error("Persistent tmux terminals are not supported on Windows");
     }
+    // pa-q85sdm: the pane shell runs in the tmux server, not in the PTY
+    // client, so the client env below never reaches it. Hand the session its
+    // own environment explicitly, or every session inherits the server-global
+    // environment (one service's PASEO_PORT in every other service's shell).
+    const sessionEnv = buildTerminalEnvironment({
+      shell: resolvedShell,
+      env: {
+        ...env,
+        ...activityEnv,
+        PASEO_WORKSPACE_ID: workspaceId,
+      },
+    });
     ({ command: spawnCommand, args: spawnArgs } = persistentSpawnArgs({
       binding: options.persistent,
       cwd,
@@ -1049,6 +1061,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
       ...(command ? { command, args } : {}),
       cols,
       rows,
+      env: sessionEnv,
     }));
   } else {
     ({ command: spawnCommand, args: spawnArgs } = command
