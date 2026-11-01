@@ -16,6 +16,7 @@ import {
 } from "../plugins/lifecycle/index.js";
 import type {
   PluginSessionOpenRequest,
+  PluginToolCallOutcome,
   PluginTurnKind,
   PluginTurnPrepareRequest,
 } from "@getpaseo/plugin/server";
@@ -65,6 +66,7 @@ import {
   type SteerResult,
   type AgentStreamEvent,
   type AgentTimelineItem,
+  type ToolCallTimelineItem,
   type AgentUsage,
   type AgentRuntimeInfo,
   type ImportedTimelineEntry,
@@ -90,6 +92,7 @@ import {
   AgentStreamCoalescer,
 } from "./agent-stream-coalescer.js";
 import { limitAgentTimelineItemContent } from "./agent-timeline-content.js";
+import { ToolCallHookTracker } from "../plugins/lifecycle/tool-call-events.js";
 import {
   AgentRunState,
   type ForegroundTurnWaiter,
@@ -778,6 +781,12 @@ export class AgentManager {
   private readonly compactThresholdFired = new Set<string>();
   private readonly turnNumbers = new Map<string, number>();
   private readonly pendingTurnKinds = new Map<string, PluginTurnKind>();
+  /**
+   * Open tool calls per agent behind `agent.tool_call_started` /
+   * `agent.tool_call_ended` (pa-89is1.6). Fed only from live timeline
+   * appends, so history replay can never emit hook events.
+   */
+  private readonly toolCallHooks = new ToolCallHookTracker();
   private readonly retiredInternalAgents = new Map<
     string,
     RetiredInternalAgent & { expiresAt: number }
@@ -4172,6 +4181,7 @@ export class AgentManager {
   }
 
   private discardRetainedAgentState(agentId: string): void {
+    this.toolCallHooks.dropAgent(agentId);
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
     this.detachPluginTools(agentId);
@@ -4670,6 +4680,7 @@ export class AgentManager {
 
     if (!options?.fromHistory) {
       if (isTurnTerminalEvent(event)) {
+        this.closeOpenToolCallHooks(agent, event, eventTurnId);
         this.runs.settleTerminalRun(agent.id, eventTurnId);
         if (isForegroundEvent) {
           this.finalizeForegroundTurn(agent, eventTurnId);
@@ -5128,7 +5139,101 @@ export class AgentManager {
       }
     }
 
+    if (item.type === "tool_call") {
+      this.emitToolCallHook(agentId, item, turnId);
+    }
+
     return event;
+  }
+
+  /**
+   * Observe-only fan-out for `agent.tool_call_started` /
+   * `agent.tool_call_ended` (pa-89is1.6). Runs after the timeline row is
+   * recorded, never blocks or alters tool execution, and skips internal
+   * agents like every other lifecycle event. Hook payloads carry the same
+   * content-limited detail the timeline broadcast gets; plugin handler
+   * failures are contained by the hook registry and can never flip a tool
+   * result.
+   */
+  private emitToolCallHook(agentId: string, item: ToolCallTimelineItem, turnId?: string): void {
+    if (!this.pluginLifecycle) return;
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.internal) return;
+    const limited = limitAgentTimelineItemContent(item);
+    if (limited.type !== "tool_call") return;
+    const decision = this.toolCallHooks.noteTimelineItem(
+      agentId,
+      item,
+      turnId ?? null,
+      limited.detail,
+    );
+    if (!decision) return;
+    const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+    const resolvedTurnId = turnId ?? null;
+    let outcome: PluginToolCallOutcome = { kind: "canceled" };
+    if (item.status === "completed") {
+      outcome = { kind: "completed" };
+    } else if (item.status === "failed") {
+      outcome = { kind: "failed", error: item.error };
+    }
+    if (decision === "started") {
+      this.pluginLifecycle.emit("agent.tool_call_started", {
+        agent: hookAgent,
+        turnId: resolvedTurnId,
+        toolCall: {
+          id: item.callId,
+          name: item.name,
+          detail: limited.detail,
+          ...(limited.metadata !== undefined ? { metadata: limited.metadata } : {}),
+        },
+      });
+      return;
+    }
+    this.pluginLifecycle.emit("agent.tool_call_ended", {
+      agent: hookAgent,
+      turnId: resolvedTurnId,
+      toolCall: { id: item.callId, name: item.name },
+      outcome,
+      detail: limited.detail,
+      error: item.error,
+    });
+  }
+
+  /**
+   * Synthesize one `agent.tool_call_ended` (canceled) per still-open call of
+   * a turn that ends first, so every `started` is eventually followed by
+   * exactly one `ended`. Live turns only; replay never reaches here.
+   */
+  private turnCloseReason(
+    event: AgentStreamEvent,
+  ): "turn_completed" | "turn_failed" | "turn_canceled" | null {
+    if (event.type === "turn_completed") return "turn_completed";
+    if (event.type === "turn_failed") return "turn_failed";
+    if (event.type === "turn_canceled") return "turn_canceled";
+    return null;
+  }
+
+  private closeOpenToolCallHooks(
+    agent: ActiveManagedAgent,
+    event: AgentStreamEvent,
+    turnId: string | undefined,
+  ): void {
+    if (!this.pluginLifecycle || agent.internal) return;
+    const reason = this.turnCloseReason(event);
+    if (!reason) return;
+    const closed = this.toolCallHooks.closeTurn(agent.id, turnId ?? null);
+    if (closed.length === 0) return;
+    const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+    for (const call of closed) {
+      this.pluginLifecycle.emit("agent.tool_call_ended", {
+        agent: hookAgent,
+        turnId: call.turnId,
+        toolCall: { id: call.callId, name: call.name },
+        outcome: { kind: "canceled", reason },
+        detail: call.detail,
+        error: null,
+      });
+    }
   }
 
   private recordSubmittedPrompt(
