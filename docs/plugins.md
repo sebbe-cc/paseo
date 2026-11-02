@@ -426,6 +426,49 @@ The [public reference](../public-docs/plugins/reference.md#icons) owns the autho
 - The plugin compiler loads `.svg` imports as text, so `import icon from "./client/icon.svg"` is the
   markup string.
 
+## Contribute CLI commands
+
+A plugin can expose daemon-side behavior as `paseo` subcommands by declaring a `cli` section in
+`paseo-plugin.json`. The CLI dispatches `paseo <name> <command>` through the daemon's plugin RPC,
+so agents and scripts can drive the plugin without the app:
+
+```json
+{
+  "id": "paseo-workflows",
+  "cli": {
+    "name": "wf",
+    "description": "Run workflows",
+    "commands": [
+      {
+        "name": "start",
+        "rpc": "runs.start",
+        "description": "Start a workflow run",
+        "args": [{ "name": "workflow" }, { "name": "bead" }],
+        "options": [{ "name": "provider" }]
+      }
+    ]
+  }
+}
+```
+
+`paseo wf start do-work sb-1 --provider claude` invokes RPC `runs.start` with
+`{ "workflow": "do-work", "bead": "sb-1", "provider": "claude", "cwd": "<caller cwd>" }`. Positional
+arguments fill `args` in order, `--options` fill the payload fields with the same names, and the
+caller's working directory is always sent as `cwd`. `--json` prints the raw RPC response, otherwise
+a readable rendering is printed. An RPC failure exits 1. `paseo --help` lists installed plugins'
+commands, and `paseo wf --help` lists the plugin's commands. A disabled or missing plugin fails
+with an enable hint instead of dispatching.
+
+Rules: `cli.name` and command names are lowercase letters, digits, and dashes. A name that
+collides with a built-in command (`agent`, `plugin`, `workspace`, …) is rejected at load, never
+shadowing it. Argument and option names must be unique per command and must not use the CLI's own
+flags (`json`, `help`, `host`, `home`, `format`).
+
+`paseo plugin rpc <plugin-id> <method> [payload-json]` is the low-level fallback for any RPC
+method: the payload argument is JSON, `-` reads it from stdin, the response prints as JSON, and an
+RPC failure exits 1 with the error as JSON on stderr. `paseo plugin rpc <plugin-id> --list` lists
+the methods a running plugin exposes.
+
 ## Lifecycle hooks
 
 Server entries register lifecycle observers with `server.on()` and request transforms with

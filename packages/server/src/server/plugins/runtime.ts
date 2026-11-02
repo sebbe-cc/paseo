@@ -500,6 +500,11 @@ export class PluginRuntime {
     return this.request(loaded, { type: "invoke", requestId: randomUUID(), method, input });
   }
 
+  getRpcMethods(pluginId: string): string[] | undefined {
+    const loaded = this.plugins.get(pluginId);
+    return loaded ? [...loaded.methods].sort() : undefined;
+  }
+
   emit<Name extends keyof PluginLifecycleEvents>(
     name: Name,
     event: PluginLifecycleEvents[Name],
