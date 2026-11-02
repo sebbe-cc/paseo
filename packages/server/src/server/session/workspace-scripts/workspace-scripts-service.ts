@@ -8,6 +8,7 @@ import type {
   WorkspaceScriptPayload,
 } from "../../messages.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
+import { removePersistentTerminal } from "../../persistent-terminals.js";
 import type { ServiceProxySubsystem } from "../../service-proxy.js";
 import type { WorkspaceScriptRuntimeStore } from "../../workspace-script-runtime-store.js";
 import type { ScriptHealthState } from "../../script-health-monitor.js";
@@ -69,6 +70,8 @@ export function createWorkspaceScriptsService(deps: {
   publishStatusUpdate: (message: ScriptStatusUpdateMessage) => void;
   spawnWorkspaceScript: (options: SpawnWorkspaceScriptOptions) => Promise<WorktreeScriptResult>;
   assertAutomationAllowed: (workspaceId: string) => Promise<void>;
+  /** PASEO_HOME for the persistent-terminal journal (pa-bhkn0); unset disables it. */
+  persistenceDir?: string;
 }): WorkspaceScriptsService {
   const {
     serviceProxy,
@@ -87,6 +90,7 @@ export function createWorkspaceScriptsService(deps: {
     publishStatusUpdate,
     spawnWorkspaceScript,
     assertAutomationAllowed,
+    persistenceDir,
   } = deps;
 
   function resolveGitMetadata(
@@ -190,6 +194,7 @@ export function createWorkspaceScriptsService(deps: {
       runtimeStore: available.runtimeStore,
       terminalManager: available.terminalManager,
       globalServicePorts,
+      ...(persistenceDir !== undefined ? { persistenceDir } : {}),
       logger,
       onLifecycleChanged: () => {
         void emitStatusUpdate(workspace.workspaceId, workspace.cwd);
@@ -230,6 +235,11 @@ export function createWorkspaceScriptsService(deps: {
 
     // The launcher's terminal exit listener owns route removal and runtime state updates.
     await available.terminalManager.killTerminalAndWait(runtime.terminalId);
+    if (persistenceDir !== undefined) {
+      // An explicit stop ends the tmux session too, so the journal must not
+      // reattach it on the next boot.
+      removePersistentTerminal(persistenceDir, runtime.terminalId);
+    }
 
     const script = (await buildSnapshot(workspace, project)).find(
       (entry) => entry.scriptName === input.scriptName,

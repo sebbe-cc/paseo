@@ -18,6 +18,12 @@ export interface WorkerTerminalInfo {
   activity: TerminalActivity | null;
 }
 
+export interface WorkerPersistentTerminalBinding {
+  tmuxBin: string;
+  socketPath: string;
+  sessionName: string;
+}
+
 export interface WorkerCreateTerminalOptions {
   id?: string;
   cwd: string;
@@ -31,6 +37,8 @@ export interface WorkerCreateTerminalOptions {
   cols?: number;
   activityToken?: string;
   activityUrl?: string | null;
+  /** Persistent tmux binding (pa-bhkn0): the session survives daemon restarts. */
+  persistent?: WorkerPersistentTerminalBinding;
 }
 
 export interface WorkerKillAndWaitOptions {
@@ -89,6 +97,8 @@ export type TerminalWorkerRequest =
   | {
       type: "killAll";
       requestId: string;
+      /** Leave persistent tmux sessions alone (pa-bhkn0 shutdown survival). */
+      sparePersistent?: boolean;
     }
   | {
       type: "send";

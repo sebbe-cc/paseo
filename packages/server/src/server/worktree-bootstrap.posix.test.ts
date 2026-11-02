@@ -100,13 +100,15 @@ describe.skipIf(isPlatform("win32"))("worktree-bootstrap POSIX-only", () => {
           scripts: {
             api: {
               type: "service",
+              // A service must listen on its PASEO_PORT: spawn verification
+              // (pa-vbhcu) polls the port before reporting running.
               command:
-                "node -e \"const fs=require('fs'); fs.writeFileSync('api-env.json.tmp', JSON.stringify(process.env)); fs.renameSync('api-env.json.tmp', 'api-env.json'); setTimeout(()=>{}, 30000)\"",
+                "node -e \"const http=require('http'); http.createServer((_,res)=>res.end('ok')).listen(Number(process.env.PASEO_PORT), '127.0.0.1'); const fs=require('fs'); fs.writeFileSync('api-env.json.tmp', JSON.stringify(process.env)); fs.renameSync('api-env.json.tmp', 'api-env.json'); setTimeout(()=>{}, 30000)\"",
             },
             web: {
               type: "service",
               command:
-                "node -e \"const fs=require('fs'); fs.writeFileSync('web-env.json.tmp', JSON.stringify(process.env)); fs.renameSync('web-env.json.tmp', 'web-env.json'); setTimeout(()=>{}, 30000)\"",
+                "node -e \"const http=require('http'); http.createServer((_,res)=>res.end('ok')).listen(Number(process.env.PASEO_PORT), '127.0.0.1'); const fs=require('fs'); fs.writeFileSync('web-env.json.tmp', JSON.stringify(process.env)); fs.renameSync('web-env.json.tmp', 'web-env.json'); setTimeout(()=>{}, 30000)\"",
             },
           },
         }),

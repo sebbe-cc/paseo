@@ -18,6 +18,8 @@ export interface PaseoTerminalCreateOptions {
   command?: string;
   args?: string[];
   size?: { rows: number; cols: number };
+  /** Persistent tmux terminal: survives daemon restarts with the same PIDs. */
+  persistent?: boolean;
   requestId?: string;
 }
 
@@ -120,7 +122,18 @@ export function createTerminalActions(
       sendKeys: (keys) => write(keys.map(resolveKeyToken).join("")),
       capture: (options = {}) => {
         const { requestId, ...captureOptions } = options;
-        return client().captureTerminal(id, captureOptions, requestId);
+        // Kept non-async so the outdated-host guard in client() still throws
+        // synchronously like every other handle method.
+        return client()
+          .captureTerminal(id, captureOptions, requestId)
+          .then((result) => {
+            // The daemon reports a missing terminal (or a gone tmux session)
+            // as an error (pa-vbhcu); fail loudly instead of serving output.
+            if (result.error) {
+              throw new Error(result.error);
+            }
+            return result;
+          });
       },
       kill: async (requestId) => {
         const result = await client().killTerminal(id, requestId);
