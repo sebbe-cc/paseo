@@ -45,6 +45,7 @@ export const CLIENT_CAPS = {
   pluginTimelineItems: "plugin_timeline_items",
   workspaceSetupObservation: "workspace_setup_observation",
   pluginVoiceProviders: "plugin_voice_providers",
+  pluginDictationProviders: "plugin_dictation_providers",
   // COMPAT(workspaceSetupBlocked): added in v0.8.0, remove after 2027-03-07 once client floor >= v0.8.0.
   workspaceSetupBlocked: "workspace_setup_blocked",
   browserHost: "browser_host",
