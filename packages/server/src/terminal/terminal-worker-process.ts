@@ -318,7 +318,12 @@ async function handleRequest(message: TerminalWorkerRequest): Promise<void> {
     }
 
     case "killAll": {
-      manager.killAll();
+      // Shutdown survival (pa-bhkn0): with sparePersistent the tmux sessions
+      // of persistent terminals live on for reattach; their PTY clients die
+      // with this worker.
+      manager.killAll(
+        message.sparePersistent === true ? { sparePersistent: true } : undefined,
+      );
       for (const terminalId of Array.from(unsubscribeByTerminalId.keys())) {
         clearTerminalSubscriptions(terminalId);
       }
@@ -348,5 +353,8 @@ process.on("message", (message: TerminalWorkerRequest) => {
 
 process.once("disconnect", () => {
   ipcClosing = true;
-  manager.killAll();
+  // Spare persistent tmux sessions on IPC loss too: the session outlives this
+  // worker either way, and a replacement worker reattaches to it. Killing the
+  // session here would defeat survival when the parent is SIGKILLed.
+  manager.killAll({ sparePersistent: true });
 });
