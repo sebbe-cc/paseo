@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { readPluginManifest } from "./manifest.js";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isBuiltin } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 import { createPluginImportReader, type PluginImportKind } from "./compiler-imports.js";
 import type { Metafile, OnResolveResult, Plugin } from "esbuild";
@@ -13,6 +13,8 @@ import {
 } from "./plugin-sdk-specifiers.js";
 
 import { loadEsbuild, SERVER_HOST_MODULES } from "./compiler-esbuild.js";
+
+const nodeRequire = createRequire(import.meta.url);
 
 type PluginBuildTarget = "client" | "server";
 
@@ -110,8 +112,17 @@ function lexicalBoundaryError(
   }
 }
 
+function isPathSpecifier(specifier: string): boolean {
+  return specifier.startsWith(".") || path.isAbsolute(specifier);
+}
+
+// Metafile paths are relative to the working directory; only filesystem inputs exist.
+function canonicalInput(file: string): string | null {
+  const absolutePath = path.resolve(file);
+  return existsSync(absolutePath) ? realpathSync.native(absolutePath) : null;
+}
+
 function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory: string): Plugin {
-  const boundaryResolution = {};
   const linkedDependencyRoots = new Set<string>();
   return {
     name: `paseo-plugin-${target}-runtime-boundary`,
@@ -150,13 +161,17 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         typeOnly: boolean,
       ): Promise<Set<string>> {
         const declaration = imports.resolve(specifier, file, kind);
+        const declarationOnly = !!declaration && /\.d\.[cm]?ts$/.test(declaration);
         const dependencyFiles = new Set<string>();
-        if (declaration && (typeOnly || /\.d\.[cm]?ts$/.test(declaration)))
-          dependencyFiles.add(declaration);
+        if (declaration && (typeOnly || declarationOnly)) dependencyFiles.add(declaration);
         if (typeOnly && !declaration) {
           throw new Error(`Could not resolve type dependency "${specifier}" imported by ${file}`);
         }
-        if (!typeOnly && kind !== "type-reference") {
+        // Bundled files are checked on load and from the metafile, so this only adds erased
+        // imports. esbuild's resolve() rereads every ancestor directory; avoid it where TS suffices.
+        if (!typeOnly && kind !== "type-reference" && declaration && isPathSpecifier(specifier)) {
+          dependencyFiles.add(declaration);
+        } else if (!typeOnly && kind !== "type-reference" && !declarationOnly) {
           const resolution = await buildContext.resolve(specifier, {
             importer: file,
             resolveDir: path.dirname(file),
@@ -214,33 +229,42 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
       buildContext.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, (args) =>
         checkSourceImports(args.path, target),
       );
-      buildContext.onResolve({ filter: /.*/ }, async (args) => {
+      buildContext.onResolve({ filter: /.*/ }, (args) => {
         if (args.kind === "entry-point") return null;
-        if (args.pluginData === boundaryResolution) return null;
         const importer =
           args.namespace === "file" ? realpathSync.native(args.importer) : args.importer;
         const resolveDir = args.namespace === "file" ? path.dirname(importer) : args.resolveDir;
         const owner = directoryTarget(importer, pluginDirectory) === "shared" ? "shared" : target;
         const specifierError = runtimeSpecifierError(args.path, owner, importer);
         if (specifierError) return specifierError;
-        const lexicalError = lexicalBoundaryError(args.path, resolveDir, pluginDirectory, owner);
-        if (lexicalError) return lexicalError;
-        const resolution = await buildContext.resolve(args.path, {
-          importer,
-          namespace: args.namespace,
-          resolveDir,
-          kind: args.kind,
-          pluginData: boundaryResolution,
-          with: args.with,
-        });
-        if (
-          resolution.errors.length > 0 ||
-          resolution.external ||
-          resolution.namespace !== "file"
-        ) {
-          return null;
+        return lexicalBoundaryError(args.path, resolveDir, pluginDirectory, owner);
+      });
+      // Resolving each import again through resolve() would cost every ancestor directory
+      // read per call, so the targets esbuild resolved are checked once, from the metafile.
+      buildContext.onEnd(({ metafile }) => {
+        const edges = Object.entries(metafile?.inputs ?? {}).flatMap(
+          ([input, { imports: dependencies }]) => {
+            const importer = canonicalInput(input);
+            if (!importer) return [];
+            const owner: PluginBuildTarget | "shared" =
+              directoryTarget(importer, pluginDirectory) === "shared" ? "shared" : target;
+            return dependencies.flatMap((dependency) => {
+              const file = dependency.external ? null : canonicalInput(dependency.path);
+              const specifier = dependency.original ?? dependency.path;
+              return file ? [{ file, specifier, importer, owner }] : [];
+            });
+          },
+        );
+        // Package imports first: they record linked roots that the package's own imports need.
+        edges.sort(
+          (left, right) =>
+            Number(isPathSpecifier(left.specifier)) - Number(isPathSpecifier(right.specifier)),
+        );
+        for (const { file, specifier, importer, owner } of edges) {
+          const error = resolvedBoundaryError(file, specifier, importer, owner);
+          if (error) return { errors: error.errors };
         }
-        return resolvedBoundaryError(resolution.path, args.path, importer, owner);
+        return null;
       });
     },
   };
@@ -368,7 +392,24 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
-  return wrapCommonJsBundle(makeHermesInteropEager(output));
+  const code = target === "client" ? await lowerClassesForHermes(output) : output;
+  return wrapCommonJsBundle(makeHermesInteropEager(code));
+}
+
+async function lowerClassesForHermes(code: string): Promise<string> {
+  // Hermes compiles eval'd sources of 64 KiB or more lazily and skips its class
+  // transform there, leaving class bindings undefined. esbuild cannot lower classes.
+  if (!/\bclass\b/.test(code)) return code;
+  const babel = nodeRequire("@babel/core") as typeof import("@babel/core");
+  const result = await babel.transformAsync(code, {
+    babelrc: false,
+    configFile: false,
+    compact: false,
+    sourceType: "script",
+    plugins: [nodeRequire("@babel/plugin-transform-classes")],
+  });
+  if (!result?.code) throw new Error("Plugin client class lowering produced no output");
+  return result.code;
 }
 
 export async function compilePlugin(entryPaths: {
