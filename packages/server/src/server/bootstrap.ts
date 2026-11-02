@@ -161,7 +161,10 @@ import {
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { ScheduleService } from "./schedule/service.js";
 import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
-import { createOrchestrationSkills } from "./orchestration-skills/index.js";
+import {
+  createOrchestrationSkills,
+  reportSkillsMaintenanceFailure,
+} from "./orchestration-skills/index.js";
 import {
   resolveReloadableConfig,
   type ResolvedDaemonSettings,
@@ -705,7 +708,7 @@ export async function createPaseoDaemon(
   });
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
   void orchestrationSkills.autoUpdate().catch((error) => {
-    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+    reportSkillsMaintenanceFailure(logger, error);
   });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
