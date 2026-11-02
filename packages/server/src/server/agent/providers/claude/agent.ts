@@ -71,6 +71,7 @@ import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../prov
 import {
   applyClaudeToolPolicy,
   claudeInboxAccept,
+  sessionGrantedSkills,
   ClaudeProviderOptionsSchema,
   type ClaudeProviderOptions,
 } from "./options.js";
@@ -3741,6 +3742,14 @@ class ClaudeAgentSession implements AgentSession {
     } else if (this.claudeSessionId) {
       sessionBinding.resume = this.claudeSessionId;
     }
+    // Gas City session skill scope (pa-uumx5v), computed once: the
+    // gascity plugin publishes the granted layer-skill names in
+    // featureValues.gascity_granted_skills; the SDK hides every other
+    // skill from the listing and rejects it in the Skill tool.
+    // Sessions without the contract behave exactly as before.
+    const grantedSkills = sessionGrantedSkills(
+      this.config.featureValues as Record<string, unknown> | undefined,
+    );
 
     const base: ClaudeOptions = {
       cwd: this.config.cwd,
@@ -3774,6 +3783,7 @@ class ClaudeAgentSession implements AgentSession {
       ...(effort ? { effort } : {}),
       ...providerOptions,
       ...settingsOptions,
+      ...(grantedSkills ? { skills: grantedSkills } : {}),
       // Provider subagent panes render the child's nested transcript.
       forwardSubagentText: true,
       // Stop and replace abort only the main turn, like Esc in Claude Code, and background
