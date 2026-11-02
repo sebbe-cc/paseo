@@ -43,7 +43,12 @@ export const lifecycleEventNames = [
   "workspace.created",
   "workspace.archived",
 ] as const;
-export const beforeHookNames = ["agent.create", "agent.session_open", "workspace.create"] as const;
+export const beforeHookNames = [
+  "agent.create",
+  "agent.session_open",
+  "agent.compact",
+  "workspace.create",
+] as const;
 
 const beforeSchemas = {
   "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true }).strict(),
@@ -60,6 +65,21 @@ const beforeSchemas = {
       tools: z.array(agentToolMetadataSchema),
       env: z.record(z.string(), z.string()),
       mcpServers: CreateAgentRequestMessageSchema.shape.config.shape.mcpServers.unwrap(),
+    })
+    .strict(),
+  "agent.compact": z
+    .object({
+      agentId: z.string(),
+      provider: z.string(),
+      reason: z.enum(["auto", "manual"]),
+      source: z.enum(["provider", "threshold"]),
+      usage: z
+        .object({
+          contextWindowUsedTokens: z.number().nullable(),
+          contextWindowMaxTokens: z.number().nullable(),
+        })
+        .strict(),
+      skip: z.boolean(),
     })
     .strict(),
   "workspace.create": WorkspaceCreateRequestSchema.omit({ type: true, requestId: true }).strict(),
@@ -183,6 +203,13 @@ export function validateBeforeResult<Name extends keyof PluginWireBeforeRequests
       !isDeepStrictEqual(previous.labels, next.labels)
     ) {
       throw new Error("agent.session_open hooks can only change env, tools, and mcpServers");
+    }
+  }
+  if (name === "agent.compact") {
+    const previous = beforeSchemas["agent.compact"].parse(input);
+    const next = beforeSchemas["agent.compact"].parse(result);
+    if (JSON.stringify({ ...previous, skip: next.skip }) !== JSON.stringify(next)) {
+      throw new Error("agent.compact hooks can only change skip");
     }
   }
   if (name === "agent.create") {
