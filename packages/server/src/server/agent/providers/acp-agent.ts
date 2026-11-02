@@ -111,6 +111,7 @@ import {
   resolveDefaultAgentCreateConfig,
 } from "../create-agent-mode.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
+import { PendingTurnQueue } from "../pending-turn-queue.js";
 import {
   checkProviderLaunchAvailable,
   createProviderEnv,
@@ -1760,6 +1761,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
   private currentTurnUsage: AgentUsage | undefined;
   private activeForegroundTurnId: string | null = null;
+  /**
+   * Messages sent while a foreground turn is active wait here instead of
+   * being rejected, then start in order when the active turn ends.
+   */
+  private readonly pendingTurns = new PendingTurnQueue(() => randomUUID());
   private fallbackAssistantMessageId: string | null = null;
   private closed = false;
   private historyPending = false;
@@ -1968,11 +1974,36 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       throw new Error(`${this.provider} session is not initialized`);
     }
     if (this.activeForegroundTurnId) {
-      throw new Error("A foreground turn is already active");
+      // A turn the dead connection can no longer complete must not block
+      // behind it. Anything else waits for turn end instead of being
+      // rejected, so no sender ever loses a message.
+      if (this.clearStuckForegroundTurn("startTurn") === null) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        this.logger.debug(
+          { agentId: this.agentId, queuedTurnId, queued: this.pendingTurns.size },
+          "provider.acp.turn_queued",
+        );
+        return { turnId: queuedTurnId };
+      }
+      if (this.activeForegroundTurnId) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        return { turnId: queuedTurnId };
+      }
     }
+    return this.startTurnInternal(prompt, options);
+  }
 
+  private startTurnInternal(
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    turnId: string = randomUUID(),
+  ): { turnId: string } {
+    const connection = this.connection;
+    const sessionId = this.sessionId;
+    if (!connection || !sessionId) {
+      throw new Error(`${this.provider} session is not initialized`);
+    }
     this.deliverTranslatedEvents(this.flushPendingUserMessage());
-    const turnId = randomUUID();
     const messageId = options?.clientMessageId ?? randomUUID();
     this.activeForegroundTurnId = turnId;
     this.fallbackAssistantMessageId = null;
@@ -1981,9 +2012,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
     this.emitSubmittedUserMessage(prompt, messageId, turnId, options?.clientMessageId);
 
-    void this.connection
+    void connection
       .prompt({
-        sessionId: this.sessionId,
+        sessionId,
         messageId,
         prompt: toACPContentBlocks(prompt),
       })
@@ -2618,6 +2649,8 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.connection = null;
     this.child = null;
     this.activeForegroundTurnId = null;
+    // The daemon synthesizes cancellation for runs bound to queued turns.
+    this.pendingTurns.clear();
   }
 
   async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
@@ -3427,6 +3460,59 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       this.submittedUserMessageTurnId = null;
     }
     this.pushEvent(event);
+    this.drainPendingTurns();
+  }
+
+  /**
+   * Start the next queued message, if any, now that no foreground turn is
+   * active. The internal starter claims the slot synchronously, so
+   * concurrent starts cannot interleave.
+   */
+  private drainPendingTurns(): void {
+    if (this.closed || this.activeForegroundTurnId) {
+      return;
+    }
+    const next = this.pendingTurns.dequeue();
+    if (!next) {
+      return;
+    }
+    try {
+      this.startTurnInternal(next.prompt, next.options, next.turnId);
+    } catch (error) {
+      this.finishTurn({
+        type: "turn_failed",
+        provider: this.provider,
+        error: error instanceof Error ? error.message : "Queued turn failed to start",
+        turnId: next.turnId,
+      });
+    }
+  }
+
+  /**
+   * Fail and clear a foreground turn marked active while the connection is
+   * gone, so resume/reload never leaves a hanging turn behind. Returns the
+   * cleared turn id, or null when there is no stuck turn.
+   */
+  clearStuckTurn(reason: string): string | null {
+    return this.clearStuckForegroundTurn(reason);
+  }
+
+  private clearStuckForegroundTurn(reason: string): string | null {
+    const stuckTurnId = this.activeForegroundTurnId;
+    if (!stuckTurnId || this.closed) {
+      return null;
+    }
+    if (this.connection && this.sessionId) {
+      return null;
+    }
+    this.logger.warn({ agentId: this.agentId, stuckTurnId, reason }, "provider.acp.clear_stuck_turn");
+    this.finishTurn({
+      type: "turn_failed",
+      provider: this.provider,
+      error: "Turn was still marked active after its connection ended; clearing it.",
+      turnId: stuckTurnId,
+    });
+    return stuckTurnId;
   }
 
   private cancelPendingPermissions(): void {
