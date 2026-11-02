@@ -14,7 +14,11 @@ export {
 } from "./compiler-esbuild.js";
 
 export type CompilerTask =
-  | { kind: "entries"; entries: Parameters<typeof build.compilePlugin>[0] }
+  | {
+      kind: "entries";
+      entries: Parameters<typeof build.compilePlugin>[0];
+      runtimeExternals?: string[];
+    }
   | { kind: "directory"; directory: string; version: string; builtinId?: string }
   | {
       kind: "prepare";
@@ -143,8 +147,11 @@ export function runCompilerTask<T extends CompilerTask>(
   return compiler.run(task, onLog);
 }
 
-export function compilePlugin(entries: Parameters<typeof build.compilePlugin>[0]) {
-  return runCompilerTask({ kind: "entries", entries });
+export function compilePlugin(
+  entries: Parameters<typeof build.compilePlugin>[0],
+  runtimeExternals?: string[],
+) {
+  return runCompilerTask({ kind: "entries", entries, runtimeExternals });
 }
 
 export function compileDirectoryPlugin(directory: string, version: string, builtinId?: string) {
