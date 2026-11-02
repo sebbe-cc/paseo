@@ -3307,3 +3307,22 @@ Use `paseo plugin ls` to read the current status and error.
 | Edited code does not appear                                           | Run `npm run typecheck`, then `paseo plugin reload <id>`.                                                                                          |
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
+
+### Decorated text in plugin timelines (desvio)
+
+`DecoratedText` from `@getpaseo/plugin/client/ui` accepts a literal string as
+`children` and React Native `Text` props. In agent timeline renderers it applies
+all inline decorators registered on that host, including live invalidations.
+Pressing a chip uses the original decorator's agent/workspace context. Outside
+a timeline (including galleries), or on native clients, it renders plain text.
+Set `inlineCode` to honor decorators that opted out of inline code. Unknown
+matches whose resolver returns `null` remain plain text. Markdown, URLs and
+file paths are never interpreted by this component.
+
+```tsx
+<DecoratedText style={{ color: theme.colors.foreground }}>
+  {"Ready: pa-123"}
+</DecoratedText>
+```
+
+The existing `Markdown` component also receives decorators in plugin timelines.
