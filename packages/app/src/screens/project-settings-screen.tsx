@@ -34,6 +34,7 @@ import { settingsStyles } from "@/styles/settings";
 import { useProjects } from "@/hooks/use-projects";
 import type { ProjectEditFormSnapshot } from "@/projects/edit-form";
 import { useProjectIcons } from "@/projects/icons";
+import { ProjectContainerSettingsSection } from "@/project-containers/settings-section";
 import { createProjectIconTarget } from "@/projects/icon-target";
 import { useHostRuntimeClient, useHostRuntimeSnapshot } from "@/runtime/host-runtime";
 import { useHostFeature } from "@/runtime/host-features";
@@ -303,6 +304,8 @@ function ProjectSettingsBody({
         supportsCustomIcon={supportsCustomIcon}
         snapshot={editSnapshot}
       />
+
+      <ProjectContainerSettingsSection repository={project} />
 
       {renderContent({
         readQuery,
