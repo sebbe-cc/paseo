@@ -5616,7 +5616,38 @@ export class AgentManager {
             mcpServers: { ...launchConfig.mcpServers, ...launchContext.mcpServers },
           }
         : launchConfig;
-    return launchContext.paseoTools ? stripInternalPaseoMcpServer(merged) : merged;
+    const config = launchContext.paseoTools ? stripInternalPaseoMcpServer(merged) : merged;
+    if (!config.mcpServers) return config;
+    return {
+      ...config,
+      mcpServers: Object.fromEntries(
+        Object.entries(config.mcpServers).map(([name, server]) => {
+          if ((server.type !== "http" && server.type !== "sse") || !server.headers) {
+            return [name, server];
+          }
+          return [
+            name,
+            {
+              ...server,
+              headers: Object.fromEntries(
+                Object.entries(server.headers).map(([header, value]) => [
+                  header,
+                  value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, variable: string) => {
+                    const resolved = launchContext.env?.[variable];
+                    if (typeof resolved !== "string") {
+                      throw new Error(
+                        `Missing launch environment variable ${variable} for MCP header`,
+                      );
+                    }
+                    return resolved;
+                  }),
+                ]),
+              ),
+            },
+          ];
+        }),
+      ),
+    };
   }
 
   private async requireAvailableClient(options: { provider: AgentProvider }): Promise<AgentClient> {
