@@ -179,6 +179,8 @@ export interface AgentCapabilityFlags {
   supportsRewindConversation?: boolean;
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
+  /** The provider calls AgentLaunchContext.beforeCompact from its own pre-compact hook. */
+  supportsPreCompactHook?: boolean;
 }
 
 export interface AgentPersistenceHandle {
@@ -626,6 +628,8 @@ export interface AgentLaunchContext {
    * AgentSessionConfig; providers may adapt it to their native tool surface.
    */
   paseoTools?: PaseoToolCatalog;
+  /** Runs plugin agent.compact hooks; skip=true means the provider must not compact. */
+  beforeCompact?: (input: { reason: "auto" | "manual" }) => Promise<{ skip: boolean }>;
 }
 
 export interface AgentCreateSessionOptions {

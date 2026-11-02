@@ -44,6 +44,20 @@ export interface PluginSessionOpenRequest {
   mcpServers: NonNullable<AgentSessionConfig["mcpServers"]>;
 }
 
+/**
+ * Fired before an agent's context is compacted. Return `{ ...request, skip: true }` to
+ * replace the compaction; only `skip` may change.
+ */
+export interface PluginCompactRequest {
+  agentId: string;
+  provider: string;
+  reason: "auto" | "manual";
+  /** "provider": the harness's own pre-compact hook; "threshold": Paseo's context usage watch. */
+  source: "provider" | "threshold";
+  usage: { contextWindowUsedTokens: number | null; contextWindowMaxTokens: number | null };
+  skip: boolean;
+}
+
 export type PluginTurnOutcome =
   | { kind: "completed" }
   | { kind: "failed"; error: { message: string; code?: string } }
@@ -77,6 +91,7 @@ export interface PluginLifecycleEvents {
 export interface PluginBeforeRequests {
   "agent.create": { config: AgentSessionConfig; env?: Record<string, string> };
   "agent.session_open": PluginSessionOpenRequest;
+  "agent.compact": PluginCompactRequest;
   "workspace.create": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
 
