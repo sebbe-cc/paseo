@@ -1,7 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 import pino from "pino";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { SessionInboundMessage, SessionOutboundMessage } from "../server/messages.js";
+import { resolveTmuxBinary } from "./tmux.js";
 import {
   TerminalStreamOpcode,
   decodeTerminalStreamFrame,
@@ -1276,3 +1280,150 @@ test.each([false, true])(
     }
   },
 );
+
+describe("terminal-session-controller capture failures (pa-vbhcu)", () => {
+  function captureFixture(options?: {
+    terminal?: TerminalSession | undefined;
+    persistentBinding?: { tmuxBin: string; socketPath: string; sessionName: string } | null;
+  }) {
+    const outboundMessages: SessionOutboundMessage[] = [];
+    const terminal = options?.terminal;
+    const killTerminal = vi.fn();
+    const terminalManager: TerminalManager = {
+      getTerminals: vi.fn(async () => []),
+      createTerminal: vi.fn(),
+      registerCwdEnv: vi.fn(),
+      validateTerminalActivityToken: vi.fn(() => "unknown"),
+      getTerminal: vi.fn(() => terminal),
+      getTerminalState: vi.fn(),
+      setTerminalTitle: vi.fn(),
+      setTerminalActivity: vi.fn(),
+      clearTerminalAttention: vi.fn(),
+      killTerminal,
+      killTerminalAndWait: vi.fn(),
+      captureTerminal: vi.fn(async () => ({ lines: ["live"], totalLines: 1 })),
+      listDirectories: vi.fn(() => []),
+      getPersistentBinding: vi.fn(() => options?.persistentBinding ?? null),
+      killAll: vi.fn(),
+      subscribeTerminalsChanged: vi.fn(() => vi.fn()),
+      subscribeTerminalActivity: vi.fn(() => vi.fn()),
+      subscribeTerminalWorkspaceContributionChanged: vi.fn(() => vi.fn()),
+    };
+    const controller = createController({
+      terminalManager,
+      emit: (message) => outboundMessages.push(message),
+      emitBinary: vi.fn(),
+      hasBinaryChannel: () => true,
+      isPathWithinRoot: isSameOrDescendantPath,
+      sessionLogger: createLogger(),
+    });
+    return { controller, outboundMessages, killTerminal };
+  }
+
+  function liveTerminal(): TerminalSession {
+    return {
+      id: "term-1",
+      name: "Terminal",
+      cwd: "/tmp",
+      workspaceId: "ws-test",
+      send: vi.fn(),
+      subscribe: () => vi.fn(),
+      onExit: () => vi.fn(),
+      onCommandFinished: () => vi.fn(),
+      onTitleChange: () => vi.fn(),
+      onActivityChange: () => vi.fn(),
+      getSize: () => ({ rows: 1, cols: 80 }),
+      getState: () => terminalState("live"),
+      getStateSnapshot: () => ({ state: terminalState("live"), revision: 1 }),
+      getReplayPreamble: () => "",
+      getTitle: () => undefined,
+      getActivity: () => null,
+      setActivity: vi.fn(),
+      setTitle: vi.fn(),
+      getExitInfo: () => null,
+      kill: vi.fn(),
+      killAndWait: vi.fn(),
+    };
+  }
+
+  test("capture of an unknown terminal fails clearly instead of returning empty output", async () => {
+    const { controller, outboundMessages } = captureFixture({ terminal: undefined });
+    await controller.dispatch({
+      type: "capture_terminal_request",
+      terminalId: "term-gone",
+      requestId: "req-1",
+    });
+    await flushMicrotasks();
+    expect(outboundMessages).toEqual([
+      {
+        type: "capture_terminal_response",
+        payload: {
+          terminalId: "term-gone",
+          lines: [],
+          totalLines: 0,
+          error: "Terminal term-gone not found",
+          requestId: "req-1",
+        },
+      },
+    ]);
+  });
+
+  test("capture of a persistent terminal whose tmux session is gone fails and forgets it", async () => {
+    // A socket directory with no tmux server behind it: the exact liveness
+    // check fails without ever matching another session. Real tmux when
+    // available so the test exercises the true lookup path.
+    const deadSocketDir = mkdtempSync(join(tmpdir(), "paseo-dead-session-"));
+    try {
+      const tmuxBin = resolveTmuxBinary() ?? "/bin/false";
+      const { controller, outboundMessages, killTerminal } = captureFixture({
+        terminal: liveTerminal(),
+        persistentBinding: {
+          tmuxBin,
+          socketPath: join(deadSocketDir, "tmux.sock"),
+          sessionName: "paseo-dead-beef",
+        },
+      });
+      await controller.dispatch({
+        type: "capture_terminal_request",
+        terminalId: "term-1",
+        requestId: "req-2",
+      });
+      await flushMicrotasks();
+      const response = outboundMessages.find(
+        (message) => message.type === "capture_terminal_response",
+      );
+      expect(response).toBeDefined();
+      expect(response?.type).toBe("capture_terminal_response");
+      if (response?.type !== "capture_terminal_response") throw new Error("unreachable");
+      expect(response.payload.lines).toEqual([]);
+      expect(response.payload.error).toMatch(/gone|not found/i);
+      // The zombie is forgotten (normal exit-path convergence): the next
+      // capture reports not-found instead of serving the stale buffer.
+      expect(killTerminal).toHaveBeenCalledWith("term-1");
+    } finally {
+      rmSync(deadSocketDir, { recursive: true, force: true });
+    }
+  });
+
+  test("capture of a live terminal still succeeds with a null error", async () => {
+    const { controller, outboundMessages } = captureFixture({ terminal: liveTerminal() });
+    await controller.dispatch({
+      type: "capture_terminal_request",
+      terminalId: "term-1",
+      requestId: "req-3",
+    });
+    await flushMicrotasks();
+    expect(outboundMessages).toEqual([
+      {
+        type: "capture_terminal_response",
+        payload: {
+          terminalId: "term-1",
+          lines: ["live"],
+          totalLines: 1,
+          error: null,
+          requestId: "req-3",
+        },
+      },
+    ]);
+  });
+});

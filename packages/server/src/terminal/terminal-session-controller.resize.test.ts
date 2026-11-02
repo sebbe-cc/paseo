@@ -50,6 +50,8 @@ function createFixture(): {
   const terminalManager = {
     getTerminal: () => terminal,
     getTerminalState: async () => ({ state: state(), revision: 0 }),
+    // Non-persistent fixture: the dead-session guard never triggers (pa-vbhcu).
+    getPersistentBinding: () => null,
   } as unknown as TerminalManager;
   return { terminal, terminalManager, appliedSizes };
 }
