@@ -2032,6 +2032,63 @@ export default function contribute(plugin: any) {
   });
 });
 
+it("rejects a self-replacing usage source at registration", async () => {
+  const directory = await createPlugin(
+    "self-replace",
+    `
+export default function contribute(server) {
+  server.registerUsageSource({
+    id: "self-replace",
+    label: "Self",
+    input: { parseAsync: async (value) => value },
+    replaces: ["self-replace"],
+    discover: async () => [],
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  return () => {};
+}
+`,
+  );
+  const runtime = createTestRuntime();
+  try {
+    await expect(runtime.startPlugin("self-replace", directory)).rejects.toThrow(
+      "Invalid usage source replaces: self-replace",
+    );
+  } finally {
+    await runtime.stopAll();
+  }
+});
+
+it("publishes usage takeovers and disabled sources", async () => {
+  const directory = await createPlugin(
+    "takeover-meta",
+    `
+export default function contribute(server) {
+  server.registerUsageSource({
+    id: "takeover-meta",
+    label: "Takeover",
+    input: { parseAsync: async (value) => value },
+    replaces: ["codex"],
+    discover: async () => [],
+    fetch: async () => ({ status: "available", windows: [] }),
+  });
+  server.disableUsageSource("kimi");
+  return () => {};
+}
+`,
+  );
+  const runtime = createTestRuntime();
+  try {
+    await runtime.startPlugin("takeover-meta", directory);
+    expect(runtime.getUsageSourceRegistrations("takeover-meta")).toMatchObject([
+      { id: "takeover-meta", replaces: ["codex"] },
+    ]);
+    expect(runtime.getDisabledUsageSources("takeover-meta")).toEqual(["kimi"]);
+  } finally {
+    await runtime.stopAll();
+  }
+});
+
 it("rejects a usage source without discovery at registration", async () => {
   const directory = await createPlugin(
     "missing-discovery",
