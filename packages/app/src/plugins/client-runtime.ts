@@ -7,6 +7,7 @@ import {
   createPluginCapabilities,
   createPluginWorkspaceActionContext,
 } from "./actions";
+import { createAppClientActionsCapability, createDomPanelResolver, createWebPanelNavigator } from "./client-actions";
 import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
@@ -26,6 +27,17 @@ export function createPluginClientRuntime(
     ...capabilities,
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
+    // Task 2 app-side prob surface: panel scroll/navigation live on DOM
+    // hosts; voiceInput stays false until the mic pipeline
+    // (DictationStreamSender + audio source + daemon stream client) is
+    // glued in where those pieces exist — the session lifecycle and
+    // mic-safety above are implemented and tested, the production mic
+    // hookup is the remaining anchor.
+    clientActions: createAppClientActionsCapability({
+      voice: null,
+      panels: createDomPanelResolver(),
+      navigator: createWebPanelNavigator(),
+    }),
     hosts: createPluginHosts(getHostRuntimeStore(), installation.lifetime.signal),
     addComposerPill(contribution) {
       return pluginButtonStore.addComposerPill(installation, contribution);
