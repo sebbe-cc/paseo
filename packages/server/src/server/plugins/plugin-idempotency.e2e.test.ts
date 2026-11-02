@@ -146,3 +146,39 @@ test("workspace and agent idempotency keys survive a plugin process restart", as
     await daemon.close();
   }
 });
+
+const BACKGROUND_SERVER = `import { defineRpc } from "@getpaseo/plugin";
+import { type PluginServerContext } from "@getpaseo/plugin/server";
+import { z } from "zod";
+
+const probe = defineRpc({
+  name: "probe",
+  input: z.object({}),
+  output: z.object({ sameApi: z.boolean(), listed: z.boolean() }),
+});
+
+export default function contribute(server: PluginServerContext) {
+  const background = server.paseo;
+  // Runs before any handler or hook: background work such as workflow recovery.
+  const listed = background.agents.list({ page: { limit: 1 } }).then(() => true, () => false);
+  server.handle(probe, async (_input, { paseo }) => ({ sameApi: paseo === background, listed: await listed }));
+  return () => undefined;
+}`;
+
+test("contributions get the plugin process's Paseo API before any handler runs", async () => {
+  const pluginDirectory = await writePlugin("background", BACKGROUND_SERVER);
+  const daemon = await createTestPaseoDaemon({ agentClients: createTestAgentClients() });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.4.0" });
+  try {
+    await client.connect();
+    await client.patchDaemonConfig({ pluginsEnabled: true });
+    await client.installDirectoryPlugin(pluginDirectory);
+    await expect(client.invokePluginRpc("background", "probe", {})).resolves.toEqual({
+      sameApi: true,
+      listed: true,
+    });
+  } finally {
+    await client.close();
+    await daemon.close();
+  }
+});
