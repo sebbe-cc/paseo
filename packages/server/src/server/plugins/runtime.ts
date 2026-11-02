@@ -346,7 +346,12 @@ export class PluginRuntime {
       pluginId: input.id,
       pluginDirectory: directory,
       requirements: manifest.requirements,
-      child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
+      child: new InternalPluginChild(
+        evaluateBundle(bundles.serverBundle, {
+          pluginDirectory: directory,
+          runtimeExternals: manifest.runtimeExternals,
+        }),
+      ),
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
@@ -761,6 +766,7 @@ export class PluginRuntime {
       pluginId,
       pluginDirectory: directory,
       requirements: manifest.requirements,
+      runtimeExternals: manifest.runtimeExternals,
       child: this.spawnChild(),
       bundle: serverBundle,
       clientBundle: bundles.clientBundle ?? "",
@@ -771,6 +777,7 @@ export class PluginRuntime {
     pluginId: string;
     pluginDirectory: string;
     requirements: PluginRequirements | undefined;
+    runtimeExternals?: string[];
     child: PluginChild;
     bundle: string;
     clientBundle: string;
@@ -854,6 +861,7 @@ export class PluginRuntime {
             type: "initialize",
             pluginId,
             pluginDirectory: input.pluginDirectory,
+            runtimeExternals: input.runtimeExternals,
             appVersion: this.daemonVersion,
             bundle,
             settingsDirectory: this.dependencies.settingsDirectory

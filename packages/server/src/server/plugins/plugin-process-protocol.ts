@@ -47,6 +47,7 @@ export type PluginProcessRequest =
       bundle: string;
       appVersion: string;
       pluginDirectory: string;
+      runtimeExternals?: string[];
       settingsDirectory?: string;
     }
   | {
@@ -180,6 +181,7 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
         bundle: z.string(),
         appVersion: z.string(),
         pluginDirectory: z.string(),
+        runtimeExternals: z.array(z.string()).optional(),
         settingsDirectory: z.string().optional(),
       })
       .strict(),
