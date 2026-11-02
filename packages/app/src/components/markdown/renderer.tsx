@@ -108,6 +108,9 @@ const MarkdownPart = memo(function MarkdownPart({
   const pressLink = useStableEvent(({ url, sourceType }: LinkPressEvent) => {
     if (sourceType !== "markdown" && decorators.press(url)) return;
     const source = linkSource(url, sourceType);
+    // Proven missing by the daemon batch check: stay silent. The link
+    // already renders as plain code with a "saknas" mark — no error toast.
+    if (actions.isMissingFile(source)) return;
     if (onLinkPress && !actions.canResolveFile(source)) onLinkPress(url);
     else actions.open(source, "preferred");
   });
