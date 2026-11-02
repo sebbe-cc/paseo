@@ -6895,6 +6895,88 @@ export const PluginNpmInstallationSchema = z.object({
   integrity: z.string(),
 });
 
+const PLUGIN_CLI_NAME = /^[a-z][a-z0-9-]*$/;
+const PLUGIN_CLI_FIELD = /^[A-Za-z][A-Za-z0-9_-]*$/;
+const PLUGIN_RPC_METHOD = /^[a-z][a-z0-9._-]*$/;
+// Top-level CLI flags the plugin dispatcher reserves for itself. A plugin
+// command must not declare an argument or option with one of these names.
+const RESERVED_PLUGIN_CLI_FIELDS = new Set(["json", "help", "host", "home", "format"]);
+
+export const PluginCliArgumentSchema = z
+  .object({
+    name: z.string().regex(PLUGIN_CLI_FIELD),
+    description: z.string().trim().min(1).optional(),
+  })
+  .strict();
+export type PluginCliArgument = z.infer<typeof PluginCliArgumentSchema>;
+
+export const PluginCliOptionSchema = z
+  .object({
+    name: z.string().regex(PLUGIN_CLI_FIELD),
+    description: z.string().trim().min(1).optional(),
+  })
+  .strict();
+export type PluginCliOption = z.infer<typeof PluginCliOptionSchema>;
+
+export const PluginCliCommandSchema = z
+  .object({
+    name: z.string().regex(PLUGIN_CLI_NAME),
+    rpc: z.string().regex(PLUGIN_RPC_METHOD),
+    description: z.string().trim().min(1).optional(),
+    args: z.array(PluginCliArgumentSchema).default([]),
+    options: z.array(PluginCliOptionSchema).default([]),
+  })
+  .strict()
+  .superRefine((command, ctx) => {
+    const seen = new Map<string, string>();
+    for (const arg of command.args) {
+      if (RESERVED_PLUGIN_CLI_FIELDS.has(arg.name)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `Argument name "${arg.name}" is reserved for the CLI itself`,
+        });
+      }
+      const clash = seen.get(arg.name);
+      if (clash) {
+        ctx.addIssue({ code: "custom", message: `Duplicate field name "${arg.name}"` });
+      } else {
+        seen.set(arg.name, "arg");
+      }
+    }
+    for (const option of command.options) {
+      if (RESERVED_PLUGIN_CLI_FIELDS.has(option.name)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `Option name "${option.name}" is reserved for the CLI itself`,
+        });
+      }
+      if (seen.has(option.name)) {
+        ctx.addIssue({ code: "custom", message: `Duplicate field name "${option.name}"` });
+      } else {
+        seen.set(option.name, "option");
+      }
+    }
+  });
+export type PluginCliCommand = z.infer<typeof PluginCliCommandSchema>;
+
+export const PluginCliSchema = z
+  .object({
+    name: z.string().regex(PLUGIN_CLI_NAME),
+    description: z.string().trim().min(1).optional(),
+    commands: z.array(PluginCliCommandSchema).min(1),
+  })
+  .strict()
+  .superRefine((cli, ctx) => {
+    const names = new Set<string>();
+    for (const command of cli.commands) {
+      if (names.has(command.name)) {
+        ctx.addIssue({ code: "custom", message: `Duplicate command name "${command.name}"` });
+      }
+      names.add(command.name);
+    }
+  });
+export type PluginCli = z.infer<typeof PluginCliSchema>;
+
 export const PluginListItemSchema = z.object({
   id: PluginIdSchema,
   name: z.string().optional(),
@@ -6911,6 +6993,8 @@ export const PluginListItemSchema = z.object({
   ref: z.string().optional(),
   commit: z.string().optional(),
   error: z.string().optional(),
+  cli: PluginCliSchema.optional(),
+  rpcMethods: z.array(z.string()).optional(),
 });
 export type PluginListItem = z.infer<typeof PluginListItemSchema>;
 

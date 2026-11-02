@@ -300,6 +300,8 @@ register(${JSON.stringify(guardUrl)});`;
       try {
         await runtime.startPlugin("react-free", directory);
         await expect(runtime.invoke("react-free", "echo", "hello")).resolves.toBe("hello");
+        expect(runtime.getRpcMethods("react-free")).toEqual(["echo"]);
+        expect(runtime.getRpcMethods("missing")).toBeUndefined();
       } catch (error) {
         throw new Error(JSON.stringify(runtime.getLogs("react-free")), { cause: error });
       } finally {
