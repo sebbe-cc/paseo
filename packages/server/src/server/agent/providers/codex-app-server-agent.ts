@@ -40,6 +40,7 @@ import {
   type ResolveAgentDefaultModeInput,
 } from "../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
+import { PendingTurnQueue, type PendingTurn } from "../pending-turn-queue.js";
 import { runProviderRefreshActivity } from "../provider-refresh-deadline.js";
 import type { Logger } from "pino";
 
@@ -3459,6 +3460,11 @@ export class CodexAppServerAgentSession implements AgentSession {
   private startupEvents: AgentStreamEvent[] | null = null;
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
+  /**
+   * Messages sent while a foreground turn is starting or active wait here
+   * instead of being rejected, then start in order when the slot frees.
+   */
+  private readonly pendingTurns = new PendingTurnQueue(() => this.createTurnId());
   private activeClientMessageId: string | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private serviceTier: string | null = null;
@@ -3728,6 +3734,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.currentTurnId = null;
     this.pendingForegroundTurnIdentification?.resolve(null);
     this.pendingForegroundTurnIdentification = null;
+    this.drainPendingTurns();
   }
 
   private async loadCollaborationModes(): Promise<void> {
@@ -4357,9 +4364,30 @@ export class CodexAppServerAgentSession implements AgentSession {
     options?: AgentRunOptions,
   ): Promise<{ turnId: string }> {
     if (this.activeForegroundTurnId || this.pendingForegroundStart) {
-      throw new Error("A foreground turn is already active");
+      // A start still in flight owns the slot. Otherwise a turn the dead
+      // connection can no longer complete must not block behind it; anything
+      // else waits for turn end instead of being rejected.
+      if (this.pendingForegroundStart || this.clearStuckTurn("startTurn") === null) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        this.logger.debug(
+          { agentId: this.agentId, queuedTurnId, queued: this.pendingTurns.size },
+          "provider.codex.turn_queued",
+        );
+        return { turnId: queuedTurnId };
+      }
+      if (this.activeForegroundTurnId || this.pendingForegroundStart) {
+        const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+        return { turnId: queuedTurnId };
+      }
     }
+    return this.startTurnInternal(prompt, options);
+  }
 
+  private async startTurnInternal(
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    turnId: string = this.createTurnId(),
+  ): Promise<{ turnId: string }> {
     let resolveStart!: () => void;
     const pendingStart = {
       promise: new Promise<void>((resolve) => {
@@ -4391,7 +4419,6 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
 
       const turnStart = await this.buildTurnStartParams(effectivePrompt, options);
-      const turnId = this.createTurnId();
       this.activeForegroundTurnId = turnId;
       this.activeClientMessageId = options?.clientMessageId ?? null;
       this.currentTurnId = null;
@@ -4431,7 +4458,59 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.pendingForegroundStart = null;
       }
       pendingStart.resolve();
+      // A failed start freed the slot: hand it to the next waiting message.
+      // On success the turn is active, so this is a no-op.
+      this.drainPendingTurns();
     }
+  }
+
+  /**
+   * Start the next queued message, if any, now that the foreground slot is
+   * free. The slot is claimed synchronously by startTurnInternal's pending
+   * marker, so concurrent starts cannot interleave.
+   */
+  private drainPendingTurns(): void {
+    if (this.closed || this.activeForegroundTurnId || this.pendingForegroundStart) {
+      return;
+    }
+    const next = this.pendingTurns.dequeue();
+    if (!next) {
+      return;
+    }
+    void this.startQueuedTurn(next);
+  }
+
+  private async startQueuedTurn(next: PendingTurn): Promise<void> {
+    try {
+      await this.startTurnInternal(next.prompt, next.options, next.turnId);
+    } catch (error) {
+      this.emitEvent({
+        type: "turn_failed",
+        provider: CODEX_PROVIDER,
+        error: error instanceof Error ? error.message : "Queued Codex turn failed to start",
+        turnId: next.turnId,
+      });
+      this.drainPendingTurns();
+    }
+  }
+
+  /**
+   * Fail and clear a foreground turn marked active while the app-server
+   * connection is gone, so resume/reload never leaves a hanging turn behind.
+   * Returns the cleared turn id, or null when there is no stuck turn. A start
+   * still in flight owns the slot and is never cleared here.
+   */
+  clearStuckTurn(reason: string): string | null {
+    if (this.closed || this.pendingForegroundStart) {
+      return null;
+    }
+    const stuckTurnId = this.activeForegroundTurnId ?? this.currentTurnId;
+    if (!stuckTurnId || this.connectionState !== "disconnected") {
+      return null;
+    }
+    this.logger.warn({ agentId: this.agentId, stuckTurnId, reason }, "provider.codex.clear_stuck_turn");
+    this.handleUnexpectedTermination(new Error("Codex turn was still marked active after disconnect."));
+    return stuckTurnId;
   }
 
   async steerActiveTurn(
@@ -5065,6 +5144,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.closed = true;
     this.clearPendingPermissions();
     this.pendingSubAgentNotificationsByThreadId.clear();
+    // The daemon synthesizes cancellation for runs bound to queued turns.
+    this.pendingTurns.clear();
     this.subscribers.clear();
     this.startupEvents = null;
     this.activeForegroundTurnId = null;
@@ -6228,6 +6309,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingForegroundTurnIdentification = null;
     this.pendingSubAgentNotificationsByThreadId.clear();
     this.resetTurnTrackingState();
+    this.drainPendingTurns();
   }
 
   private resetTurnTrackingState(): void {
