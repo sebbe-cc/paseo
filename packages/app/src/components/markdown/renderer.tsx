@@ -17,6 +17,11 @@ import { PENDING_MARKDOWN_IMAGE } from "./source";
 import { splitStreamingMarkdown } from "./streaming";
 import { useMarkdownSource, type MarkdownImageContext } from "./images";
 
+import {
+  combineLinkRecognition,
+  InlineDecoratorEntriesProvider,
+  useInlineDecorators,
+} from "@/plugins/inline-decorators";
 import { MermaidFence, MermaidStreamingContext, splitMermaidFences } from "./fence/mermaid";
 
 const ThemedMarkdown = withUnistyles(EnrichedMarkdownText);
@@ -90,8 +95,18 @@ const MarkdownPart = memo(function MarkdownPart({
     ...imageContext,
     client,
   });
+  const decorators = useInlineDecorators();
+  const recognition = useMemo(
+    () =>
+      combineLinkRecognition(
+        linkRecognition,
+        decorators.entries.map((entry) => entry.decorator),
+      ),
+    [linkRecognition, decorators.entries],
+  );
   const [image, setImage] = useState<ImageLightboxSource | null>(null);
   const pressLink = useStableEvent(({ url, sourceType }: LinkPressEvent) => {
+    if (sourceType !== "markdown" && decorators.press(url)) return;
     const source = linkSource(url, sourceType);
     if (onLinkPress && !actions.canResolveFile(source)) onLinkPress(url);
     else actions.open(source, "preferred");
@@ -106,33 +121,35 @@ const MarkdownPart = memo(function MarkdownPart({
     [markdown],
   );
   return (
-    <MermaidStreamingContext.Provider value={streaming}>
-      <MarkdownBlockStack imageSources={imageSources}>
-        {segments.map((segment) =>
-          segment.kind === "mermaid" ? (
-            <MermaidFence key={`${segment.kind}:${segment.id}`} code={segment.source} />
-          ) : (
-            <ThemedMarkdown
-              key={`${segment.kind}:${segment.id}`}
-              markdown={segment.source}
-              uniProps={pickMarkdownStyle(compact, muted)}
-              flavor="github"
-              selectable={selectable}
-              md4cFlags={MD4C_FLAGS}
-              linkRecognition={linkRecognition}
-              enableTaskListItemToggle={false}
-              enableLinkPreview={false}
-              enableBlockContextMenu={false}
-              // JS reveal owns pacing; native fade animation is a separate experiment.
-              streamingAnimation={false}
-              onLinkPress={pressLink}
-              onImagePress={pressImage}
-              renderers={isWeb ? WEB_RENDERERS : undefined}
-            />
-          ),
-        )}
-      </MarkdownBlockStack>
-      {image ? <AttachmentLightbox source={image} onClose={closeImage} /> : null}
-    </MermaidStreamingContext.Provider>
+    <InlineDecoratorEntriesProvider serverId={decorators.serverId} entries={decorators.entries}>
+      <MermaidStreamingContext.Provider value={streaming}>
+        <MarkdownBlockStack imageSources={imageSources}>
+          {segments.map((segment) =>
+            segment.kind === "mermaid" ? (
+              <MermaidFence key={`${segment.kind}:${segment.id}`} code={segment.source} />
+            ) : (
+              <ThemedMarkdown
+                key={`${segment.kind}:${segment.id}`}
+                markdown={segment.source}
+                uniProps={pickMarkdownStyle(compact, muted)}
+                flavor="github"
+                selectable={selectable}
+                md4cFlags={MD4C_FLAGS}
+                linkRecognition={recognition}
+                enableTaskListItemToggle={false}
+                enableLinkPreview={false}
+                enableBlockContextMenu={false}
+                // JS reveal owns pacing; native fade animation is a separate experiment.
+                streamingAnimation={false}
+                onLinkPress={pressLink}
+                onImagePress={pressImage}
+                renderers={isWeb ? WEB_RENDERERS : undefined}
+              />
+            ),
+          )}
+        </MarkdownBlockStack>
+        {image ? <AttachmentLightbox source={image} onClose={closeImage} /> : null}
+      </MermaidStreamingContext.Provider>
+    </InlineDecoratorEntriesProvider>
   );
 });
