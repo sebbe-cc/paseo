@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test, onTestFinished } from "vitest";
+import pino from "pino";
+import { expect, test, onTestFinished, vi } from "vitest";
 import { MutableDaemonConfigSchema } from "@getpaseo/protocol/messages";
 import { DaemonConfigStore } from "./daemon-config-store.js";
 import { loadPersistedConfig } from "./persisted-config.js";
@@ -11,7 +13,62 @@ import {
 } from "./agent/idle-runtime-cleanup/index.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
 
-import { fanOutReconciledWorkspaceUpdates, connectIdleRuntimeCleanupConfig } from "./bootstrap.js";
+import {
+  connectIdleRuntimeCleanupConfig,
+  createPaseoDaemon,
+  fanOutReconciledWorkspaceUpdates,
+} from "./bootstrap.js";
+import { PluginService } from "./plugins/index.js";
+import { ScheduleService } from "./schedule/service.js";
+import { createTestAgentClients } from "./test-utils/fake-agent-client.js";
+
+test("scheduled agent recovery waits for plugin lifecycle hooks before starting", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-schedule-startup-"));
+  const town = await mkdtemp(path.join(home, "fleet-town-"));
+  vi.stubEnv("PASEO_HOME", home);
+  vi.stubEnv("FLEET_TOWN_STATE_DIR", town);
+  const entered = Promise.withResolvers<void>();
+  const ready = Promise.withResolvers<void>();
+  const pluginStart = vi.spyOn(PluginService.prototype, "start").mockImplementation(async () => {
+    entered.resolve();
+    await ready.promise;
+  });
+  const scheduleStart = vi.spyOn(ScheduleService.prototype, "start");
+  const daemon = await createPaseoDaemon(
+    {
+      listen: "127.0.0.1:0",
+      paseoHome: home,
+      corsAllowedOrigins: [],
+      hostnames: true,
+      mcpEnabled: false,
+      staticDir: home,
+      mcpDebug: false,
+      agentClients: createTestAgentClients(),
+      agentStoragePath: path.join(home, "agents"),
+      relayEnabled: false,
+      appBaseUrl: "https://app.paseo.sh",
+    },
+    pino({ level: "silent" }),
+  );
+  let starting: Promise<void> | undefined;
+  try {
+    expect(scheduleStart).not.toHaveBeenCalled();
+    starting = daemon.start();
+    await entered.promise;
+    expect(scheduleStart).not.toHaveBeenCalled();
+    ready.resolve();
+    await starting;
+    expect(pluginStart).toHaveBeenCalledOnce();
+    expect(scheduleStart).toHaveBeenCalledOnce();
+  } finally {
+    ready.resolve();
+    await starting?.catch(() => undefined);
+    await daemon.stop();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("reconciliation emits workspace updates when observer sync fails", async () => {
   const emittedWorkspaceIds: string[][] = [];
