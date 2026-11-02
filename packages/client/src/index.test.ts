@@ -1833,3 +1833,138 @@ test("agent reload reopens through the daemon RPC then returns the observed snap
     await client.close();
   }
 });
+
+test("agent handles delegate setMode to setAgentMode and return its result", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_sdk");
+
+  const modePromise = agent.setMode("mode-id");
+  const modeRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(modeRequest).toMatchObject({
+    type: "set_agent_mode_request",
+    agentId: "agent_sdk",
+    modeId: "mode-id",
+  });
+  ws.message(
+    sessionMessage({
+      type: "set_agent_mode_response",
+      payload: {
+        requestId: modeRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: true,
+        error: null,
+        notice: null,
+      },
+    }),
+  );
+  await expect(modePromise).resolves.toBeNull();
+
+  const failingPromise = agent.setMode("mode-id");
+  const failingRequest = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "set_agent_mode_response",
+      payload: {
+        requestId: failingRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: false,
+        error: "mode mode-id is not supported by provider",
+        notice: null,
+      },
+    }),
+  );
+  await expect(failingPromise).rejects.toThrow(
+    "mode mode-id is not supported by provider",
+  );
+
+  await client.close();
+});
+
+test("agent handles delegate setModel to setAgentModel and return its result", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_sdk");
+
+  const modelPromise = agent.setModel("model-id");
+  const modelRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(modelRequest).toMatchObject({
+    type: "set_agent_model_request",
+    agentId: "agent_sdk",
+    modelId: "model-id",
+  });
+  ws.message(
+    sessionMessage({
+      type: "set_agent_model_response",
+      payload: {
+        requestId: modelRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: true,
+        error: null,
+      },
+    }),
+  );
+  await expect(modelPromise).resolves.toBeUndefined();
+
+  const failingPromise = agent.setModel(null);
+  const failingRequest = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "set_agent_model_response",
+      payload: {
+        requestId: failingRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: false,
+        error: "model is not supported by provider",
+      },
+    }),
+  );
+  await expect(failingPromise).rejects.toThrow(
+    "model is not supported by provider",
+  );
+
+  await client.close();
+});
+
+test("agent handles delegate setFeature to setAgentFeature and return its result", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_sdk");
+
+  const featurePromise = agent.setFeature("feature-id", true);
+  const featureRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(featureRequest).toMatchObject({
+    type: "set_agent_feature_request",
+    agentId: "agent_sdk",
+    featureId: "feature-id",
+    value: true,
+  });
+  ws.message(
+    sessionMessage({
+      type: "set_agent_feature_response",
+      payload: {
+        requestId: featureRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: true,
+        error: null,
+      },
+    }),
+  );
+  await expect(featurePromise).resolves.toBeUndefined();
+
+  const failingPromise = agent.setFeature("feature-id", true);
+  const failingRequest = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "set_agent_feature_response",
+      payload: {
+        requestId: failingRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: false,
+        error: "feature feature-id is not supported by provider",
+      },
+    }),
+  );
+  await expect(failingPromise).rejects.toThrow(
+    "feature feature-id is not supported by provider",
+  );
+
+  await client.close();
+});
