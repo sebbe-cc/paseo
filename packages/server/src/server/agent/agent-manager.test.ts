@@ -2783,6 +2783,114 @@ test("cancelAgentRun preserves the active turn when the provider rejects the int
   }
 });
 
+class StuckTurnReloadSession extends TestAgentSession {
+  clearStuckTurnCalls: string[] = [];
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    const turnId = "stuck-reload-turn";
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+    }, 0);
+    return { turnId };
+  }
+
+  override async interrupt(): Promise<void> {
+    throw new Error("A foreground turn is already active");
+  }
+
+  override clearStuckTurn(reason: string): string | null {
+    this.clearStuckTurnCalls.push(reason);
+    this.pushEvent({
+      type: "turn_failed",
+      provider: this.provider,
+      turnId: "stuck-reload-turn",
+      error: "cleared",
+    });
+    return "stuck-reload-turn";
+  }
+}
+
+class StuckTurnReloadClient extends TestAgentClient {
+  readonly created: StuckTurnReloadSession[] = [];
+
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    const session = new StuckTurnReloadSession(config);
+    this.created.push(session);
+    return session;
+  }
+}
+
+test("reloadAgentSession proceeds after clearStuckTurn clears a refused interrupt", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stuck-reload-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new StuckTurnReloadClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    rescueTimeouts: { interruptSessionMs: 10 },
+  });
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const run = manager.streamAgent(agent.id, "exercise stuck reload");
+    void (async () => {
+      for await (const _event of run) {
+        // Keep the foreground stream subscribed until the run settles.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const previousSession = manager.getAgent(agent.id)?.session;
+    await expect(manager.reloadAgentSession(agent.id)).resolves.toBeDefined();
+    expect(manager.getAgent(agent.id)?.session).not.toBe(previousSession);
+    expect(manager.getAgent(agent.id)).toMatchObject({
+      lifecycle: "idle",
+      activeForegroundTurnId: null,
+    });
+    expect((previousSession as unknown as StuckTurnReloadSession).clearStuckTurnCalls).toEqual([
+      "reload",
+    ]);
+  } finally {
+    await manager.flush();
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("reloadAgentSession still refuses when the provider reports no stuck turn", async () => {
+  const fixture = await createControlledInterruptFixture({
+    name: "interrupt-refused-reload",
+    agentId: "00000000-0000-4000-8000-000000000306",
+    turnId: "refused-reload-turn",
+    interrupt: async () => {
+      throw new Error("A foreground turn is already active");
+    },
+  });
+
+  try {
+    await fixture.startForegroundRun();
+
+    await expect(fixture.manager.reloadAgentSession(fixture.agentId)).rejects.toThrow(
+      "active run cancellation was not acknowledged",
+    );
+    expect(fixture.manager.getAgent(fixture.agentId)).toMatchObject({
+      lifecycle: "running",
+      activeForegroundTurnId: "refused-reload-turn",
+    });
+
+    fixture.session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "refused-reload-turn",
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("cancelAgentRun succeeds when the foreground turn finishes before the provider rejects the interrupt", async () => {
   let fixture!: ControlledInterruptFixture;
   fixture = await createControlledInterruptFixture({
