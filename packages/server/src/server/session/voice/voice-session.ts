@@ -1,4 +1,6 @@
 import type {
+  DictationProviderSelection,
+  PluginDictationHost,
   PluginVoiceHost,
   VoiceProviderSelection,
   VoiceProviderSession,
@@ -6,6 +8,7 @@ import type {
 } from "@getpaseo/plugin/server";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { createPluginDictationStt } from "../../speech/plugin-dictation-stt.js";
 import type pino from "pino";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
@@ -161,6 +164,8 @@ export interface VoiceSessionOptions {
     stt?: Resolvable<SpeechToTextProvider | null>;
     sttLanguage?: string;
     getSpeechReadiness?: () => SpeechReadinessSnapshot;
+    clientSupportsPluginDictation?: boolean;
+    plugin?: { getSelection(): DictationProviderSelection | null; host: PluginDictationHost };
   };
 }
 
@@ -216,6 +221,8 @@ export class VoiceSession {
   private readonly getSpeechReadiness?: () => SpeechReadinessSnapshot;
 
   private readonly pluginVoice: NonNullable<VoiceSessionOptions["voice"]>["plugin"];
+  // COMPAT(pluginDictationProviders): clients without the capability keep built-in dictation.
+  private readonly pluginDictation: NonNullable<VoiceSessionOptions["dictation"]>["plugin"];
   private readonly clientSupportsPluginVoice: boolean;
   private pluginConnection: VoiceProviderSession | null = null;
   private pluginAbort: AbortController | null = null;
@@ -241,6 +248,7 @@ export class VoiceSession {
     this.registerVoiceCallerContext = voiceBridge?.registerVoiceCallerContext;
     this.unregisterVoiceCallerContext = voiceBridge?.unregisterVoiceCallerContext;
     this.getSpeechReadiness = dictation?.getSpeechReadiness;
+    this.pluginDictation = dictation?.clientSupportsPluginDictation ? dictation.plugin : undefined;
 
     this.ttsManager = new TTSManager(this.sessionId, this.sessionLogger, tts);
     this.sttManager = new STTManager(this.sessionId, this.sessionLogger, stt, {
@@ -291,6 +299,26 @@ export class VoiceSession {
   async handleDictationStreamStart(
     msg: Extract<SessionInboundMessage, { type: "dictation_stream_start" }>,
   ): Promise<void> {
+    const selection = this.pluginDictation?.getSelection();
+    if (selection && this.pluginDictation) {
+      if (this.pluginDictation.host.hasDictationProvider(selection)) {
+        const stt = createPluginDictationStt(this.pluginDictation.host, selection);
+        await this.dictationStreamManager.handleStart(msg.dictationId, msg.format, {
+          agentId: msg.agentId,
+          stt,
+        });
+        return;
+      }
+      this.emit({
+        type: "dictation_stream_error",
+        payload: {
+          dictationId: msg.dictationId,
+          error: "Selected dictation plugin is unavailable",
+          retryable: true,
+        },
+      });
+      return;
+    }
     const unavailable = this.resolveVoiceFeatureUnavailableContext("dictation");
     if (unavailable) {
       this.emit({
@@ -305,7 +333,9 @@ export class VoiceSession {
       });
       return;
     }
-    await this.dictationStreamManager.handleStart(msg.dictationId, msg.format);
+    await this.dictationStreamManager.handleStart(msg.dictationId, msg.format, {
+      agentId: msg.agentId,
+    });
   }
 
   private toVoiceFeatureUnavailableContext(
