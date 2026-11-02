@@ -2,6 +2,7 @@ import { Image } from "react-native";
 import { isWeb } from "@/constants/platform";
 import { useMemo, useEffect, useId } from "react";
 import { useFetchQueries } from "@/data/query";
+import { classifyForBatch, useAssistantFileBatch } from "@/assistant-file-links";
 import { createAssistantImageFileAcquisition } from "@/assistant-image/file-acquisition";
 import {
   persistAttachmentFromBytes,
@@ -14,7 +15,7 @@ import { resolveAssistantImageSource } from "@/utils/assistant-image-source";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AttachmentMetadata } from "@/attachments/types";
 import { resolveMarkdownPreviewImageSource } from "./image-source";
-import { prepareMarkdownSource } from "./source";
+import { collectAssistantFileLinkSources, prepareMarkdownSource } from "./source";
 import { decodeMarkdownImage, getMarkdownImageStatus } from "./image-decoding";
 
 const urls = createAssistantImageAcquisitionCache<{ uri: string; attachment: AttachmentMetadata }>({
@@ -37,9 +38,35 @@ export interface MarkdownImageContext {
 
 export function useMarkdownSource(text: string, context: MarkdownImageContext) {
   const occurrenceKey = useId();
+  const workspaceRoot = context.workspaceRoot;
+  const batchCandidates = useMemo(() => {
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const fileSource of collectAssistantFileLinkSources(text, workspaceRoot)) {
+      const batch = classifyForBatch(fileSource, { workspaceRoot });
+      if (batch.kind !== "file") continue;
+      if (!seen.has(batch.candidate)) {
+        seen.add(batch.candidate);
+        unique.push(batch.candidate);
+      }
+    }
+    return unique;
+  }, [text, workspaceRoot]);
+  const fileBatch = useAssistantFileBatch(batchCandidates, {
+    workspaceRoot,
+    serverId: context.serverId,
+  });
   const prepared = useMemo(
-    () => prepareMarkdownSource(text, context.workspaceRoot, { supportsSvg: isWeb }),
-    [text, context.workspaceRoot],
+    () =>
+      prepareMarkdownSource(text, workspaceRoot, {
+        supportsSvg: isWeb,
+        missingCandidatePaths: fileBatch.missing,
+        // Native has no custom link renderer, so missing tokens are
+        // rewritten to plain code at the source. Web keeps the links so
+        // its renderer can show a tooltip with the searched roots.
+        deLinkMissing: !isWeb && fileBatch.supported,
+      }),
+    [text, workspaceRoot, fileBatch],
   );
   const sources = [...new Set(prepared.images.map((image) => image.source))];
   const acquisitions = sources.map((source) => {
