@@ -1173,6 +1173,7 @@ export const ru: TranslationResources = {
       description: "Проверьте подключение и попробуйте снова.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "Группа «{{label}}»",
     statusBucket: {
@@ -2438,6 +2439,8 @@ export const ru: TranslationResources = {
     diagnostics: {
       title: "Диагностика",
       testAudio: "Проверка звука",
+      thinkingTone: "Сигнал ожидания в голосовом режиме",
+      thinkingToneHint: "Звуковой сигнал, пока агент готовит голосовой ответ",
       playTest: "Воспроизвести тестовый звук",
       playing: "Воспроизведение...",
       playbackFailed: "Ошибка воспроизведения: {{message}}",
@@ -2624,6 +2627,7 @@ export const ru: TranslationResources = {
         cycleTheme: "Переключить тему",
         focusMessageInput: "Перейти к полю ввода сообщения",
         cycleAgentMode: "Переключить режим агента",
+        toggleGlobalVoice: "Включить или выключить глобальный голосовой режим",
         toggleVoiceMode: "Переключить голосовой режим",
         startStopDictation: "Начать/остановить диктовку",
         interruptAgent: "Прервать агента",

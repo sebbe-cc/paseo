@@ -656,6 +656,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
 
     const unsubVoiceInputState = client.on("voice_input_state", (message) => {
       if (message.type !== "voice_input_state") return;
+      if (message.payload.sessionEnded) {
+        if (message.payload.error) toast.error(message.payload.error);
+        void voiceRuntime?.onSessionEnded(serverId);
+        return;
+      }
       voiceRuntime?.onServerSpeechStateChanged(serverId, message.payload.isSpeaking);
     });
 
