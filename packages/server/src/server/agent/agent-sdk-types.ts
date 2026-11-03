@@ -715,6 +715,14 @@ export interface AgentSession {
   revertFiles?(input: { messageId: string }): Promise<void>;
   revertBoth?(input: { messageId: string }): Promise<void>;
   /**
+   * Fail and clear a foreground turn that is marked active but whose runtime
+   * can no longer complete it (dead transport, retired query with no pump),
+   * so resume/reload never leaves a hanging turn behind. Returns the cleared
+   * turn id, or null when there was no stuck turn. Never clears a turn that
+   * still has a live path to completion.
+   */
+  clearStuckTurn?(reason: string): string | null;
+  /**
    * Out-of-band prompt handler. When non-null, the manager runs the returned
    * handler instead of allocating a turn. The handler emits stream events
    * directly via the provided `emit` callback, which routes through the
