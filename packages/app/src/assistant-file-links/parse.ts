@@ -23,6 +23,12 @@ const INLINE_PAREN_LINE_SUFFIX = /^(.+?)\(([0-9]+)(?:,[0-9]+)?(?:-([0-9]+)(?:,[0
 const INLINE_WORD_LINE_SUFFIX = /^(.+?)\s+lines?\s+([0-9]+)(?:-([0-9]+))?$/i;
 export interface AssistantHrefParseOptions {
   workspaceRoot?: string;
+  /**
+   * Keep relative links unresolved so the daemon can search the agent cwd,
+   * the workspace and git roots, and the sibling worktrees. Used by the
+   * batch existence check; the joining parse stays the legacy fallback.
+   */
+  keepRelative?: boolean;
   /** Authored document links resolve from this directory, independently of the workspace. */
   relativePathBase?: string;
   /** Authored links identify a file; only inferred text needs filename heuristics. */
@@ -284,6 +290,7 @@ export function parseAssistantFileLink(
     decodeHref: options.decodeHref,
     explicitLink: options.explicitLink,
     relativePathBase: options.relativePathBase,
+    keepRelative: options.keepRelative,
   });
   if (relativeTarget) {
     return relativeTarget;
@@ -329,6 +336,22 @@ export function parseAssistantFileLink(
     path: normalizedPath,
     ...lines,
   };
+}
+
+/**
+ * Raw (unresolved) path of a file-link token: relative links stay relative
+ * so the daemon batch check can resolve them against the agent cwd, the
+ * workspace and git roots, and the sibling worktrees. Absolute and home
+ * paths pass through unchanged. Returns null for non-file tokens.
+ */
+export function parseAssistantFileCandidatePath(
+  value: string,
+  options: AssistantHrefParseOptions = {},
+): InlinePathTarget | null {
+  // keepRelative keeps the raw relative path; the daemon searches from the
+  // agent cwd and confines the resolved file to the searched roots or the
+  // home/tmp allowlist, so `..` segments are safe to pass through.
+  return parseAssistantFileLink(value, { ...options, keepRelative: true });
 }
 
 export function isFileLookingAssistantToken(value: string): boolean {
@@ -403,6 +426,14 @@ function parseWorkspaceRelativeFileLink(
     return {
       raw: value,
       path: resolveDocumentRelativePath(parsed.path, documentBase),
+      ...parsed.lines,
+    };
+  }
+
+  if (options.keepRelative) {
+    return {
+      raw: value,
+      path: normalizePathToken(parsed.path) ?? parsed.path,
       ...parsed.lines,
     };
   }
