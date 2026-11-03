@@ -141,3 +141,60 @@ describe("sidebar label grouping", () => {
     ).toEqual(["label:urgent"]);
   });
 });
+
+describe("sidebar label group ordering", () => {
+  const catalog = [
+    { name: "Urgent", color: "red" as const },
+    { name: "Backend", color: "sky" as const },
+  ];
+
+  function orderedKeys(labelGroupOrder?: readonly string[]) {
+    return labelWorkspaceGroups({
+      workspaces: [
+        workspace("one", ["Backend"]),
+        workspace("two", ["Urgent"]),
+        workspace("three", ["Later"]),
+        workspace("four", []),
+      ],
+      catalog,
+      unlabelledTitle: "Unlabelled",
+      labelGroupOrder,
+    }).map((group) => group.key);
+  }
+
+  test("defaults to catalog order, then names, then Unlabelled", () => {
+    expect(orderedKeys()).toEqual([
+      "label:urgent",
+      "label:backend",
+      "label:later",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
+    ]);
+  });
+
+  test("a stored order wins over the catalog", () => {
+    expect(orderedKeys(["label:backend", "label:urgent", "label:later"])).toEqual([
+      "label:backend",
+      "label:urgent",
+      "label:later",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
+    ]);
+  });
+
+  test("labels missing from the stored order land last, before Unlabelled", () => {
+    expect(orderedKeys(["label:later", "label:backend"])).toEqual([
+      "label:later",
+      "label:backend",
+      "label:urgent",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
+    ]);
+  });
+
+  test("ignores stored keys with no visible section", () => {
+    expect(orderedKeys(["label:gone", "label:urgent"])).toEqual([
+      "label:urgent",
+      "label:backend",
+      "label:later",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
+    ]);
+  });
+});
