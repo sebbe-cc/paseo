@@ -459,10 +459,16 @@ a readable rendering is printed. An RPC failure exits 1. `paseo --help` lists in
 commands, and `paseo wf --help` lists the plugin's commands. A disabled or missing plugin fails
 with an enable hint instead of dispatching.
 
+When a response carries `next: { rpc, input }`, the CLI calls that RPC with that input and repeats
+until a response has no `next` (for example a `runs.start --wait` that keeps answering with
+`runs.wait` every few seconds); only the final response is printed (`--json`: the raw final
+response). Chaining stops after 50 follow-ups or after `--timeout <seconds>`, failing with exit 1.
+An option may declare an informational `type` (for example `"boolean"` for a flag).
+
 Rules: `cli.name` and command names are lowercase letters, digits, and dashes. A name that
 collides with a built-in command (`agent`, `plugin`, `workspace`, …) is rejected at load, never
 shadowing it. Argument and option names must be unique per command and must not use the CLI's own
-flags (`json`, `help`, `host`, `home`, `format`).
+flags (`json`, `help`, `host`, `home`, `format`, `timeout`).
 
 `paseo plugin rpc <plugin-id> <method> [payload-json]` is the low-level fallback for any RPC
 method: the payload argument is JSON, `-` reads it from stdin, the response prints as JSON, and an

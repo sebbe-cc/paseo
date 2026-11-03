@@ -55,17 +55,46 @@ export interface StrippedGlobals {
   home?: string;
   json: boolean;
   help: boolean;
+  timeoutMs?: number;
 }
 
 /**
  * Pull the CLI-level flags out of a plugin invocation. --host/--home select
- * the daemon like everywhere else, --json prints the raw RPC response, and
+ * the daemon like everywhere else, --json prints the raw RPC response,
+ * --timeout <seconds> bounds how long a next-chained RPC may run, and
  * -h/--help prints plugin help. Everything else belongs to the plugin command.
  */
+function parseTimeoutMs(flag: string, value: string | undefined): number {
+  if (value === undefined || value === "")
+    throw { code: "MISSING_OPTION_VALUE", message: `${flag} requires a value.` };
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0)
+    throw { code: "INVALID_TIMEOUT", message: `${flag} requires a positive number of seconds.` };
+  return seconds * 1000;
+}
+
+function takeFormatFlag(
+  token: string,
+  argv: string[],
+  i: number,
+): { json: boolean; consumed: number } {
+  const inline = token !== "--format";
+  const value = inline ? token.slice("--format=".length) : argv[i + 1];
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "json") return { json: true, consumed: inline ? 0 : 1 };
+  if (normalized === "table" || normalized === "cli")
+    return { json: false, consumed: inline ? 0 : 1 };
+  throw {
+    code: "INVALID_FORMAT",
+    message: `Unsupported output format for plugin commands: ${String(value)}. Use --json.`,
+  };
+}
+
 export function extractPluginGlobals(argv: string[]): StrippedGlobals {
   const kept: string[] = [];
   let host: string | undefined;
   let home: string | undefined;
+  let timeoutMs: number | undefined;
   let json = false;
   let help = false;
   const takeValue = (flag: string, value: string | undefined, take: (v: string) => void) => {
@@ -81,16 +110,16 @@ export function extractPluginGlobals(argv: string[]): StrippedGlobals {
       i++;
     } else if (token.startsWith("--host=")) takeValue("--host", token.slice(7), (v) => (host = v));
     else if (token.startsWith("--home=")) takeValue("--home", token.slice(7), (v) => (home = v));
+    else if (token === "--timeout") {
+      timeoutMs = parseTimeoutMs("--timeout", argv[i + 1]);
+      i++;
+    } else if (token.startsWith("--timeout="))
+      timeoutMs = parseTimeoutMs("--timeout", token.slice("--timeout=".length));
     else if (token === "--json") json = true;
     else if (token === "--format" || token.startsWith("--format=")) {
-      const value = token === "--format" ? argv[++i] : token.slice("--format=".length);
-      const normalized = value?.trim().toLowerCase();
-      if (normalized === "json") json = true;
-      else if (normalized !== "table" && normalized !== "cli")
-        throw {
-          code: "INVALID_FORMAT",
-          message: `Unsupported output format for plugin commands: ${String(value)}. Use --json.`,
-        };
+      const parsed = takeFormatFlag(token, argv, i);
+      if (parsed.json) json = true;
+      i += parsed.consumed;
     } else if (token === "--help" || token === "-h") help = true;
     else if (token === "--") {
       kept.push("--", ...argv.slice(i + 1));
@@ -99,7 +128,7 @@ export function extractPluginGlobals(argv: string[]): StrippedGlobals {
   }
   if (host !== undefined && home !== undefined)
     throw { code: "TARGET_AMBIGUOUS", message: "Choose either --home or --host, not both." };
-  return { argv: kept, host, home, json, help };
+  return { argv: kept, host, home, json, help, timeoutMs };
 }
 
 function usageLine(cliName: string, command: PluginCliCommand): string {
@@ -179,7 +208,13 @@ export function formatPluginCliHelp(pluginId: string, cli: PluginCli): string {
       `  ${usageLine(cli.name, command)}${command.description ? ` - ${command.description}` : ""}`,
     );
   }
-  lines.push("", "Flags: --json prints the raw RPC response, --host/--home select the daemon.");
+  lines.push(
+    "",
+    "Flags: --json prints the raw RPC response, --host/--home select the daemon,",
+    "  --timeout <seconds> bounds a chained (next) RPC run.",
+    "A response with { next: { rpc, input } } is followed automatically until",
+    "the final response; only the final response is printed.",
+  );
   return lines.join("\n");
 }
 
@@ -210,6 +245,70 @@ function formatPluginOutput(output: unknown, json: boolean): string {
 export interface PluginDispatchResult {
   handled: boolean;
   exitCode: number;
+}
+
+/**
+ * How many chained `next` RPCs a single plugin command follows before giving
+ * up. Together with --timeout this keeps a long-polling RPC (one whose
+ * responses keep pointing at the next call, e.g. a wait loop) from chaining
+ * forever on a stuck server.
+ */
+export const MAX_PLUGIN_CLI_FOLLOWUPS = 50;
+
+export interface PluginFollowUp {
+  rpc: string;
+  input: unknown;
+}
+
+/**
+ * Read the chained call out of an RPC response, if any. A response chains
+ * when it carries `next: { rpc, input }`, where rpc names the plugin RPC to
+ * call with input. A present-but-malformed next throws INVALID_FOLLOW_UP.
+ */
+export function readPluginFollowUp(output: unknown): PluginFollowUp | null {
+  if (typeof output !== "object" || output === null) return null;
+  const next = (output as { next?: unknown }).next;
+  if (next === undefined || next === null) return null;
+  if (typeof next !== "object")
+    throw { code: "INVALID_FOLLOW_UP", message: "RPC response next must be { rpc, input }." };
+  const { rpc, input } = next as { rpc?: unknown; input?: unknown };
+  if (typeof rpc !== "string" || rpc.trim() === "")
+    throw {
+      code: "INVALID_FOLLOW_UP",
+      message: "RPC response next.rpc must be a non-empty method name.",
+    };
+  return { rpc, input };
+}
+
+/**
+ * Invoke an RPC and follow its `next` chain until a final response. Only the
+ * final response is returned. Throws FOLLOW_UP_LIMIT after too many links or
+ * FOLLOW_UP_TIMEOUT past the deadline; an RPC failure throws as-is.
+ */
+export async function invokePluginRpcChain(
+  client: Pick<CliCapableClient, "invokePluginRpc">,
+  pluginId: string,
+  rpc: string,
+  input: unknown,
+  timeoutMs: number | undefined,
+): Promise<unknown> {
+  const startedAt = Date.now();
+  let output = await client.invokePluginRpc(pluginId, rpc, input);
+  for (let followed = 0; ; followed++) {
+    const follow = readPluginFollowUp(output);
+    if (!follow) return output;
+    if (followed >= MAX_PLUGIN_CLI_FOLLOWUPS)
+      throw {
+        code: "FOLLOW_UP_LIMIT",
+        message: `Plugin RPC kept chaining next ${MAX_PLUGIN_CLI_FOLLOWUPS} times; giving up.`,
+      };
+    if (timeoutMs !== undefined && Date.now() - startedAt >= timeoutMs)
+      throw {
+        code: "FOLLOW_UP_TIMEOUT",
+        message: `Plugin RPC chain exceeded --timeout of ${timeoutMs / 1000}s.`,
+      };
+    output = await client.invokePluginRpc(pluginId, follow.rpc, follow.input);
+  }
 }
 
 /**
@@ -293,10 +392,13 @@ export async function dispatchPluginCommand(input: {
     } catch (error) {
       return fail(error);
     }
-    const output = await client.invokePluginRpc(entry.pluginId, command.rpc, {
-      cwd: input.cwd,
-      ...fields,
-    });
+    const output = await invokePluginRpcChain(
+      client,
+      entry.pluginId,
+      command.rpc,
+      { cwd: input.cwd, ...fields },
+      globals.timeoutMs,
+    );
     process.stdout.write(formatPluginOutput(output, globals.json) + "\n");
     return finish(0);
   } catch (error) {

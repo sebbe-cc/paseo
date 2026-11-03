@@ -28,8 +28,10 @@ import {
   formatPluginCliHelp,
   formatPluginCliOverview,
   loadPluginCliCatalog,
+  MAX_PLUGIN_CLI_FOLLOWUPS,
   parsePluginCommandArgs,
   printTopLevelHelp,
+  readPluginFollowUp,
 } from "./dispatch.js";
 
 const wfCli = {
@@ -94,6 +96,37 @@ describe("plugin globals extraction", () => {
     expect(() => extractPluginGlobals(["--host"])).toThrowError(
       expect.objectContaining({ code: "MISSING_OPTION_VALUE" }),
     );
+  });
+
+  it("extracts --timeout in seconds and rejects bad values", () => {
+    expect(extractPluginGlobals(["start", "--timeout", "90"])).toMatchObject({
+      argv: ["start"],
+      timeoutMs: 90_000,
+    });
+    expect(extractPluginGlobals(["start", "--timeout=1.5"])).toMatchObject({ timeoutMs: 1500 });
+    expect(extractPluginGlobals(["start"])).toMatchObject({ timeoutMs: undefined });
+    for (const argv of [
+      ["--timeout"],
+      ["--timeout", "0"],
+      ["--timeout", "-3"],
+      ["--timeout", "soon"],
+    ]) {
+      expect(() => extractPluginGlobals(["start", ...argv])).toThrowError(
+        expect.objectContaining({
+          code:
+            argv[0] === "--timeout" && argv[1] === undefined
+              ? "MISSING_OPTION_VALUE"
+              : "INVALID_TIMEOUT",
+        }),
+      );
+    }
+  });
+
+  it("keeps a plugin --timeout after -- as a command option", () => {
+    expect(extractPluginGlobals(["start", "--", "--timeout", "5"])).toMatchObject({
+      argv: ["start", "--", "--timeout", "5"],
+      timeoutMs: undefined,
+    });
   });
 });
 
@@ -311,6 +344,117 @@ describe("paseo <plugin> dispatch", () => {
     expect(out).not.toHaveBeenCalled();
     err.mockRestore();
     out.mockRestore();
+  });
+});
+
+describe("plugin CLI option types", () => {
+  it("accepts type: 'boolean' on options", async () => {
+    const cli = {
+      ...wfCli,
+      commands: [
+        {
+          ...wfCli.commands[0],
+          options: [{ name: "wait", type: "boolean" }],
+        },
+      ],
+    };
+    const catalog = await loadPluginCliCatalog(
+      async () => [{ id: "paseo-workflows", path: "/p", enabled: true, status: "running", cli }],
+      builtIns,
+    );
+    expect([...catalog.entries.keys()]).toEqual(["wf"]);
+  });
+
+  it("reads follow-up links and rejects malformed ones", () => {
+    expect(readPluginFollowUp({ ok: true })).toBeNull();
+    expect(readPluginFollowUp(null)).toBeNull();
+    expect(readPluginFollowUp({ next: null })).toBeNull();
+    expect(readPluginFollowUp({ next: { rpc: "runs.wait", input: { run: "1" } } })).toEqual({
+      rpc: "runs.wait",
+      input: { run: "1" },
+    });
+    expect(() => readPluginFollowUp({ next: { rpc: "" } })).toThrowError(
+      expect.objectContaining({ code: "INVALID_FOLLOW_UP" }),
+    );
+    expect(() => readPluginFollowUp({ next: "runs.wait" })).toThrowError(
+      expect.objectContaining({ code: "INVALID_FOLLOW_UP" }),
+    );
+  });
+});
+
+describe("paseo <plugin> next chaining", () => {
+  beforeEach(() => {
+    plugins = [{ id: "paseo-workflows", path: "/p", enabled: true, status: "running", cli: wfCli }];
+    features.pluginManagement = true;
+    vi.clearAllMocks();
+  });
+
+  it("follows next until the final response and prints only it", async () => {
+    invokePluginRpc
+      .mockResolvedValueOnce({ started: true, next: { rpc: "runs.wait", input: { run: "r1" } } })
+      .mockResolvedValueOnce({ done: true });
+    const out = stdoutSpy();
+    const result = await dispatchPluginCommand({
+      name: "wf",
+      argv: ["start", "do-work", "sb-1"],
+      cwd: "/tmp/ws",
+      builtInNames: builtIns,
+    });
+    expect(result).toEqual({ handled: true, exitCode: 0 });
+    expect(invokePluginRpc).toHaveBeenCalledTimes(2);
+    expect(invokePluginRpc).toHaveBeenNthCalledWith(2, "paseo-workflows", "runs.wait", {
+      run: "r1",
+    });
+    expect(out).toHaveBeenCalledTimes(1);
+    expect(String(out.mock.calls[0]?.[0])).toContain("done");
+    out.mockRestore();
+  });
+
+  it("prints the raw final response with --json", async () => {
+    invokePluginRpc
+      .mockResolvedValueOnce({ next: { rpc: "runs.wait", input: { run: "r1" } } })
+      .mockResolvedValueOnce({ nested: { n: 2 } });
+    const out = stdoutSpy();
+    await dispatchPluginCommand({
+      name: "wf",
+      argv: ["start", "do-work", "sb-1", "--json"],
+      cwd: "/tmp/ws",
+      builtInNames: builtIns,
+    });
+    expect(JSON.parse(String(out.mock.calls[0]?.[0]))).toEqual({ nested: { n: 2 } });
+    out.mockRestore();
+  });
+
+  it("gives up after the follow-up cap with exit 1", async () => {
+    invokePluginRpc.mockResolvedValue({ next: { rpc: "runs.wait", input: {} } });
+    const err = stderrSpy();
+    const out = stdoutSpy();
+    const result = await dispatchPluginCommand({
+      name: "wf",
+      argv: ["start", "do-work", "sb-1"],
+      cwd: "/tmp/ws",
+      builtInNames: builtIns,
+    });
+    expect(result).toEqual({ handled: true, exitCode: 1 });
+    expect(invokePluginRpc).toHaveBeenCalledTimes(MAX_PLUGIN_CLI_FOLLOWUPS + 1);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("chaining"));
+    expect(out).not.toHaveBeenCalled();
+    err.mockRestore();
+    out.mockRestore();
+  }, 30000);
+
+  it("fails a malformed next with exit 1", async () => {
+    invokePluginRpc.mockResolvedValueOnce({ next: { rpc: "" } });
+    const err = stderrSpy();
+    const result = await dispatchPluginCommand({
+      name: "wf",
+      argv: ["start", "do-work", "sb-1"],
+      cwd: "/tmp/ws",
+      builtInNames: builtIns,
+    });
+    expect(result).toEqual({ handled: true, exitCode: 1 });
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("next"));
+    err.mockRestore();
   });
 });
 

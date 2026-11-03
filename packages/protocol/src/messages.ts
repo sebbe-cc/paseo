@@ -6779,7 +6779,7 @@ const PLUGIN_CLI_FIELD = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const PLUGIN_RPC_METHOD = /^[a-z][a-z0-9._-]*$/;
 // Top-level CLI flags the plugin dispatcher reserves for itself. A plugin
 // command must not declare an argument or option with one of these names.
-const RESERVED_PLUGIN_CLI_FIELDS = new Set(["json", "help", "host", "home", "format"]);
+const RESERVED_PLUGIN_CLI_FIELDS = new Set(["json", "help", "host", "home", "format", "timeout"]);
 
 export const PluginCliArgumentSchema = z
   .object({
@@ -6793,6 +6793,9 @@ export const PluginCliOptionSchema = z
   .object({
     name: z.string().regex(PLUGIN_CLI_FIELD),
     description: z.string().trim().min(1).optional(),
+    // Informational option kind from the plugin (e.g. type: "boolean" for a
+    // flag). The dispatcher accepts it but does not coerce values by it.
+    type: z.string().trim().min(1).optional(),
   })
   .strict();
 export type PluginCliOption = z.infer<typeof PluginCliOptionSchema>;
