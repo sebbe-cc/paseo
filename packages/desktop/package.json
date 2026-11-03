@@ -33,6 +33,7 @@
     "@getpaseo/server": "*",
     "electron-log": "^5.4.3",
     "electron-updater": "^6.6.2",
+    "node-hid": "^3.4.0",
     "ws": "^8.14.2",
     "zod": "^4.4.3"
   },
