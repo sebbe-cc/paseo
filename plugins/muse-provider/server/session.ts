@@ -411,12 +411,16 @@ export class Session {
     const completion = new Promise<void>((resolve, reject) => {
       this.interruptCompletion = { turnId, resolve, reject };
       timer = setTimeout(() => {
-        this.runtimeFailed(
-          new MuseError(
-            "interruptTimeout",
-            "Muse did not confirm cancellation within 10000ms. Reopen the session before sending another prompt.",
-          ),
+        const failure = new MuseError(
+          "interruptTimeout",
+          "Muse did not confirm cancellation within 10000ms. Reopen the session before sending another prompt.",
         );
+        // The host is about to be closed and can never confirm: terminate the
+        // interrupted turn locally so it cannot linger as active. Without this
+        // a later interrupt re-targets the dead turn on a closed host and the
+        // session never settles back to idle (pa-qd0ijb).
+        this.failInterruptedTurn(turnId, failure);
+        this.runtimeFailed(failure);
         // The interrupt timeout already failed the session; a slow host
         // shutdown must never surface as an unhandled rejection (it crashed
         // the daemon). Swallow it here; close() callers still see failures.
@@ -432,6 +436,17 @@ export class Session {
       clearTimeout(timer!);
       this.interruptCompletion = null;
     }
+  }
+  private failInterruptedTurn(turnId: string, error: MuseError): void {
+    if (this.turns.get(turnId) !== "active") return;
+    this.turns.set(turnId, "completed");
+    this.options.emit({
+      type: "session.turn",
+      sessionId: this.options.id,
+      turnId,
+      state: "failed",
+      error: actionableError(error, this.options.launch),
+    });
   }
   async close(): Promise<void> {
     this.closing = true;
