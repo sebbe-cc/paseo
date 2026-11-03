@@ -158,6 +158,18 @@ export function createWorkerTerminalManager(
   // Creation owns a reference to the session independently of the live-terminal
   // index. Only terminalCreated registers it; terminalExit removes it permanently.
   const pendingCreationsById = new Map<string, { session: TerminalSession | null }>();
+  // Persistent tmux bindings by terminal id (pa-vbhcu). Stashed parent-side at
+  // create time (the create options already carry the binding) so read/send
+  // paths can address the exact tmux session without a worker roundtrip.
+  // removeRecord forgets them alongside the record itself.
+  const persistentBindingById = new Map<
+    string,
+    { tmuxBin: string; socketPath: string; sessionName: string }
+  >();
+
+  function forgetPersistentBinding(terminalId: string): void {
+    persistentBindingById.delete(terminalId);
+  }
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
   const terminalActivityListeners = new Set<TerminalActivityListener>();
   const terminalWorkspaceContributionChangedListeners =
@@ -399,10 +411,12 @@ export function createWorkerTerminalManager(
   function removeRecord(terminalId: string): WorkerTerminalRecord | undefined {
     const record = recordsById.get(terminalId);
     if (!record) {
+      forgetPersistentBinding(terminalId);
       return undefined;
     }
     recordsById.delete(terminalId);
     terminalActivityTokenById.delete(terminalId);
+    forgetPersistentBinding(terminalId);
     const terminalIds = terminalIdsByCwd.get(record.info.cwd);
     if (terminalIds) {
       terminalIds.delete(terminalId);
@@ -685,6 +699,9 @@ export function createWorkerTerminalManager(
       const activityToken = createActivityToken();
       const terminalActivityUrl = managerOptions.getTerminalActivityUrl?.() ?? null;
       terminalActivityTokenById.set(terminalId, activityToken);
+      if (options.persistent) {
+        persistentBindingById.set(terminalId, { ...options.persistent });
+      }
       const creation = { session: null as TerminalSession | null };
       pendingCreationsById.set(terminalId, creation);
       try {
@@ -703,6 +720,7 @@ export function createWorkerTerminalManager(
         return creation.session;
       } catch (error) {
         terminalActivityTokenById.delete(terminalId);
+        forgetPersistentBinding(terminalId);
         throw error;
       } finally {
         pendingCreationsById.delete(terminalId);
@@ -811,8 +829,18 @@ export function createWorkerTerminalManager(
       return Array.from(terminalIdsByCwd.keys());
     },
 
-    killAll(): void {
-      void sendRequest({ type: "killAll" })
+    getPersistentBinding(id: string): {
+      tmuxBin: string;
+      socketPath: string;
+      sessionName: string;
+    } | null {
+      if (!recordsById.has(id)) return null;
+      return persistentBindingById.get(id) ?? null;
+    },
+
+    killAll(options?: { sparePersistent?: boolean }): void {
+      const sparePersistent = options?.sparePersistent === true;
+      void sendRequest({ type: "killAll", ...(sparePersistent ? { sparePersistent: true } : {}) })
         .catch(() => {
           // no-op
         })
