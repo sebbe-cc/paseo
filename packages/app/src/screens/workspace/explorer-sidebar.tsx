@@ -1,7 +1,10 @@
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { View } from "react-native";
 import { useWorkspaceTabDrag } from "@/components/workspace-tab-drag-context";
 import { StyleSheet } from "react-native-unistyles";
+import { PaneFocusRing, resolvePaneFocusRingVisible } from "@/components/pane-focus-ring";
+import { shouldFocusPaneFromEventTarget } from "@/components/split-container-pane-focus";
+import { useStableEvent } from "@/hooks/use-stable-event";
 import { RetainedPanel } from "@/components/retained-panel";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { WorkspacePanelHost } from "@/screens/workspace/workspace-panel-host";
@@ -38,6 +41,8 @@ interface ExplorerSidebarDockProps extends Pick<
   normalizedServerId: string;
   normalizedWorkspaceId: string;
   isWorkspaceFocused: boolean;
+  isPaneFocused: boolean;
+  onFocusPane?: (paneId: string) => void;
   closingTabIds: Set<string>;
   onSelectTab: (paneId: string, tabId: string) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
@@ -56,6 +61,8 @@ export function ExplorerSidebarDock({
   normalizedServerId,
   normalizedWorkspaceId,
   isWorkspaceFocused,
+  isPaneFocused,
+  onFocusPane,
   closingTabIds,
   onSelectTab,
   onCloseTab,
@@ -116,18 +123,64 @@ export function ExplorerSidebarDock({
     (tabId: string) => onCloseOtherTabs(tabId, tabs),
     [onCloseOtherTabs, tabs],
   );
+  const stableOnFocusPane = useStableEvent(onFocusPane ?? (() => undefined));
+  const dockRef = useRef<View | null>(null);
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return () => {};
+    }
+
+    const rawRef: unknown = dockRef.current;
+    if (!(rawRef instanceof HTMLElement)) {
+      return () => {};
+    }
+    const dockElement = rawRef;
+
+    const handleDockPointerDown = (event: PointerEvent) => {
+      if (!shouldFocusPaneFromEventTarget(event.target)) {
+        return;
+      }
+      stableOnFocusPane(pane.id);
+    };
+
+    const handleDockFocusIn = (event: FocusEvent) => {
+      if (!shouldFocusPaneFromEventTarget(event.target)) {
+        return;
+      }
+      stableOnFocusPane(pane.id);
+    };
+
+    dockElement.addEventListener("pointerdown", handleDockPointerDown, true);
+    dockElement.addEventListener("focusin", handleDockFocusIn, true);
+
+    return () => {
+      dockElement.removeEventListener("pointerdown", handleDockPointerDown, true);
+      dockElement.removeEventListener("focusin", handleDockFocusIn, true);
+    };
+  }, [stableOnFocusPane, pane.id]);
+  const handleTouchFocusPane = useCallback(() => {
+    if (!isPaneFocused) {
+      stableOnFocusPane(pane.id);
+    }
+    return false;
+  }, [isPaneFocused, pane.id, stableOnFocusPane]);
 
   return (
     <RetainedPanel active>
       <WindowChromeRegion corners="top-right">
-        <View style={styles.dock} testID="workspace-explorer-sidebar">
+        <View
+          ref={dockRef}
+          style={styles.dock}
+          testID="workspace-explorer-sidebar"
+          onStartShouldSetResponderCapture={handleTouchFocusPane}
+        >
           <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
             <TitlebarDragRegion />
             <View style={styles.tabRow}>
               <WorkspaceDesktopTabsRow
                 host="explorer"
                 launchPurpose="supporting"
-                isFocused={isWorkspaceFocused}
+                isFocused={isWorkspaceFocused && isPaneFocused}
                 ownsKeyboardShortcuts={false}
                 setHoveredCloseTabKey={setHoveredCloseTabKey}
                 onCopyResumeCommand={onCopyResumeCommand}
@@ -167,10 +220,18 @@ export function ExplorerSidebarDock({
               normalizedServerId={normalizedServerId}
               normalizedWorkspaceId={normalizedWorkspaceId}
               isWorkspaceFocused={isWorkspaceFocused}
-              isPaneFocused
+              isPaneFocused={isPaneFocused}
+              onFocusPane={onFocusPane ? stableOnFocusPane : undefined}
               buildPaneContentModel={buildPaneContentModel}
             />
           </View>
+          <PaneFocusRing
+            visible={resolvePaneFocusRingVisible({
+              isWorkspaceFocused,
+              isPaneFocused,
+            })}
+            testID="workspace-explorer-focus-ring"
+          />
         </View>
       </WindowChromeRegion>
     </RetainedPanel>

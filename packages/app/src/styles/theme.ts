@@ -105,7 +105,19 @@ export const baseColors = {
     500: "#f97316",
     600: "#ea580c",
   },
+
+  // Indigo scale (focus only — the single hue allowed to mark keyboard focus)
+  indigo: {
+    500: "#6366F1",
+  },
 } as const;
+
+// Focus ring — the frame marking the keyboard/interaction-focused panel
+// (chat, explorer/workspace panel, plugin screens). One hue in both themes so
+// the focused pane reads the same in light and dark. The ring never moves
+// layout (absolute overlay, never a border that adds width) and never
+// animates, so prefers-reduced-motion needs no special case.
+export const FOCUS_RING_INDIGO = baseColors.indigo[500];
 
 // Diff colors — the +/- inside a diff view, where the color *is* the signal and has to
 // survive being scanned line by line, so it stays saturated. Light uses muted tones, dark
@@ -300,6 +312,7 @@ export function buildLightSemanticColors(tint: LightThemeConfig) {
     accentBorder: tint.borderAccent,
     input: tint.surface2,
     ring: tint.ring,
+    focusRing: FOCUS_RING_INDIGO,
 
     ...lightDiffColors,
     ...lightStatusColors,
@@ -432,6 +445,7 @@ export function buildDarkSemanticColors(tint: DarkThemeConfig) {
     accentBorder: tint.borderAccent,
     input: tint.surface2,
     ring,
+    focusRing: FOCUS_RING_INDIGO,
 
     ...darkDiffColors,
     ...darkStatusColors,
