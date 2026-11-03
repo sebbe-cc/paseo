@@ -70,6 +70,11 @@ export const ClaudeProviderOptionsSchema = z
     settings: z
       .object({
         permissions: PermissionRulesSchema.optional(),
+        // Cross-session inbox delivery (pa-4ixw6.4): the gascity plugin
+        // sets featureValues.claude_inbox_accept for gc sessions and the
+        // provider maps it to "accept" below, so peer mail arrives between
+        // tool calls instead of being held for a headless approval dialog.
+        crossSessionInbound: z.enum(["accept", "hold", "refuse"]).optional(),
         sandbox: z
           .object({
             enabled: z.boolean().optional(),
@@ -89,6 +94,18 @@ export const ClaudeProviderOptionsSchema = z
   .strict() satisfies z.ZodType<ProviderOptions>;
 
 export type ClaudeProviderOptions = z.infer<typeof ClaudeProviderOptionsSchema>;
+
+/**
+ * Gas City inbox delivery (pa-4ixw6.4): the gascity plugin sets the
+ * `claude_inbox_accept` feature value for gc sessions; the provider maps it
+ * to `crossSessionInbound: "accept"`. Pure so the mapping stays unit
+ * testable without constructing an agent client.
+ */
+export function claudeInboxAccept(
+  featureValues: Record<string, unknown> | undefined,
+): boolean {
+  return featureValues?.claude_inbox_accept === true;
+}
 
 export function applyClaudeToolPolicy(
   options: ClaudeProviderOptions,
