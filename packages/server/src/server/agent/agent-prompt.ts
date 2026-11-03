@@ -15,6 +15,7 @@ export type AgentRunController = Pick<
   | "getAgent"
   | "tryRunOutOfBand"
   | "hasInFlightRun"
+  | "queueAgentPrompt"
   | "reloadStalePluginSession"
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
@@ -34,7 +35,7 @@ export interface StartAgentRunOptions {
   clearPendingPermissions?: boolean;
 }
 
-export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
+export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started" | "queued";
 
 async function steerOrReplaceActiveRun(
   agentManager: AgentRunController,
@@ -148,6 +149,23 @@ async function startAgentRunInner(
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
   const snapshot = agentManager.getAgent(agentId);
+  // `queue` never steers into or replaces the active turn (pa-r6a9i): while a
+  // run is in flight the prompt goes straight to the provider session, which
+  // holds it in its foreground-turn queue and drains it at the turn boundary.
+  if (options?.activeTurnBehavior === "queue" && agentManager.hasInFlightRun(agentId)) {
+    const queued = await agentManager.queueAgentPrompt(agentId, prompt, options?.runOptions);
+    logger.trace(
+      {
+        agentId,
+        provider: snapshot?.provider,
+        providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+        queuedTurnId: queued.turnId,
+      },
+      "agent.session.queue.request",
+    );
+    options?.onDispatch?.("queued");
+    return { disposition: "queued" };
+  }
   const steered = await steerOrReplaceActiveRun(agentManager, agentId, prompt, options);
   if (steered?.disposition === "steered") {
     options?.onDispatch?.("steered");
