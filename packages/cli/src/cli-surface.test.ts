@@ -118,6 +118,7 @@ describe("canonical CLI surface", () => {
       "enable",
       "disable",
       "remove",
+      "rpc",
     ]);
     expect(
       plugin?.commands.find((command) => command.name() === "init")?.helpInformation(),
