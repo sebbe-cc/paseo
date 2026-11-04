@@ -169,7 +169,7 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
   const hosts = useHosts();
   // `allProjects`, never `projects`: the model's `projects` is already filtered, so a picker fed
   // from it would lose the row that undoes the filter as soon as the filter narrowed to one.
-  const { allProjects, resolvedProjectFilters } = useSidebarModel();
+  const { allProjects, resolvedProjectFilters, workspaceSortSupported } = useSidebarModel();
   const { labels } = useWorkspaceLabelProjection();
   const [managerOpen, setManagerOpen] = useState(false);
   const openManager = useCallback(() => setManagerOpen(true), []);
@@ -248,6 +248,16 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
       },
     ];
 
+    if (preferences.grouping === "project") {
+      definitions.push({
+        id: "sort",
+        title: t("sidebar.display.sort.label"),
+        content: (
+          <SortPage preferences={preferences} automaticSortSupported={workspaceSortSupported} />
+        ),
+      });
+    }
+
     if (showHostFilter) {
       definitions.push({
         id: "hostFilter",
@@ -281,6 +291,7 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
   }, [
     t,
     preferences,
+    workspaceSortSupported,
     hosts,
     showHostFilter,
     showProjectFilter,
@@ -316,6 +327,18 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
           >
             {t("sidebar.display.grouping.label")}
           </MenuSubTrigger>
+          {preferences.grouping === "project" ? (
+            <MenuSubTrigger
+              id="sort"
+              value={
+                workspaceSortSupported || preferences.workspaceSort === "manual"
+                  ? t(`sidebar.display.sort.${preferences.workspaceSort}`)
+                  : undefined
+              }
+            >
+              {t("sidebar.display.sort.label")}
+            </MenuSubTrigger>
+          ) : null}
           <MenuSubTrigger
             id="titleSource"
             value={t(TITLE_SOURCE_LABEL_KEYS[preferences.titleSource])}
@@ -387,6 +410,42 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
       </MenuRoot>
       <WorkspaceLabelManagerModal visible={managerOpen} onClose={closeManager} />
       <ProjectContainerManagerModal visible={projectManagerOpen} onClose={closeProjectManager} />
+    </>
+  );
+}
+
+function SortPage({
+  preferences,
+  automaticSortSupported,
+}: {
+  preferences: Preferences;
+  automaticSortSupported: boolean;
+}): ReactElement {
+  const { t } = useTranslation();
+  const { setWorkspaceSort } = preferences;
+  const selectManual = useCallback(() => setWorkspaceSort("manual"), [setWorkspaceSort]);
+  const selectCreated = useCallback(() => setWorkspaceSort("created"), [setWorkspaceSort]);
+  const selectLastPrompt = useCallback(() => setWorkspaceSort("lastPrompt"), [setWorkspaceSort]);
+  return (
+    <>
+      <MenuItem selected={preferences.workspaceSort === "manual"} onSelect={selectManual}>
+        {t("sidebar.display.sort.manual")}
+      </MenuItem>
+      {automaticSortSupported ? (
+        <>
+          <MenuItem selected={preferences.workspaceSort === "created"} onSelect={selectCreated}>
+            {t("sidebar.display.sort.created")}
+          </MenuItem>
+          <MenuItem
+            selected={preferences.workspaceSort === "lastPrompt"}
+            onSelect={selectLastPrompt}
+          >
+            {t("sidebar.display.sort.lastPrompt")}
+          </MenuItem>
+        </>
+      ) : (
+        <MenuItem disabled>{t("sidebar.display.sort.updateHost")}</MenuItem>
+      )}
     </>
   );
 }
