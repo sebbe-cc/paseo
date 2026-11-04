@@ -5,6 +5,8 @@ import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   getCheckoutDiff,
+  getCheckoutSnapshotFacts,
+  getCheckoutRefDerivedState,
   getCheckoutStatus,
   getCheckoutShortstat,
   mergeFromBase,
@@ -456,7 +458,23 @@ describe("one workspace comparison base", () => {
       firstAgentBranchAutoName: { status: "attempted" },
     });
     commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+    const facts = await getCheckoutSnapshotFacts(repoDir);
+    if (!facts.isGit) throw new Error("Expected a Git checkout");
     git(["update-ref", "-d", ref], repoDir);
+    const derived = await getCheckoutRefDerivedState(
+      repoDir,
+      facts,
+      {
+        aheadBehind: { ahead: 1, behind: 0 },
+        diffStat: { additions: 1, deletions: 0 },
+      },
+      new Set([ref]),
+    );
+    expect(derived).toMatchObject({
+      base: { ref, forkSha, missing: true },
+      aheadBehind: { ahead: 1, behind: 0 },
+      diffStat: { additions: 1, deletions: 0 },
+    });
     expect(await resolveWorkspaceBase(repoDir)).toEqual({
       ref,
       forkSha,

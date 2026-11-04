@@ -300,7 +300,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
           baseRef: "main",
           aheadBehind: { ahead: 1, behind: 0 },
         });
-        expect(result.comparisonBaseRef).toBe("main");
+        expect(result.comparisonBaseRef).toBe("refs/heads/main");
       },
     );
 
@@ -358,7 +358,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       });
       const diff = await getCheckoutDiff(created.worktreePath, { mode: "base" }, { paseoHome });
       expect(diff.diff).toContain("+feature change");
-      expect(created.comparisonBaseRef).toBe("master");
+      expect(created.comparisonBaseRef).toBe("refs/heads/master");
     });
 
     it("falls back to the currently checked out branch when no default branch can be resolved", async () => {
@@ -383,7 +383,10 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
         version: 3,
         baseRefName: "develop",
         baseRef: "refs/heads/develop",
-        forkSha: expect.any(String),
+        forkSha: execFileSync("git", ["merge-base", "refs/heads/develop", "HEAD"], {
+          cwd: result.worktreePath,
+          encoding: "utf8",
+        }).trim(),
       });
     });
 
@@ -635,7 +638,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       }
       // The wire keeps the display name; the exact ref above is what the comparison used,
       // which is why an untouched child reports no work of its own.
-      expect(status.baseRef).toBe("main");
+      expect(status.baseRef).toBe("refs/remotes/upstream/main");
       expect(status.aheadBehind).toEqual({ ahead: 0, behind: 0 });
       await expect(
         getCheckoutDiff(
