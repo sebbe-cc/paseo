@@ -5675,6 +5675,8 @@ export class Session {
     workspace: PersistedWorkspaceRecord,
   ): Promise<Pick<WorkspaceDescriptorPayload, "base" | "baseError">> {
     if (workspace.kind === "directory") return { base: null };
+    const cachedBase = this.workspaceRuntimeStore.get(workspace.cwd)?.git.base;
+    if (cachedBase !== undefined) return { base: cachedBase };
     try {
       return { base: await resolveWorkspaceBase(workspace.cwd) };
     } catch (error) {
