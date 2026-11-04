@@ -233,6 +233,7 @@ export function createWorkspaceScriptsService(deps: {
       gracefulTimeoutMs: 5000,
       forceTimeoutMs: 3000,
     });
+    await available.runtimeStore.flush();
 
     const script = (await buildSnapshot(workspace, project)).find(
       (entry) => entry.scriptName === input.scriptName,
