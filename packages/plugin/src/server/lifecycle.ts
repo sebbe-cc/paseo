@@ -87,6 +87,20 @@ export interface PluginSessionOpenRequest {
   mcpServers: NonNullable<AgentSessionConfig["mcpServers"]>;
 }
 
+/**
+ * Fired before an agent's context is compacted. Return `{ ...request, skip: true }` to
+ * replace the compaction; only `skip` may change.
+ */
+export interface PluginCompactRequest {
+  agentId: string;
+  provider: string;
+  reason: "auto" | "manual";
+  /** "provider": the harness's own pre-compact hook; "threshold": Paseo's context usage watch. */
+  source: "provider" | "threshold";
+  usage: { contextWindowUsedTokens: number | null; contextWindowMaxTokens: number | null };
+  skip: boolean;
+}
+
 export type PluginTurnOutcome =
   | { kind: "completed" }
   | { kind: "failed"; error: { message: string; code?: string } }
@@ -167,6 +181,7 @@ export interface PluginTurnPrepareResult {
 
 export interface PluginHookRequests {
   "agent.turn_prepare.before": PluginTurnPrepareRequest;
+  "agent.compact.before": PluginCompactRequest;
   "worktree.create.before": PluginWorktreeCreateRequest;
   "agent.create.before": PluginCreateRequest;
   "agent.open.before": PluginSessionOpenRequest;
@@ -230,6 +245,7 @@ export interface PluginLifecycleRegistration {
 /** @internal Lifecycle policy shared by the daemon and plugin process. */
 export const pluginHookRegistry = {
   "agent.turn_prepare.before": { waits: true },
+  "agent.compact.before": { waits: true },
   "workspace.create.before": { waits: true },
   "workspace.create.after": { waits: false },
   "workspace.archive.after": { waits: false },
@@ -260,6 +276,7 @@ const legacyEvents = {
 } as const;
 const legacyRequests = {
   "agent.turn_prepare": "agent.turn_prepare.before",
+  "agent.compact": "agent.compact.before",
   "workspace.create": "workspace.create.before",
   "agent.create": "agent.create.before",
   "agent.session_open": "agent.open.before",

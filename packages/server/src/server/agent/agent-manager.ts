@@ -337,6 +337,8 @@ export interface CreateAgentOptions {
 
 export interface AgentManagerOptions {
   pluginLifecycle?: PluginLifecycle;
+  /** Context usage share that fires agent.compact for providers without a pre-compact hook. */
+  compactThreshold?: number;
   /** An internal workspace makes every agent created inside it internal. */
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
@@ -764,11 +766,16 @@ export interface RetiredInternalAgent {
  * there is no visible extra message. Identical blocks are sent once per turn.
  */
 export const TURN_PREPARE_TIMEOUT_MS = 5_000;
+function resolveCompactThreshold(configured: number | undefined): number {
+  return configured ?? (Number(process.env.PASEO_COMPACT_THRESHOLD) || 0.8);
+}
 
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly turnNumbers = new Map<string, number>();
   private readonly pendingTurnKinds = new Map<string, PluginTurnKind>();
+  private readonly compactThreshold: number;
+  private readonly compactThresholdFired = new Set<string>();
   private readonly retiredInternalAgents = new Map<
     string,
     RetiredInternalAgent & { expiresAt: number }
@@ -821,6 +828,7 @@ export class AgentManager {
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
     this.pluginAgentTools = options.pluginAgentTools;
+    this.compactThreshold = resolveCompactThreshold(options.compactThreshold);
     this.timelineStore = options.timelineStore ?? new InMemoryAgentTimelineStore();
     this.idFactory = options.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
@@ -4132,6 +4140,7 @@ export class AgentManager {
     this.previousStatuses.delete(agent.id);
     this.turnNumbers.delete(agent.id);
     this.pendingTurnKinds.delete(agent.id);
+    this.compactThresholdFired.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
       agent.unsubscribeSession = null;
@@ -4752,6 +4761,7 @@ export class AgentManager {
         return undefined;
       case "usage_updated":
         agent.lastUsage = event.usage;
+        this.watchCompactThreshold(agent);
         this.emitState(agent);
         return undefined;
       case "mode_changed":
@@ -4904,6 +4914,7 @@ export class AgentManager {
     if (terminalDisposition === "stale") return;
     if (event.usage) {
       agent.lastUsage = { ...agent.lastUsage, ...event.usage };
+      this.watchCompactThreshold(agent);
     }
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits
@@ -5731,6 +5742,10 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    if (this.pluginLifecycle && client.capabilities.supportsPreCompactHook) {
+      context.beforeCompact = ({ reason }) =>
+        this.runBeforeCompact(agentId, client.provider, reason, "provider");
+    }
     const useNativeTools =
       this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
@@ -5924,6 +5939,54 @@ export class AgentManager {
       { type: "text", text: `${wrapPromptWithTurnContext("", context)}` },
       ...prompt,
     ] as AgentPromptInput;
+  }
+
+  // Providers without a pre-compact hook: fire once per crossing, re-armed when usage drops.
+  private watchCompactThreshold(agent: ActiveManagedAgent): void {
+    if (!this.pluginLifecycle || agent.internal || agent.capabilities.supportsPreCompactHook) {
+      return;
+    }
+    const used = agent.lastUsage?.contextWindowUsedTokens;
+    const max = agent.lastUsage?.contextWindowMaxTokens;
+    if (!used || !max || used / max < this.compactThreshold) {
+      this.compactThresholdFired.delete(agent.id);
+      return;
+    }
+    if (this.compactThresholdFired.has(agent.id)) {
+      return;
+    }
+    this.compactThresholdFired.add(agent.id);
+    void this.runBeforeCompact(agent.id, agent.provider, "auto", "threshold");
+  }
+
+  private async runBeforeCompact(
+    agentId: string,
+    provider: AgentProvider,
+    reason: "auto" | "manual",
+    source: "provider" | "threshold",
+  ): Promise<{ skip: boolean }> {
+    if (!this.pluginLifecycle) {
+      return { skip: false };
+    }
+    const usage = this.agents.get(agentId)?.lastUsage;
+    try {
+      const result = await this.pluginLifecycle.before("agent.compact.before", {
+        agentId,
+        provider,
+        reason,
+        source,
+        usage: {
+          contextWindowUsedTokens: usage?.contextWindowUsedTokens ?? null,
+          contextWindowMaxTokens: usage?.contextWindowMaxTokens ?? null,
+        },
+        skip: false,
+      });
+      this.logger.info({ agentId, provider, reason, source, skip: result.skip }, "agent.compact.before");
+      return { skip: result.skip };
+    } catch (error) {
+      this.logger.warn({ err: error, agentId, provider }, "agent.compact hooks failed");
+      return { skip: false };
+    }
   }
 
   private resolveProviderLaunchConfig(
