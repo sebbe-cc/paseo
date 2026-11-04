@@ -88,5 +88,5 @@ The fork still accepts `terminal create --persistent` and SDK `persistent: true`
 for existing callers. All terminals now use the upstream detached worker; the
 flag does not select tmux. Restart preserves terminals, while stop follows the
 upstream `--keep-terminals` contract. Legacy tmux sessions and the fork's
-`persistent-terminals.json` journal are not adopted by the new worker. Complete
+`terminals/persistent/*.json` journal are not adopted by the new worker. Complete
 or move that work before rolling out this version; do not delete live sessions.
