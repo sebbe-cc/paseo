@@ -367,7 +367,11 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
-async function compileTarget(entryPath: string, target: PluginBuildTarget): Promise<string> {
+async function compileTarget(
+  entryPath: string,
+  target: PluginBuildTarget,
+  runtimeExternals: readonly string[],
+): Promise<string> {
   const { build } = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
   // when resolving type references, while the JS realpath implementation retains them.
@@ -398,7 +402,8 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
             "react-native",
             "zod",
           ]
-        : SERVER_HOST_MODULES,
+        : // The plugin subprocess requires runtime externals from the plugin's node_modules.
+          [...SERVER_HOST_MODULES, ...runtimeExternals],
     plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory)],
     metafile: true,
     logLevel: "silent",
@@ -430,16 +435,19 @@ async function lowerClassesForHermes(code: string): Promise<string> {
   return result.code;
 }
 
-export async function compilePlugin(entryPaths: {
-  client: string | null;
-  server: string | null;
-}): Promise<{
+export async function compilePlugin(
+  entryPaths: {
+    client: string | null;
+    server: string | null;
+  },
+  runtimeExternals: readonly string[] = [],
+): Promise<{
   clientBundle: string | null;
   serverBundle: string | null;
 }> {
   const [clientBundle, serverBundle] = await Promise.all([
-    entryPaths.client ? compileTarget(entryPaths.client, "client") : null,
-    entryPaths.server ? compileTarget(entryPaths.server, "server") : null,
+    entryPaths.client ? compileTarget(entryPaths.client, "client", []) : null,
+    entryPaths.server ? compileTarget(entryPaths.server, "server", runtimeExternals) : null,
   ]);
   return { clientBundle, serverBundle };
 }
@@ -485,6 +493,9 @@ export async function compileDirectoryPlugin(
     throw new Error(`Built-in plugin ${builtinId} has manifest ID ${manifest.id}`);
   }
   assertPluginCompatibility({ ...manifest, version, runtime: "daemon" });
-  const bundles = await compilePlugin(await resolveEntryPaths(directory));
+  const bundles = await compilePlugin(
+    await resolveEntryPaths(directory),
+    manifest.runtimeExternals,
+  );
   return { ...bundles, manifest };
 }
