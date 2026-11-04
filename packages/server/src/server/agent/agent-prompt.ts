@@ -108,7 +108,7 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
-  const metadata = agentRunMetadata(agentId, agentManager.getAgent(agentId));
+  const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {
       agentId,
@@ -156,7 +156,7 @@ async function startAgentRunInner(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
-  const snapshot = agentManager.getAgent(agentId);
+  const metadata = agentRunMetadata(agentId, agentManager.getAgent(agentId));
   // `queue` never steers into or replaces the active turn (pa-r6a9i): while a
   // run is in flight the prompt goes straight to the provider session, which
   // holds it in its foreground-turn queue and drains it at the turn boundary.
