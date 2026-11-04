@@ -1,14 +1,18 @@
 import {
+  replayTerminal,
+  type TerminalReplaySink,
+  type TerminalReplayMetadata,
+  type TerminalReplayOptions,
+} from "./terminal-replay.js";
+import {
   createTerminal,
+  type LocalTerminalSession,
   type TerminalActivityTransition,
   type TerminalSession,
-  type TerminalStateSnapshot,
-  type TerminalStateSnapshotOptions,
 } from "./terminal.js";
-import { captureTerminalLines, type CaptureTerminalLinesResult } from "./terminal-capture.js";
+import { type CaptureTerminalLinesResult } from "./terminal-capture.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
-import { tmuxKillSession, tmuxSessionAlive, type PersistentTerminalBinding } from "./tmux.js";
 import { assertAbsolutePath, isSameOrDescendantPath } from "../server/path-utils.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
 import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
@@ -51,6 +55,11 @@ export type TerminalWorkspaceContributionChangedListener = (
 ) => void;
 
 export interface TerminalManager {
+  /**
+   * Set when this host's terminals cannot be served at all (a worker from a newer Paseo holds
+   * them). Callers that answer terminal requests report it instead of an empty list.
+   */
+  getUnavailableError?(): Error | null;
   getTerminals(cwd: string, options?: { workspaceId?: string }): Promise<TerminalSession[]>;
   createTerminal(options: {
     id?: string;
@@ -65,16 +74,17 @@ export interface TerminalManager {
     cols?: number;
     activityToken?: string;
     activityUrl?: string | null;
-    /** Persistent tmux binding (pa-bhkn0): the session survives daemon restarts. */
-    persistent?: PersistentTerminalBinding;
+    baseEnv?: Record<string, string>;
+    paseoCliPath?: string | null;
   }): Promise<TerminalSession>;
   registerCwdEnv(options: { cwd: string; env: Record<string, string> }): void;
   validateTerminalActivityToken(terminalId: string, token: string): "valid" | "unknown" | "invalid";
   getTerminal(id: string): TerminalSession | undefined;
-  getTerminalState(
+  replayTerminal(
     id: string,
-    options?: TerminalStateSnapshotOptions,
-  ): Promise<TerminalStateSnapshot | null>;
+    options: TerminalReplayOptions | undefined,
+    sink: TerminalReplaySink,
+  ): Promise<TerminalReplayMetadata | null>;
   setTerminalTitle(id: string, title: string): boolean;
   setTerminalActivity(id: string, state: TerminalActivityState): Promise<boolean>;
   clearTerminalAttention(id: string): Promise<boolean>;
@@ -88,19 +98,7 @@ export interface TerminalManager {
     options?: { start?: number; end?: number; stripAnsi?: boolean },
   ): Promise<CaptureTerminalLinesResult>;
   listDirectories(): string[];
-  /**
-   * The tmux binding of a persistent terminal (pa-vbhcu), or null when the
-   * terminal is not persistent or is gone. Lets read/send paths address the
-   * exact tmux session (`=name` / `$id`) and fail loudly when it is missing
-   * instead of falling back to another session.
-   */
-  getPersistentBinding(id: string): PersistentTerminalBinding | null;
-  /**
-   * Kill every terminal. With `sparePersistent`, persistent tmux sessions are
-   * left untouched (their clients die with the worker, the sessions live on
-   * for reattach); without it their sessions are killed as well.
-   */
-  killAll(options?: { sparePersistent?: boolean }): void;
+  killAll(): void;
   subscribeTerminalsChanged(listener: TerminalsChangedListener): () => void;
   subscribeTerminalActivity(listener: TerminalActivityListener): () => void;
   subscribeTerminalWorkspaceContributionChanged(
@@ -112,35 +110,29 @@ export interface TerminalManagerOptions {
   getTerminalActivityUrl?: () => string | null;
 }
 
+/** The in-process manager the terminal worker runs: it owns each PTY, so it knows its pid. */
+export interface LocalTerminalManager extends TerminalManager {
+  createTerminal(
+    options: Parameters<TerminalManager["createTerminal"]>[0],
+  ): Promise<LocalTerminalSession>;
+  getTerminal(id: string): LocalTerminalSession | undefined;
+  getTerminalProcessId(id: string): number | null;
+  getTerminalActivityToken(id: string): string | null;
+}
+
 function createActivityToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
 export function createTerminalManager(
   managerOptions: TerminalManagerOptions = {},
-): TerminalManager {
+): LocalTerminalManager {
   const terminalsByCwd = new Map<string, TerminalSession[]>();
-  const terminalsById = new Map<string, TerminalSession>();
+  const terminalsById = new Map<string, LocalTerminalSession>();
   const terminalExitUnsubscribeById = new Map<string, () => void>();
   const terminalTitleUnsubscribeById = new Map<string, () => void>();
   const terminalActivityUnsubscribeById = new Map<string, () => void>();
   const terminalActivityTokenById = new Map<string, string>();
-  // Persistent tmux bindings by terminal id (pa-bhkn0). `session.kill()` only
-  // ever kills the daemon-held PTY client; the tmux session itself is killed
-  // explicitly in the kill paths below, never implicitly.
-  const persistentBindingById = new Map<string, PersistentTerminalBinding>();
-
-  function forgetPersistentBinding(id: string): PersistentTerminalBinding | undefined {
-    const binding = persistentBindingById.get(id);
-    persistentBindingById.delete(id);
-    return binding;
-  }
-
-  function getPersistentBinding(id: string): PersistentTerminalBinding | null {
-    // The terminal is gone (or was never persistent): no exact target to check.
-    if (!terminalsById.has(id)) return null;
-    return persistentBindingById.get(id) ?? null;
-  }
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
   const terminalActivityListeners = new Set<TerminalActivityListener>();
   const terminalWorkspaceContributionChangedListeners =
@@ -171,9 +163,6 @@ export function createTerminalManager(
 
     terminalsById.delete(id);
     terminalActivityTokenById.delete(id);
-    // The session is gone, so its tmux session is gone (or going) too: drop
-    // the binding without touching tmux. Explicit kills handle tmux first.
-    forgetPersistentBinding(id);
 
     const terminals = terminalsByCwd.get(session.cwd);
     if (terminals) {
@@ -220,7 +209,7 @@ export function createTerminalManager(
     return bestMatchRoot ? defaultEnvByRootCwd.get(bestMatchRoot) : undefined;
   }
 
-  function registerSession(session: TerminalSession): TerminalSession {
+  function registerSession(session: LocalTerminalSession): LocalTerminalSession {
     terminalsById.set(session.id, session);
     const unsubscribeExit = session.onExit(() => {
       removeSessionById(session.id, { kill: false });
@@ -355,8 +344,9 @@ export function createTerminalManager(
       cols?: number;
       activityToken?: string;
       activityUrl?: string | null;
-      persistent?: PersistentTerminalBinding;
-    }): Promise<TerminalSession> {
+      baseEnv?: Record<string, string>;
+      paseoCliPath?: string | null;
+    }): Promise<LocalTerminalSession> {
       assertAbsolutePath(options.cwd);
 
       const terminals = terminalsByCwd.get(options.cwd) ?? [];
@@ -376,10 +366,7 @@ export function createTerminalManager(
         ...(terminalActivityUrl ? { PASEO_TERMINAL_ACTIVITY_URL: terminalActivityUrl } : {}),
       };
       terminalActivityTokenById.set(terminalId, activityToken);
-      if (options.persistent) {
-        persistentBindingById.set(terminalId, options.persistent);
-      }
-      let session: TerminalSession;
+      let session: LocalTerminalSession;
       try {
         session = registerSession(
           await createTerminal({
@@ -393,13 +380,13 @@ export function createTerminalManager(
             ...(options.rows !== undefined ? { rows: options.rows } : {}),
             ...(options.cols !== undefined ? { cols: options.cols } : {}),
             ...(mergedEnv ? { env: mergedEnv } : {}),
-            ...(options.persistent ? { persistent: options.persistent } : {}),
+            ...(options.baseEnv ? { baseEnv: options.baseEnv } : {}),
+            ...(options.paseoCliPath === undefined ? {} : { paseoCliPath: options.paseoCliPath }),
             activityEnv,
           }),
         );
       } catch (error) {
         terminalActivityTokenById.delete(terminalId);
-        persistentBindingById.delete(terminalId);
         throw error;
       }
 
@@ -426,15 +413,21 @@ export function createTerminalManager(
       return expected === token ? "valid" : "invalid";
     },
 
-    getTerminal(id: string): TerminalSession | undefined {
+    getTerminal(id: string): LocalTerminalSession | undefined {
       return terminalsById.get(id);
     },
 
-    async getTerminalState(
-      id: string,
-      options?: TerminalStateSnapshotOptions,
-    ): Promise<TerminalStateSnapshot | null> {
-      return terminalsById.get(id)?.getStateSnapshot(options) ?? null;
+    getTerminalProcessId(id: string): number | null {
+      return terminalsById.get(id)?.pid ?? null;
+    },
+
+    getTerminalActivityToken(id: string): string | null {
+      return terminalActivityTokenById.get(id) ?? null;
+    },
+
+    async replayTerminal(id, options, sink) {
+      const session = terminalsById.get(id);
+      return session ? replayTerminal(session, options, sink) : null;
     },
 
     setTerminalTitle(id: string, title: string): boolean {
@@ -467,11 +460,7 @@ export function createTerminalManager(
     },
 
     killTerminal(id: string): void {
-      // removeSessionById forgets the binding, so capture it first: an
-      // explicit kill ends the tmux session, not just the PTY client.
-      const binding = forgetPersistentBinding(id);
       removeSessionById(id, { kill: true });
-      if (binding) tmuxKillSession(binding);
     },
 
     async killTerminalAndWait(
@@ -482,15 +471,11 @@ export function createTerminalManager(
       if (!session) {
         return;
       }
-      // Capture before removeSessionById forgets it: an explicit stop (script
-      // stop, user kill) ends the tmux session, not just the PTY client.
-      const binding = forgetPersistentBinding(id);
       try {
         await session.killAndWait(options);
       } finally {
         removeSessionById(id, { kill: false });
       }
-      if (binding) tmuxKillSession(binding);
     },
 
     async captureTerminal(
@@ -504,37 +489,16 @@ export function createTerminalManager(
           totalLines: 0,
         };
       }
-      // A persistent terminal whose tmux session is gone must fail loudly
-      // (pa-vbhcu): its PTY buffer is stale output, and a bare `-t` would
-      // resolve to ANOTHER session. The exact check never falls back.
-      const binding = persistentBindingById.get(id);
-      if (binding && !tmuxSessionAlive(binding)) {
-        throw new Error(`tmux session '${binding.sessionName}' for terminal ${id} is gone`);
-      }
-      return captureTerminalLines(session, options);
+      return session.captureLines(options);
     },
 
     listDirectories(): string[] {
       return Array.from(terminalsByCwd.keys());
     },
 
-    getPersistentBinding,
-
-    killAll(options?: { sparePersistent?: boolean }): void {
-      const spare = options?.sparePersistent === true;
-      const bindings: PersistentTerminalBinding[] = [];
+    killAll(): void {
       for (const id of Array.from(terminalsById.keys())) {
-        if (spare && persistentBindingById.has(id)) {
-          // Shutdown with survival: leave the PTY client and its tmux session
-          // alone. The dying worker takes the client; the session is reattached.
-          continue;
-        }
-        const binding = forgetPersistentBinding(id);
-        if (binding) bindings.push(binding);
         removeSessionById(id, { kill: true });
-      }
-      if (!spare) {
-        for (const binding of bindings) tmuxKillSession(binding);
       }
     },
 

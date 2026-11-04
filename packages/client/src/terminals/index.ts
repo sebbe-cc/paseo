@@ -18,7 +18,7 @@ export interface PaseoTerminalCreateOptions {
   command?: string;
   args?: string[];
   size?: { rows: number; cols: number };
-  /** Persistent tmux terminal: survives daemon restarts with the same PIDs. */
+  /** Compatibility flag: all terminals now survive daemon restarts via the upstream worker. */
   persistent?: boolean;
   requestId?: string;
 }

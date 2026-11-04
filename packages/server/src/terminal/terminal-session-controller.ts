@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type pino from "pino";
 import type {
   OwnedSubscription,
@@ -29,39 +28,20 @@ import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
 import {
   MAX_CLIENT_BUFFERED_BYTES,
   MAX_TERMINAL_OUTPUT_FRAME_BYTES,
-  encodeLegacyTerminalSnapshotFrame,
-  encodeTerminalRestoreFrame,
+  createTerminalRestoreDelivery,
   resolveRestoreAfterOutputOverflow,
   resolveTerminalRestoreSnapshotOptions,
-  resolveTerminalSubscriptionSnapshotMode,
   type TerminalRestoreOptions,
 } from "./terminal-restore.js";
+import type { TerminalReplayMetadata } from "./terminal-replay.js";
 import type { TerminalSession } from "./terminal.js";
 import type { TerminalManager, TerminalsChangedEvent } from "./terminal-manager.js";
-import {
-  ensureTmuxSocketDir,
-  persistentSessionName,
-  resolveTmuxBinary,
-  tmuxSessionAlive,
-  tmuxSocketPath,
-  type PersistentTerminalBinding,
-} from "./tmux.js";
-import {
-  recordPersistentTerminal,
-  removePersistentTerminal,
-} from "../server/persistent-terminals.js";
 import { applyTerminalSize } from "./terminal-size-ownership.js";
+import { TerminalWorkerIncompatibleError } from "./terminal-worker-pool.js";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
 
 const MAX_TERMINAL_STREAM_SLOTS = 256;
-
-/**
- * Minimum time between exact tmux liveness probes of one persistent terminal
- * on the input path (pa-vbhcu). Capture always probes; input is throttled so
- * per-keystroke traffic never forks a tmux process per message.
- */
-const PERSISTENT_LIVENESS_CHECK_INTERVAL_MS = 2000;
 
 interface TerminalDirectorySubscription {
   cwd: string;
@@ -87,33 +67,28 @@ interface ActiveTerminalStream {
   needsSnapshot: boolean;
   snapshotInFlight: boolean;
   retrySnapshotErrors: boolean;
-  readyRevision?: number;
+  // Readiness is independent of revision: reconnect adoption has no revision.
+  snapshotReady: boolean;
   restore?: TerminalRestoreOptions;
   bufferedOutputs: BufferedTerminalOutput[];
+  bufferedOutputBytes: number;
   outputBytesSinceSnapshot: number;
   outputCoalescer: TerminalOutputCoalescer;
 }
 
-interface SnapshotSendResult {
-  shouldContinue: boolean;
-  replayRevision?: number;
-}
+type SnapshotSendResult =
+  | { shouldContinue: false }
+  | { shouldContinue: true; replay: TerminalReplayMetadata | null };
 
 export interface TerminalSessionControllerOptions {
   terminalManager: TerminalManager | null;
-  /** PASEO_HOME for the persistent-terminal journal (pa-bhkn0); unset disables it. */
-  persistenceDir?: string;
   emit: (msg: SessionOutboundMessage) => void;
   hasBinaryChannel: () => boolean;
+  supportsChunkedReplay?: (source: object) => boolean;
   isPathWithinRoot: (rootPath: string, candidatePath: string) => boolean;
   sessionLogger: pino.Logger;
   listTerminalWorkspaceRefs?: () => Promise<readonly TerminalWorkspaceRef[]>;
   listTerminalWorkspaceRoots?: () => Promise<readonly string[]>;
-  // Whether the connected client can reflow restored snapshots. When true the
-  // daemon attaches per-row soft-wrap flags to snapshots; otherwise it omits them
-  // so old (strict-schema) clients still parse the snapshot.
-  clientSupportsWrapReflow?: (source: object) => boolean;
-  // Current max bytes queued on the client's transport(s) but not yet sent.
   // Drives the snapshot catch-up fallback: a keeping-up client reports ~0 and
   // keeps streaming; a backed-up client trips the snapshot path. Defaults to a
   // constant 0 (no backpressure signal) so callers without a transport always
@@ -166,17 +141,14 @@ export class TerminalSessionController {
   private readonly sessionLogger: pino.Logger;
   private readonly listTerminalWorkspaceRefs: () => Promise<readonly TerminalWorkspaceRef[]>;
   private readonly listTerminalWorkspaceRoots: () => Promise<readonly string[]>;
-  private readonly clientSupportsWrapReflow: (source: object) => boolean;
   private readonly getClientBufferedAmount: (source: object) => number | null;
-  private readonly persistenceDir: string | undefined;
 
   private readonly subscribedDirectories = new Map<string, TerminalDirectorySubscription>();
-  private readonly lastPersistentLivenessCheckAt = new Map<string, number>();
   private unsubscribeTerminalsChanged: (() => void) | null = null;
   private readonly activeStreams = new Map<number, ActiveTerminalStream>();
   private nextSlot = 0;
 
-  constructor(options: TerminalSessionControllerOptions) {
+  constructor(private readonly options: TerminalSessionControllerOptions) {
     this.terminalManager = options.terminalManager;
     this.emit = options.emit;
     this.hasBinaryChannel = options.hasBinaryChannel;
@@ -186,26 +158,7 @@ export class TerminalSessionController {
     this.listTerminalWorkspaceRoots =
       options.listTerminalWorkspaceRoots ??
       (async () => (await this.listTerminalWorkspaceRefs()).map((workspace) => workspace.cwd));
-    this.clientSupportsWrapReflow = options.clientSupportsWrapReflow ?? (() => false);
     this.getClientBufferedAmount = options.getClientBufferedAmount ?? (() => 0);
-    this.persistenceDir = options.persistenceDir;
-  }
-
-  private resolvePersistentBinding(terminalId: string): PersistentTerminalBinding {
-    if (this.persistenceDir === undefined) {
-      throw new Error("Persistent terminals are not enabled on this daemon");
-    }
-    const tmuxBin = resolveTmuxBinary();
-    if (!tmuxBin) {
-      throw new Error("Persistent terminals need tmux on PATH (pa-bhkn0)");
-    }
-    const socketPath = tmuxSocketPath(this.persistenceDir);
-    ensureTmuxSocketDir(socketPath);
-    return {
-      tmuxBin,
-      socketPath,
-      sessionName: persistentSessionName(terminalId),
-    };
   }
 
   start(): void {
@@ -284,9 +237,6 @@ export class TerminalSessionController {
     const terminal = this.terminalManager.getTerminal(activeStream.terminalId);
     if (!terminal) {
       this.detachStream(activeStream.terminalId, { emitExit: true });
-      return;
-    }
-    if (this.forgetDeadPersistentTerminal(activeStream.terminalId)) {
       return;
     }
 
@@ -472,6 +422,8 @@ export class TerminalSessionController {
     }
 
     try {
+      const unavailable = this.terminalManager.getUnavailableError?.();
+      if (unavailable) throw unavailable;
       let terminals: TerminalSession[];
       if (msg.workspaceId !== undefined) {
         terminals = (await this.getAllTerminalSessions()).filter(
@@ -494,6 +446,10 @@ export class TerminalSessionController {
       });
     } catch (error) {
       this.sessionLogger.error({ err: error, cwd: msg.cwd }, "Failed to list terminals");
+      if (error instanceof TerminalWorkerIncompatibleError) {
+        this.emitIncompatible(msg, error);
+        return;
+      }
       this.emit({
         type: "list_terminals_response",
         payload: {
@@ -503,6 +459,23 @@ export class TerminalSessionController {
         },
       });
     }
+  }
+
+  // An empty list or a generic failure would read as "no terminals"; the client needs to know
+  // they exist and why it cannot reach them.
+  private emitIncompatible(
+    msg: { type: string; requestId: string },
+    error: TerminalWorkerIncompatibleError,
+  ): void {
+    this.emit({
+      type: "rpc_error",
+      payload: {
+        requestId: msg.requestId,
+        requestType: msg.type,
+        error: error.message,
+        code: error.code,
+      },
+    });
   }
 
   private async getAllTerminalSessions(): Promise<TerminalSession[]> {
@@ -616,15 +589,7 @@ export class TerminalSessionController {
         throw new Error(`Workspace ${workspaceId} is not active or does not exist`);
       }
 
-      // Persistent terminals need their id (and tmux session name) before the
-      // spawn, so pre-generate it and journal the record for boot reattach.
-      const persistentRequested = msg.persistent === true;
-      const terminalId = persistentRequested ? randomUUID() : undefined;
-      const persistent = persistentRequested
-        ? this.resolvePersistentBinding(terminalId as string)
-        : undefined;
       const session = await this.terminalManager.createTerminal({
-        ...(terminalId ? { id: terminalId } : {}),
         cwd: msg.cwd,
         workspaceId,
         name: msg.name,
@@ -632,19 +597,7 @@ export class TerminalSessionController {
         args: msg.args,
         rows: msg.size?.rows,
         cols: msg.size?.cols,
-        ...(persistent ? { persistent } : {}),
       });
-      if (persistent && this.persistenceDir !== undefined) {
-        recordPersistentTerminal(this.persistenceDir, {
-          id: session.id,
-          name: session.name,
-          cwd: session.cwd,
-          workspaceId: session.workspaceId,
-          ...(session.getTitle() ? { title: session.getTitle() } : {}),
-          sessionName: persistent.sessionName,
-          createdAt: new Date().toISOString(),
-        });
-      }
       this.emit({
         type: "create_terminal_response",
         payload: {
@@ -662,6 +615,10 @@ export class TerminalSessionController {
       });
     } catch (error) {
       this.sessionLogger.error({ err: error, cwd: msg.cwd }, "Failed to create terminal");
+      if (error instanceof TerminalWorkerIncompatibleError) {
+        this.emitIncompatible(msg, error);
+        return;
+      }
       this.emit({
         type: "create_terminal_response",
         payload: {
@@ -820,9 +777,6 @@ export class TerminalSessionController {
       this.sessionLogger.warn({ terminalId: msg.terminalId }, "Terminal not found for input");
       return;
     }
-    if (this.forgetDeadPersistentTerminal(msg.terminalId)) {
-      return;
-    }
 
     if (msg.message.type === "resize") {
       applyTerminalSize(session, source, msg.message);
@@ -832,41 +786,8 @@ export class TerminalSessionController {
     session.send(msg.message);
   }
 
-  /**
-   * Drop a persistent terminal whose tmux session is gone (pa-vbhcu). The
-   * record would otherwise keep serving stale PTY output (or silently swallow
-   * input) while the session no longer exists; forgetting it here converges to
-   * the normal exit path, so later capture/send/kill fail clearly with
-   * "not found" instead of touching another session. Exact tmux targets only,
-   * double-checked before killing, throttled to one check per terminal per
-   * `PERSISTENT_LIVENESS_CHECK_INTERVAL_MS` so per-keystroke input stays cheap.
-   * Returns true when the terminal was forgotten and the caller must drop.
-   */
-  private forgetDeadPersistentTerminal(terminalId: string): boolean {
-    if (!this.terminalManager) return false;
-    const now = Date.now();
-    const lastCheck = this.lastPersistentLivenessCheckAt.get(terminalId);
-    if (lastCheck !== undefined && now - lastCheck < PERSISTENT_LIVENESS_CHECK_INTERVAL_MS) {
-      return false;
-    }
-    this.lastPersistentLivenessCheckAt.set(terminalId, now);
-    const binding = this.terminalManager.getPersistentBinding(terminalId);
-    if (!binding) return false;
-    // A live session never flaps on the exact target; still, re-check once
-    // before killing so a momentary tmux hiccup cannot drop a live terminal.
-    if (tmuxSessionAlive(binding) || tmuxSessionAlive(binding)) return false;
-    this.sessionLogger.warn(
-      { terminalId, sessionName: binding.sessionName },
-      "Persistent tmux session is gone; forgetting the dead terminal",
-    );
-    this.killTracked(terminalId, { emitExit: true });
-    this.lastPersistentLivenessCheckAt.delete(terminalId);
-    return true;
-  }
-
   private killTracked(terminalId: string, options?: { emitExit: boolean }): void {
     this.detachStream(terminalId, { emitExit: options?.emitExit ?? true });
-    this.lastPersistentLivenessCheckAt.delete(terminalId);
     this.terminalManager?.killTerminal(terminalId);
   }
 
@@ -876,9 +797,6 @@ export class TerminalSessionController {
       try {
         this.detachStream(msg.terminalId, { emitExit: true });
         await this.terminalManager.killTerminalAndWait(msg.terminalId);
-        if (this.persistenceDir !== undefined) {
-          removePersistentTerminal(this.persistenceDir, msg.terminalId);
-        }
         success = true;
       } catch (error) {
         this.sessionLogger.error(
@@ -898,44 +816,29 @@ export class TerminalSessionController {
   }
 
   private async handleCaptureTerminalRequest(msg: CaptureTerminalRequest): Promise<void> {
-    const respond = (response: {
-      lines: string[];
-      totalLines: number;
-      error: string | null;
-    }): void => {
+    if (!this.terminalManager) {
       this.emit({
         type: "capture_terminal_response",
         payload: {
           terminalId: msg.terminalId,
-          lines: response.lines,
-          totalLines: response.totalLines,
-          error: response.error,
+          lines: [],
+          totalLines: 0,
           requestId: msg.requestId,
         },
       });
-    };
-
-    if (!this.terminalManager) {
-      respond({ lines: [], totalLines: 0, error: "Terminal manager not available" });
       return;
     }
 
     const session = this.terminalManager.getTerminal(msg.terminalId);
     if (!session) {
-      respond({ lines: [], totalLines: 0, error: `Terminal ${msg.terminalId} not found` });
-      return;
-    }
-
-    // A persistent terminal whose tmux session is gone must fail loudly
-    // (pa-vbhcu): never serve its stale PTY buffer as if it were live output.
-    // Forgetting it converges to the normal exit path, so later capture,
-    // send and kill fail clearly with "not found" instead of touching a
-    // different session.
-    if (this.forgetDeadPersistentTerminal(msg.terminalId)) {
-      respond({
-        lines: [],
-        totalLines: 0,
-        error: `Terminal ${msg.terminalId} is gone (its tmux session no longer exists)`,
+      this.emit({
+        type: "capture_terminal_response",
+        payload: {
+          terminalId: msg.terminalId,
+          lines: [],
+          totalLines: 0,
+          requestId: msg.requestId,
+        },
       });
       return;
     }
@@ -946,14 +849,29 @@ export class TerminalSessionController {
         end: msg.end,
         stripAnsi: msg.stripAnsi,
       });
-      respond({ lines: capture.lines, totalLines: capture.totalLines, error: null });
+      this.emit({
+        type: "capture_terminal_response",
+        payload: {
+          terminalId: msg.terminalId,
+          lines: capture.lines,
+          totalLines: capture.totalLines,
+          requestId: msg.requestId,
+        },
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to capture terminal";
       this.sessionLogger.error(
         { err: error, terminalId: msg.terminalId },
         "Failed to capture terminal",
       );
-      respond({ lines: [], totalLines: 0, error: message });
+      this.emit({
+        type: "capture_terminal_response",
+        payload: {
+          terminalId: msg.terminalId,
+          lines: [],
+          totalLines: 0,
+          requestId: msg.requestId,
+        },
+      });
     }
   }
 
@@ -980,9 +898,10 @@ export class TerminalSessionController {
       snapshotInFlight: false,
       retrySnapshotErrors: options.retrySnapshotErrors,
       exiting: false,
-      readyRevision: undefined,
+      snapshotReady: false,
       restore: options?.restore,
       bufferedOutputs: [],
+      bufferedOutputBytes: 0,
       outputBytesSinceSnapshot: 0,
       outputCoalescer: new TerminalOutputCoalescer({
         timers: { setTimeout, clearTimeout },
@@ -1010,7 +929,6 @@ export class TerminalSessionController {
             // The snapshot replaces this batch only after it succeeds. If the
             // terminal disappears during the read, completion still owns these bytes.
             activeStream.snapshotOutput = payload;
-            activeStream.restore = resolveRestoreAfterOutputOverflow(activeStream.restore);
             activeStream.needsSnapshot = true;
             void this.trySendSnapshot(activeStream);
             return;
@@ -1028,35 +946,45 @@ export class TerminalSessionController {
 
     this.activeStreams.set(slot, activeStream);
 
-    const unsubscribeOutput = terminal.subscribe(
-      (message) => {
-        if (this.activeStreams.get(slot) !== activeStream) {
-          return;
-        }
-        if (message.type === "snapshot" || message.type === "snapshotReady") {
-          activeStream.readyRevision = message.revision;
-          activeStream.outputCoalescer.flush();
-          activeStream.needsSnapshot = true;
-          void this.trySendSnapshot(activeStream);
-          return;
-        }
-        if (message.type === "titleChange") {
-          return;
-        }
-        if (message.data.length === 0) {
-          return;
-        }
-        if (activeStream.needsSnapshot || activeStream.snapshotInFlight) {
-          activeStream.bufferedOutputs.push({
-            data: message.data,
-            revision: message.revision,
+    const unsubscribeOutput = terminal.subscribe((message) => {
+      if (this.activeStreams.get(slot) !== activeStream) {
+        return;
+      }
+      if (message.type === "snapshotReady") {
+        activeStream.snapshotReady = true;
+        activeStream.outputCoalescer.flush();
+        activeStream.needsSnapshot = true;
+        void this.trySendSnapshot(activeStream);
+        return;
+      }
+      if (message.type === "titleChange") {
+        return;
+      }
+      if (message.data.length === 0) {
+        return;
+      }
+      if (activeStream.needsSnapshot || activeStream.snapshotInFlight) {
+        activeStream.bufferedOutputBytes += Buffer.byteLength(message.data);
+        if (activeStream.bufferedOutputBytes > MAX_CLIENT_BUFFERED_BYTES) {
+          activeStream.owner.emit({
+            type: "terminal_stream_exit",
+            payload: {
+              terminalId: activeStream.terminalId,
+              error: "Terminal replay live tail exceeded the buffer; attach again",
+            },
           });
+          this.detachRegistration(activeStream);
+          void activeStream.owner.release();
           return;
         }
-        activeStream.outputCoalescer.handle(message.data);
-      },
-      { initialSnapshot: resolveTerminalSubscriptionSnapshotMode(options?.restore) },
-    );
+        activeStream.bufferedOutputs.push({
+          data: message.data,
+          revision: message.revision,
+        });
+        return;
+      }
+      activeStream.outputCoalescer.handle(message.data);
+    });
     const unsubscribeExit = terminal.onExit(() =>
       this.detachStream(terminal.id, { emitExit: true }),
     );
@@ -1093,22 +1021,27 @@ export class TerminalSessionController {
       this.detachStream(activeStream.terminalId, { emitExit: true });
       return;
     }
-    if (activeStream.restore && activeStream.readyRevision === undefined) {
+    if (activeStream.restore && !activeStream.snapshotReady) {
       return;
     }
 
     activeStream.outputCoalescer.flush();
     activeStream.snapshotInFlight = true;
     try {
-      const restore = activeStream.restore;
+      // A pressure catch-up replaces the skipped batch with a recent window.
+      // Keep the subscription demand intact for later adoption/full restores.
+      const restore =
+        activeStream.snapshotOutput !== undefined
+          ? resolveRestoreAfterOutputOverflow(activeStream.restore)
+          : activeStream.restore;
       const snapshotResult = restore
         ? await this.emitRestoreSnapshot(activeStream, terminalManager, restore)
-        : await this.emitLegacySnapshot(activeStream, terminalManager);
+        : await this.emitRestoreSnapshot(activeStream, terminalManager, { mode: "full-snapshot" });
       if (!snapshotResult.shouldContinue) {
         return;
       }
       activeStream.snapshotOutput = undefined;
-      this.replayTerminalOutputAfterSnapshot(activeStream, terminal, snapshotResult.replayRevision);
+      this.replayTerminalOutputAfterSnapshot(activeStream, terminal, snapshotResult.replay);
       activeStream.needsSnapshot = false;
       activeStream.outputBytesSinceSnapshot = 0;
     } catch (error) {
@@ -1146,47 +1079,31 @@ export class TerminalSessionController {
     }
   }
 
-  private async emitLegacySnapshot(
-    activeStream: ActiveTerminalStream,
-    terminalManager: TerminalManager,
-  ): Promise<SnapshotSendResult> {
-    const snapshot = await terminalManager.getTerminalState(activeStream.terminalId, {
-      includeWrapFlags: this.clientSupportsWrapReflow(activeStream.owner.source),
-    });
-    if (this.activeStreams.get(activeStream.slot) !== activeStream) {
-      return { shouldContinue: false };
-    }
-    if (!snapshot) {
-      this.detachStream(activeStream.terminalId, { emitExit: true });
-      return { shouldContinue: false };
-    }
-
-    activeStream.owner.emitBinary(
-      encodeLegacyTerminalSnapshotFrame({
-        slot: activeStream.slot,
-        snapshot,
-      }),
-    );
-    // The snapshot frame went out-of-band; keep the replay that follows on the
-    // coalescer's trailing path so it doesn't flush back-to-back with it.
-    activeStream.outputCoalescer.markFlushed();
-    return { shouldContinue: true, replayRevision: snapshot.revision };
-  }
-
   private async emitRestoreSnapshot(
     activeStream: ActiveTerminalStream,
     terminalManager: TerminalManager,
     restore: TerminalRestoreOptions,
   ): Promise<SnapshotSendResult> {
-    const snapshotOptions = resolveTerminalRestoreSnapshotOptions(restore);
+    const chunked = this.options.supportsChunkedReplay?.(activeStream.owner.source) === true;
+    const snapshotOptions = resolveTerminalRestoreSnapshotOptions({ restore, chunked });
     if (snapshotOptions === null) {
-      return { shouldContinue: true };
+      return { shouldContinue: true, replay: null };
     }
 
-    const snapshot = await terminalManager.getTerminalState(activeStream.terminalId, {
-      ...snapshotOptions,
-      includeWrapFlags: this.clientSupportsWrapReflow(activeStream.owner.source),
+    const deliver = createTerminalRestoreDelivery({
+      slot: activeStream.slot,
+      chunked,
+      // Network delivery belongs to the bounded application transport, not the worker request.
+      send: (frame) => activeStream.owner.emitBinary(frame),
     });
+    const snapshot = await terminalManager.replayTerminal(
+      activeStream.terminalId,
+      snapshotOptions,
+      (event) => {
+        if (this.activeStreams.get(activeStream.slot) !== activeStream) return;
+        deliver(event);
+      },
+    );
     if (this.activeStreams.get(activeStream.slot) !== activeStream) {
       return { shouldContinue: false };
     }
@@ -1195,38 +1112,31 @@ export class TerminalSessionController {
       return { shouldContinue: false };
     }
 
-    activeStream.owner.emitBinary(
-      encodeTerminalRestoreFrame({
-        slot: activeStream.slot,
-        snapshot,
-      }),
-    );
     // The restore frame went out-of-band; keep the replay that follows on the
     // coalescer's trailing path so it doesn't flush back-to-back with it.
     activeStream.outputCoalescer.markFlushed();
-    return { shouldContinue: true, replayRevision: snapshot.revision };
+    return { shouldContinue: true, replay: snapshot };
   }
 
   private replayTerminalOutputAfterSnapshot(
     activeStream: ActiveTerminalStream,
     terminal: TerminalSession,
-    replayRevision: number | undefined,
+    replay: TerminalReplayMetadata | null,
   ): void {
-    const replayPreamble = terminal.getReplayPreamble();
+    // A captured viewer must start from its cut, then apply the buffered mode changes.
+    // Live-only subscriptions have no capture and start from the current shared modes.
+    const replayPreamble = replay === null ? terminal.getReplayPreamble() : replay.replayPreamble;
     if (replayPreamble.length > 0) {
       activeStream.outputCoalescer.handle(replayPreamble);
     }
 
+    activeStream.bufferedOutputBytes = 0;
     const bufferedOutputs = activeStream.bufferedOutputs.splice(
       0,
       activeStream.bufferedOutputs.length,
     );
     for (const output of bufferedOutputs) {
-      if (
-        replayRevision !== undefined &&
-        output.revision !== undefined &&
-        output.revision <= replayRevision
-      ) {
+      if (replay !== null && output.revision !== undefined && output.revision <= replay.revision) {
         continue;
       }
       activeStream.outputCoalescer.handle(output.data);

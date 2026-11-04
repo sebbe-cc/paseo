@@ -3,7 +3,6 @@ import { execFileSync } from "child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer, type Server } from "net";
 import {
   buildWorktreeSetupDetail,
   runWorktreeAutoTerminals,
@@ -117,15 +116,9 @@ describe("runWorktreeAutoTerminals", () => {
   let repoDir: string;
   let paseoHome: string;
   let realTerminalManagers: TerminalManager[];
-  // Fake service listeners started by the stub terminal manager's send path
-  // (pa-vbhcu): they stand in for the shell running the sent service command.
-  // Ports are never double-bound: one live server per port.
-  let stubServiceServers: Server[];
-  const stubServicePorts = new Set<number>();
 
   beforeEach(() => {
     realTerminalManagers = [];
-    stubServiceServers = [];
     tempDir = realpathSync(mkdtempSync(join(tmpdir(), "worktree-bootstrap-test-")));
     repoDir = join(tempDir, "repo");
     paseoHome = join(tempDir, "paseo-home");
@@ -142,16 +135,8 @@ describe("runWorktreeAutoTerminals", () => {
     });
   });
 
-  function closeStubServiceServers(servers: Server[]): Promise<unknown> {
-    return Promise.all(
-      servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
-    );
-  }
-
   afterEach(async () => {
     await Promise.all(realTerminalManagers.map(cleanupTerminalManager));
-    await closeStubServiceServers(stubServiceServers);
-    stubServicePorts.clear();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -224,13 +209,8 @@ describe("runWorktreeAutoTerminals", () => {
             getSize: () => ({ rows: 0, cols: 0 }),
             getTitle: () => undefined,
             getExitInfo: () => null,
-            getState: () => ({
-              rows: 0,
-              cols: 0,
-              grid: [],
-              scrollback: [],
-              cursor: { row: 0, col: 0 },
-            }),
+            hasOutput: () => false,
+
             kill: () => {},
             killAndWait: async () => {},
           };
@@ -243,9 +223,6 @@ describe("runWorktreeAutoTerminals", () => {
         async killTerminalAndWait() {},
         listDirectories() {
           return [];
-        },
-        getPersistentBinding() {
-          return null;
         },
         killAll() {},
         subscribeTerminalsChanged() {
@@ -311,21 +288,6 @@ describe("runWorktreeAutoTerminals", () => {
           send: (message) => {
             if (message.type === "input") {
               sentInputs.push(message.data);
-              // Stand in for the shell running the sent service command: a
-              // service terminal listens on its PASEO_PORT (pa-vbhcu), which
-              // the spawn verification polls before reporting running.
-              const servicePort = Number(options.env?.PASEO_PORT);
-              if (
-                options.env?.PASEO_PORT !== undefined &&
-                Number.isInteger(servicePort) &&
-                servicePort > 0 &&
-                !stubServicePorts.has(servicePort)
-              ) {
-                stubServicePorts.add(servicePort);
-                const server = createServer();
-                server.listen(servicePort, "127.0.0.1");
-                stubServiceServers.push(server);
-              }
             }
           },
           subscribe: () => () => {},
@@ -345,13 +307,8 @@ describe("runWorktreeAutoTerminals", () => {
               }
             };
           },
-          getState: () => ({
-            rows: 1,
-            cols: 1,
-            grid: [[{ char: "$" }]],
-            scrollback: [],
-            cursor: { row: 0, col: 0 },
-          }),
+          hasOutput: () => true,
+
           kill: () => {},
           onTitleChange: () => () => {},
           onActivityChange: () => () => {},
@@ -388,9 +345,6 @@ describe("runWorktreeAutoTerminals", () => {
       },
       listDirectories() {
         return [];
-      },
-      getPersistentBinding() {
-        return null;
       },
       killAll() {},
       subscribeTerminalsChanged() {
