@@ -79,29 +79,32 @@ export class Usage {
   }
   private async read(account: string, launch: ProviderLaunch): Promise<Observation> {
     const readers = [...this.sessions.values()].filter((session) => session.account === account);
-    const stored = this.observations.get(account);
     if (readers.length > 0) {
       const observations = await Promise.all(readers.map((session) => session.read()));
       const usages = observations.flatMap((observation) =>
         observation.usage ? [observation.usage] : [],
       );
-      for (const usage of usages) this.recordObservation(account, usage);
-      const candidates = [...usages, ...(stored ? [stored] : [])];
-      candidates.sort((a, b) => b.observedAtMs - a.observedAtMs);
-      return candidates.length > 0 ? { usage: candidates[0] } : {};
+      // Record only the newest live usage, so one fetch fires onDidChange at
+      // most once. The served value is always the validated store readback: a
+      // newer-but-invalid live observation is dropped, never shown as quota.
+      let newest: (typeof usages)[number] | undefined;
+      for (const usage of usages) {
+        if (!newest || usage.observedAtMs > newest.observedAtMs) newest = usage;
+      }
+      if (newest) this.recordObservation(account, newest);
+    } else if (!this.observations.has(account)) {
+      // No live session and nothing retained: fall through to a transient host.
+      // A retained observation serves with its age instead of waking a host.
+      const host = new MspConnection({ launch });
+      try {
+        const observation = await host.request("usage/read", {}, usageSchema);
+        if (observation.usage) this.recordObservation(account, observation.usage);
+      } finally {
+        await host.close();
+      }
     }
-    // No live session for this account: serve the retained observation with its
-    // age instead of waking a host. Only a never-observed account falls through
-    // to a transient host.
-    if (stored) return { usage: stored };
-    const host = new MspConnection({ launch });
-    try {
-      const observation = await host.request("usage/read", {}, usageSchema);
-      if (observation.usage) this.recordObservation(account, observation.usage);
-      return observation;
-    } finally {
-      await host.close();
-    }
+    const stored = this.observations.get(account);
+    return stored ? { usage: stored } : {};
   }
   registration(): UsageSourceRegistration {
     return {

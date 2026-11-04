@@ -132,3 +132,37 @@ test("an account never observed reports no quota, not zero usage", async () => {
     problem: { kind: "no_quota", detail: "No usage quota reported" },
   });
 });
+
+test("a newer-but-invalid live observation is dropped, never served", async () => {
+  const usage = new Usage();
+  const env = { HOME: "/usage/home" };
+  const { account } = usage.remember(launch(env));
+  usage.recordObservation(account, observation({ observedAtMs: 1700000000000 }));
+  usage.attach("session-1", launch(env), async () => ({
+    usage: {
+      ...observation({ observedAtMs: 1700000000001 }),
+      window: { usedPercent: -5, resetsAtMs: 1700018000000, windowDurationMins: 300 },
+    },
+  }));
+  const report = await fetchReport(usage, account);
+  expect(report).toMatchObject({ status: "available", planLabel: "Pro" });
+  if (report.status === "available")
+    expect(report.details?.find((detail) => detail.id === "observed")?.value).toBe(
+      new Date(1700000000000).toISOString(),
+    );
+  expect(usage.latest(account)?.observedAtMs).toBe(1700000000000);
+});
+
+test("an invalid-only live read reports no quota, not the invalid values", async () => {
+  const usage = new Usage();
+  const env = { HOME: "/usage/invalid" };
+  const { account } = usage.remember(launch(env));
+  usage.attach("session-1", launch(env), async () => ({
+    usage: { ...observation(), tier: "" },
+  }));
+  expect(await fetchReport(usage, account)).toEqual({
+    status: "unavailable",
+    problem: { kind: "no_quota", detail: "No usage quota reported" },
+  });
+  expect(usage.latest(account)).toBeUndefined();
+});
