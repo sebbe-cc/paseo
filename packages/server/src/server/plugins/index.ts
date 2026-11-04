@@ -206,6 +206,10 @@ export class PluginService {
     return this.usageSources.listReports(options);
   }
 
+  invalidateUsageReports(filter?: { sourceId?: string; reportId?: string }) {
+    this.usageSources.invalidateReports(filter);
+  }
+
   listLegacyUsage() {
     return this.usageSources.listLegacyUsage();
   }

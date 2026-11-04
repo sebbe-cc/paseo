@@ -1459,9 +1459,93 @@ for (const usage of [
         status: "unavailable",
         problem: { kind: "no_quota", detail: "No usage quota reported" },
       });
-    expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(1);
+    // One seed read on the already-awake host at open, one live read at fetch.
+    expect((await h.recorded()).filter((f) => f.method === "usage/read")).toHaveLength(2);
   });
 }
+
+const seedUsage = {
+  usage: {
+    observedAtMs: 1700000000000,
+    tier: "Pro",
+    window: { usedPercent: 10, resetsAtMs: 1700018000000, windowDurationMins: 300 },
+    weekly: { usedPercent: 20, resetsAtMs: 1700604800000 },
+  },
+};
+const eventUsage = {
+  observedAtMs: 1700000000001,
+  tier: "Pro",
+  window: { usedPercent: 75, resetsAtMs: 1700018000000, windowDurationMins: 300 },
+  weekly: { usedPercent: 105, resetsAtMs: 1700604800000 },
+};
+
+test("usage/changed from a live session updates the card to the event values", async () => {
+  const h = await harness("catalog-controls", {
+    MUSE_TEST_USAGE: JSON.stringify(seedUsage),
+    MUSE_TEST_USAGE_CHANGED: JSON.stringify(eventUsage),
+  });
+  await h.open();
+  const [account] = await h.usageSource.discover({ kind: "global" });
+  // Events arrive asynchronously; every usage/read re-emits the same event, so
+  // polling converges once the newer observation is stored.
+  const deadline = Date.now() + 5000;
+  let report = await h.usageSource.fetch(account!.input);
+  while (
+    report.status !== "available" ||
+    report.details?.find((detail) => detail.id === "observed")?.value !==
+      new Date(eventUsage.observedAtMs).toISOString()
+  ) {
+    if (Date.now() > deadline) break;
+    await delay(10);
+    report = await h.usageSource.fetch(account!.input);
+  }
+  expect(report).toMatchObject({
+    status: "available",
+    planLabel: "Pro",
+    windows: [
+      { id: "five_hour", usedPct: 75, remainingPct: 25, tone: "warning" },
+      { id: "weekly", usedPct: 105, remainingPct: 0, tone: "danger" },
+    ],
+  });
+});
+
+test("an invalid usage/changed is dropped and the seed values stay", async () => {
+  const h = await harness("catalog-controls", {
+    MUSE_TEST_USAGE: JSON.stringify(seedUsage),
+    MUSE_TEST_USAGE_CHANGED: JSON.stringify({
+      observedAtMs: 1700000000001,
+      tier: "",
+      window: { usedPercent: -5, resetsAtMs: 1700018000000, windowDurationMins: 0 },
+      weekly: { usedPercent: 20, resetsAtMs: 1700604800000 },
+    }),
+  });
+  await h.open();
+  // The seed's usage/read already re-emitted the invalid event; it must not
+  // corrupt the stored seed.
+  await delay(200);
+  const [account] = await h.usageSource.discover({ kind: "global" });
+  expect(await h.usageSource.fetch(account!.input)).toMatchObject({
+    status: "available",
+    windows: [{ usedPct: 10 }, { usedPct: 20 }],
+  });
+});
+
+test("close retains the last observed values without waking a host", async () => {
+  const h = await harness("catalog-controls", { MUSE_TEST_USAGE: JSON.stringify(seedUsage) });
+  await h.open();
+  const [account] = await h.usageSource.discover({ kind: "global" });
+  expect(await h.usageSource.fetch(account!.input)).toMatchObject({ status: "available" });
+  await h.send({ type: "session.close", sessionId: "paseo-session", requestId: "close" });
+  await h.wait((event) => event.type === "session.closed");
+  const retained = await h.usageSource.fetch(account!.input);
+  expect(retained).toMatchObject({
+    status: "available",
+    planLabel: "Pro",
+    windows: [{ usedPct: 10 }, { usedPct: 20 }],
+  });
+  // Seed at open plus the live read before close; the retained fetch wakes no host.
+  expect((await h.recorded()).filter((frame) => frame.method === "usage/read")).toHaveLength(2);
+});
 
 test("a terminal before turn admission does not start an idle watchdog", async () => {
   const h = await harness("text-reasoning", { MUSE_TEST_ACK_LAST: "1" });

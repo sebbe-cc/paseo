@@ -828,3 +828,34 @@ test("failed discovery preserves history until discovery confirms account remova
   present = true;
   expect((await registry.listReports())[0]?.lastSuccessful).toBeUndefined();
 });
+
+test("invalidateReports refetches only the selected cached entries", async () => {
+  let now = 0;
+  const fetches: string[] = [];
+  const registry = new UsageSourceRegistry(() => now);
+  for (const id of ["muse", "codex"]) {
+    registry.register(
+      source({
+        id,
+        discover: async () => [{ key: "account", input: {} }],
+        fetch: async () => {
+          fetches.push(id);
+          return { status: "available", windows: [{ id: "w", label: `${id}-${fetches.length}` }] };
+        },
+      }),
+    );
+  }
+  await registry.listReports();
+  expect(fetches).toEqual(["muse", "codex"]);
+  await registry.listReports();
+  expect(fetches).toEqual(["muse", "codex"]);
+  registry.invalidateReports({ sourceId: "muse" });
+  await registry.listReports();
+  expect(fetches).toEqual(["muse", "codex", "muse"]);
+  registry.invalidateReports({ reportId: "codex:account" });
+  await registry.listReports();
+  expect(fetches).toEqual(["muse", "codex", "muse", "codex"]);
+  registry.invalidateReports();
+  await registry.listReports();
+  expect(fetches).toEqual(["muse", "codex", "muse", "codex", "muse", "codex"]);
+});

@@ -21,6 +21,7 @@ import {
   itemNotificationSchema,
   approvalResolvedSchema,
   usageSchema,
+  subscriptionUsageSchema,
   ackSchema,
   gapSchema,
   catalogSchema,
@@ -35,6 +36,7 @@ import {
   turnSchema,
   tokenUsageSchema,
   contextUsageSchema,
+  type SubscriptionUsage,
   type WireItem,
   type WireApproval,
 } from "./wire.js";
@@ -52,6 +54,11 @@ interface SessionOptions {
   launch: ProviderLaunch;
   emit(event: ProviderEvent): void;
   capabilities: readonly string[];
+  /**
+   * Receives validated `usage/changed` observations from this session's host.
+   * Invalid observations never arrive here; they are dropped, not zero-filled.
+   */
+  onUsageChanged?(observation: SubscriptionUsage): void;
 }
 
 interface Live {
@@ -489,7 +496,16 @@ export class Session {
         });
         break;
       }
+      case "usage/changed":
+        this.usageChanged(notification.params);
+        break;
     }
+  }
+  private usageChanged(params: unknown): void {
+    // Params are SubscriptionUsage directly, with no sessionId/viewCursor envelope.
+    // An invalid observation is dropped; it is never a zero quota.
+    const parsed = subscriptionUsageSchema.safeParse(params);
+    if (parsed.success) this.options.onUsageChanged?.(parsed.data);
   }
   private startTurn(input: unknown): void {
     const params = turnSchema.parse(input);

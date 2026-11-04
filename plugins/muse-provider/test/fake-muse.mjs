@@ -176,6 +176,13 @@ function parityResponse(frame) {
       ? JSON.parse(process.env.MUSE_TEST_USAGE)
       : responseFor(catalogRows, "usage/read");
     respond(frame, result);
+    if (process.env.MUSE_TEST_USAGE_CHANGED) {
+      send({
+        jsonrpc: "2.0",
+        method: "usage/changed",
+        params: JSON.parse(process.env.MUSE_TEST_USAGE_CHANGED),
+      });
+    }
     return true;
   }
   if (frame.method === "session/list") {

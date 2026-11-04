@@ -12,15 +12,21 @@ import {
 } from "@getpaseo/plugin/server/usage";
 
 import { MspConnection } from "./connection.js";
-import { usageSchema } from "./wire.js";
+import { subscriptionUsageSchema, usageSchema } from "./wire.js";
 
 const inputSchema = z.object({ account: z.string() }).strict();
 type Observation = z.infer<typeof usageSchema>;
+type SubscriptionUsage = z.infer<typeof subscriptionUsageSchema>;
 
 function accountKey(env: ProviderLaunch["env"]): string {
   // MSP 1.4.1 has no stable account ID; swapping accounts in one config directory shares a report ID.
   const configHome = env.XDG_CONFIG_HOME ?? path.join(env.HOME ?? homedir(), ".config");
   return hashAccountKey(path.resolve(configHome, "muse"));
+}
+
+/** Account identity for a session launch, including per-session env overrides. */
+export function accountForLaunch(launch: ProviderLaunch): string {
+  return accountKey(launch.env);
 }
 
 export class Usage {
@@ -29,6 +35,11 @@ export class Usage {
     string,
     { account: string; read: () => Promise<Observation> }
   >();
+  /**
+   * Latest validated observation per account. Survives detach: an idle or closed
+   * session keeps its last observed values with their age instead of waking a host.
+   */
+  private readonly observations = new Map<string, SubscriptionUsage>();
   remember(launch: ProviderLaunch): { account: string } {
     const key = accountKey(launch.env);
     this.launches.set(key, launch);
@@ -38,22 +49,49 @@ export class Usage {
     this.sessions.set(id, { ...this.remember(launch), read });
   }
   detach(id: string): void {
+    // The live reader goes; the retained observation stays with its observedAt age.
     this.sessions.delete(id);
+  }
+  /**
+   * Stores a `usage/changed` observation or `usage/read` seed for the session's
+   * own account. Older or out-of-order observations never replace newer ones,
+   * invalid observations are dropped (never a zero quota), and one account's
+   * observation never touches another account.
+   */
+  recordObservation(account: string, usage: SubscriptionUsage): boolean {
+    const parsed = subscriptionUsageSchema.safeParse(usage);
+    if (!parsed.success) return false;
+    const current = this.observations.get(account);
+    if (current && parsed.data.observedAtMs <= current.observedAtMs) return false;
+    this.observations.set(account, parsed.data);
+    return true;
+  }
+  /** Latest stored observation for an account, if any host ever reported one. */
+  latest(account: string): SubscriptionUsage | undefined {
+    return this.observations.get(account);
   }
   private async read(account: string, launch: ProviderLaunch): Promise<Observation> {
     const readers = [...this.sessions.values()].filter((session) => session.account === account);
+    const stored = this.observations.get(account);
     if (readers.length > 0) {
       const observations = await Promise.all(readers.map((session) => session.read()));
       const usages = observations.flatMap((observation) =>
         observation.usage ? [observation.usage] : [],
       );
-      usages.sort((a, b) => b.observedAtMs - a.observedAtMs);
-      return usages.length > 0 ? { usage: usages[0] } : {};
+      for (const usage of usages) this.recordObservation(account, usage);
+      const candidates = [...usages, ...(stored ? [stored] : [])];
+      candidates.sort((a, b) => b.observedAtMs - a.observedAtMs);
+      return candidates.length > 0 ? { usage: candidates[0] } : {};
     }
+    // No live session for this account: serve the retained observation with its
+    // age instead of waking a host. Only a never-observed account falls through
+    // to a transient host.
+    if (stored) return { usage: stored };
     const host = new MspConnection({ launch });
     try {
-      await host.initialize();
-      return await host.request("usage/read", {}, usageSchema);
+      const observation = await host.request("usage/read", {}, usageSchema);
+      if (observation.usage) this.recordObservation(account, observation.usage);
+      return observation;
     } finally {
       await host.close();
     }

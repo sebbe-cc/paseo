@@ -9,7 +9,7 @@ import {
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
 import { serveArgs } from "./options.js";
-import { Usage } from "./usage.js";
+import { Usage, accountForLaunch } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
 import { MspConnection } from "./connection.js";
@@ -120,6 +120,8 @@ function connect(
     if (input.type === "session.open") {
       if (sessions.has(input.sessionId))
         throw new MuseError("duplicateSession", "Muse session is already open");
+      const sessionLaunch = { ...launch, env: { ...launch.env, ...input.config.env } };
+      const account = accountForLaunch(sessionLaunch);
       const session = new Session({
         id: input.sessionId,
         config: input.config,
@@ -127,15 +129,24 @@ function connect(
         emit,
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
+        // Host events carry no account identity; the observation belongs to the
+        // session's own account and never merges other accounts.
+        onUsageChanged: (observation) => {
+          usage.recordObservation(account, observation);
+        },
       });
       sessions.set(input.sessionId, session);
       try {
         await session.open(input);
-        usage.attach(
-          input.sessionId,
-          { ...launch, env: { ...launch.env, ...input.config.env } },
-          () => session.readUsage(),
-        );
+        usage.attach(input.sessionId, sessionLaunch, () => session.readUsage());
+        // Seed from the already-awake host; a missing seed is truthful absence,
+        // never a reason to fail the open or to wake another host.
+        try {
+          const seed = await session.readUsage();
+          if (seed.usage) usage.recordObservation(account, seed.usage);
+        } catch {
+          // The host is awake but has observed nothing; events seed it later.
+        }
       } catch (error) {
         sessions.delete(input.sessionId);
         await session.close();

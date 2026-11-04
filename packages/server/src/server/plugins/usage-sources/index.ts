@@ -72,6 +72,19 @@ export class UsageSourceRegistry {
     this.sources.set(source.id, source);
   }
 
+  /**
+   * Drops cached report entries so the next query refetches them. Sources call
+   * this when they observe a change (e.g. a subscription event from a live
+   * session) instead of waiting out the fetch cache TTL.
+   */
+  invalidateReports(filter: { sourceId?: string; reportId?: string } = {}): void {
+    for (const [key, cached] of this.cache) {
+      if (filter.sourceId !== undefined && cached.entry.sourceId !== filter.sourceId) continue;
+      if (filter.reportId !== undefined && cached.entry.id !== filter.reportId) continue;
+      this.cache.delete(key);
+    }
+  }
+
   unregister(id: string): void {
     this.sources.delete(id);
     for (const key of this.defaults.keys()) if (key.startsWith(`${id}:`)) this.defaults.delete(key);

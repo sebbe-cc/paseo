@@ -266,6 +266,26 @@ export const usageSchema = z.object({
     })
     .optional(),
 });
+
+/**
+ * `usage/changed` params: SubscriptionUsage directly, not wrapped in `{usage}`.
+ * Numbers are point-in-time observations; an empty or invalid observation is
+ * never a zero quota, so anything failing here is dropped, never zero-filled.
+ */
+export const subscriptionUsageSchema = z.object({
+  observedAtMs: z.number().finite().nonnegative(),
+  tier: z.string().min(1),
+  window: z.object({
+    resetsAtMs: z.number().finite().nonnegative(),
+    usedPercent: z.number().finite().nonnegative(),
+    windowDurationMins: z.number().finite().positive(),
+  }),
+  weekly: z.object({
+    resetsAtMs: z.number().finite().nonnegative(),
+    usedPercent: z.number().finite().nonnegative(),
+  }),
+});
+export type SubscriptionUsage = z.infer<typeof subscriptionUsageSchema>;
 export const childSessionSchema = z.object({
   session: z.object({
     sessionId: z.string(),
