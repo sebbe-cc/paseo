@@ -2072,7 +2072,15 @@ it("forwards usage.invalidated from the worker to the usage-invalidated listener
     "usage-invalidator",
     `
 export default function contribute(server) {
-  server.invalidateUsage("fixture", "fixture:one");
+  server.registerProvider({
+    id: "invalidator",
+    label: "Invalidator",
+    async status() {
+      server.invalidateUsage("fixture", "fixture:one");
+      return { available: true };
+    },
+    async connect() { throw new Error("not opened by this test"); },
+  });
   return () => {};
 }
 `,
@@ -2085,13 +2093,16 @@ export default function contribute(server) {
   });
   try {
     await runtime.startPlugin("usage-invalidator", directory);
-    await expect
-      .poll(() => seen, { timeout: 10_000 })
-      .toEqual([{ pluginId: "usage-invalidator", sourceId: "fixture", reportId: "fixture:one" }]);
+    // The worker sends its signal before answering status, so the listener
+    // has fired once the status call resolves.
+    await runtime.getProviderStatus("usage-invalidator", "invalidator", {});
+    expect(seen).toEqual([
+      { pluginId: "usage-invalidator", sourceId: "fixture", reportId: "fixture:one" },
+    ]);
   } finally {
     await runtime.stopAll();
   }
-});
+}, 30_000);
 
 const examplesDirectory = fileURLToPath(
   new URL("../../../../../plugin-examples/", import.meta.url),
