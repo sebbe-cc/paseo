@@ -266,8 +266,7 @@ test("agent.create exposes labels and initialPrompt but rejects changes to them"
   await expect(
     hooks.invoke(
       "operation",
-      "before",
-      "agent.create",
+      "agent.create.before",
       {
         config: { provider: "codex", cwd: "/project" },
         env: {},
@@ -288,8 +287,7 @@ test("agent.create still rejects moving the workspace directory", async () => {
   await expect(
     hooks.invoke(
       "operation",
-      "before",
-      "agent.create",
+      "agent.create.before",
       {
         config: { provider: "codex", cwd: "/project" },
         env: {},
@@ -313,8 +311,7 @@ test("agent.session_open allows instruction recomposition for interactive opens"
   });
   const output = (await hooks.invoke(
     "operation",
-    "before",
-    "agent.session_open",
+    "agent.open.before",
     {
       agentId: "agent",
       workspaceId: "workspace",
@@ -324,6 +321,7 @@ test("agent.session_open allows instruction recomposition for interactive opens"
       purpose: "interactive",
       env: {},
       labels: { "gc-session": "test" },
+      title: null, tools: [], mcpServers: {},
       initialPrompt: "do the thing",
       systemPrompt: "stale role prompt",
       daemonAppendSystemPrompt: null,
@@ -343,8 +341,7 @@ test("agent.session_open rejects instruction changes for history opens", async (
   await expect(
     hooks.invoke(
       "operation",
-      "before",
-      "agent.session_open",
+      "agent.open.before",
       {
         agentId: "agent",
         workspaceId: null,
@@ -352,6 +349,7 @@ test("agent.session_open rejects instruction changes for history opens", async (
         cwd: "/project",
         reason: "resume",
         purpose: "history",
+        title: null, tools: [], mcpServers: {},
         env: {},
         labels: {},
         initialPrompt: null,
@@ -381,8 +379,7 @@ test("agent.turn_prepare accumulates hidden context in order without touching id
   hooks.before("agent.turn_prepare", () => undefined);
   const output = (await hooks.invoke(
     "operation",
-    "before",
-    "agent.turn_prepare",
+    "agent.turn_prepare.before",
     {
       agent: {
         id: "agent-1",
@@ -422,8 +419,7 @@ test("agent.turn_prepare is fail-open: a throwing hook is skipped and the turn k
   });
   const output = (await hooks.invoke(
     "operation",
-    "before",
-    "agent.turn_prepare",
+    "agent.turn_prepare.before",
     {
       agent: {
         id: "agent-1",
@@ -481,7 +477,7 @@ test("agent.turn_prepare keeps the accumulated request form from a child host (p
   // `unrecognized_keys [agent, turn, accumulatedContext]` on every turn,
   // then dropped the memory by returning the empty input.
   const request = turnPrepareRequest();
-  const output = validateBeforeResult("agent.turn_prepare", request, {
+  const output = await validateBeforeResult("agent.turn_prepare.before", request, {
     ...structuredClone(request),
     accumulatedContext: ["memory: sentinel-alpha"],
   });
@@ -494,23 +490,23 @@ test("agent.turn_prepare keeps the accumulated request form from a child host (p
   expect(composeTurnContext(output.accumulatedContext ?? [])).toContain("memory: sentinel-alpha");
 });
 
-test("agent.turn_prepare merges child context without losing earlier plugins", () => {
+test("agent.turn_prepare merges child context without losing earlier plugins", async () => {
   const request: PluginTurnPrepareRequest = {
     ...turnPrepareRequest(),
     accumulatedContext: ["memory: sentinel-alpha"],
   };
-  const output = validateBeforeResult("agent.turn_prepare", request, {
+  const output = await validateBeforeResult("agent.turn_prepare.before", request, {
     ...structuredClone(request),
     accumulatedContext: ["memory: sentinel-alpha", "memory: sentinel-beta"],
   });
   expect(output.accumulatedContext).toEqual(["memory: sentinel-alpha", "memory: sentinel-beta"]);
 });
 
-test("agent.turn_prepare accepts an empty echo without throwing (pa-89is1.9)", () => {
+test("agent.turn_prepare accepts an empty echo without throwing (pa-89is1.9)", async () => {
   // A plugin with nothing to add echoes the request back. This is the exact
   // per-turn daemon.log case: it must validate quietly, not fail open.
   const request = turnPrepareRequest();
-  const output = validateBeforeResult("agent.turn_prepare", request, {
+  const output = await validateBeforeResult("agent.turn_prepare.before", request, {
     ...structuredClone(request),
     accumulatedContext: [],
   });
@@ -518,29 +514,28 @@ test("agent.turn_prepare accepts an empty echo without throwing (pa-89is1.9)", (
   expect(output.agent).toEqual(request.agent);
 });
 
-test("agent.turn_prepare rejects identity changes from a child host", () => {
+test("agent.turn_prepare rejects identity changes from a child host", async () => {
   const request = turnPrepareRequest();
-  expect(() =>
-    validateBeforeResult("agent.turn_prepare", request, {
+  await expect(
+    validateBeforeResult("agent.turn_prepare.before", request, {
       ...structuredClone(request),
       agent: { ...structuredClone(request).agent, id: "other-agent" },
       accumulatedContext: ["memory: sentinel-alpha"],
     }),
-  ).toThrow("agent.turn_prepare hooks cannot change agent or turn identity");
+  ).rejects.toThrow("agent.turn_prepare hooks cannot change agent or turn identity");
 });
 
-test("agent.turn_prepare still accepts the bare {context} handler form", () => {
+test("agent.turn_prepare still accepts the bare {context} handler form", async () => {
   const request = turnPrepareRequest();
   expect(
-    validateBeforeResult("agent.turn_prepare", request, { context: "memory: sentinel-alpha" })
-      .accumulatedContext,
+    (await validateBeforeResult("agent.turn_prepare.before", request, { context: "memory: sentinel-alpha" })).accumulatedContext,
   ).toEqual(["memory: sentinel-alpha"]);
   expect(
-    validateBeforeResult("agent.turn_prepare", request, {
+    (await validateBeforeResult("agent.turn_prepare.before", request, {
       context: ["memory: sentinel-alpha", "memory: sentinel-alpha", "  "],
-    }).accumulatedContext,
+    })).accumulatedContext,
   ).toEqual(["memory: sentinel-alpha"]);
-  expect(validateBeforeResult("agent.turn_prepare", request, undefined).accumulatedContext).toEqual(
+  expect((await validateBeforeResult("agent.turn_prepare.before", request, undefined)).accumulatedContext).toEqual(
     [],
   );
 });
@@ -556,13 +551,13 @@ test("agent.compact hooks can only change skip", async () => {
     skip: false,
   };
   const remove = hooks.before("agent.compact", ({ request }) => ({ ...request, skip: true }));
-  await expect(hooks.invoke("skip", "before", "agent.compact", input, paseo)).resolves.toEqual({
+  await expect(hooks.invoke("skip", "agent.compact.before", input, paseo)).resolves.toEqual({
     ...input,
     skip: true,
   });
   remove();
   hooks.before("agent.compact", ({ request }) => ({ ...request, reason: "manual" }));
-  await expect(hooks.invoke("reason", "before", "agent.compact", input, paseo)).rejects.toThrow(
+  await expect(hooks.invoke("reason", "agent.compact.before", input, paseo)).rejects.toThrow(
     "agent.compact hooks can only change skip",
   );
 });

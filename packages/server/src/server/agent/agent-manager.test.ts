@@ -12570,7 +12570,7 @@ test("turn_prepare hidden context reaches the provider prompt but not the stored
     pluginLifecycle: {
       emit: () => {},
       before: (async (name: string, request: unknown) => {
-        if (name === "agent.turn_prepare") {
+        if (name === "agent.turn_prepare.before") {
           const seen = request as {
             agent: { labels: unknown };
             turn: { kind: unknown; turnNumber: unknown; prompt: unknown };
@@ -12588,7 +12588,7 @@ test("turn_prepare hidden context reaches the provider prompt but not the stored
             accumulatedContext: ["memory: sentinel-alpha"],
           };
         }
-        if (name === "agent.create") createRequests.push(request);
+        if (name === "agent.create.before") createRequests.push(request);
         return request;
       }) as never,
     },
@@ -12654,7 +12654,7 @@ test("a failing turn_prepare hook never stops the turn", async () => {
     pluginLifecycle: {
       emit: () => {},
       before: (async (name: string, request: unknown) => {
-        if (name === "agent.turn_prepare") throw new Error("hindsight is down");
+        if (name === "agent.turn_prepare.before") throw new Error("hindsight is down");
         return request;
       }) as never,
     },
