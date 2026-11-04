@@ -5684,7 +5684,7 @@ export class AgentManager {
     }
     const usage = this.agents.get(agentId)?.lastUsage;
     try {
-      const result = await this.pluginLifecycle.before("agent.compact", {
+      const result = await this.pluginLifecycle.before("agent.compact.before", {
         agentId,
         provider,
         reason,
@@ -5695,7 +5695,7 @@ export class AgentManager {
         },
         skip: false,
       });
-      this.logger.info({ agentId, provider, reason, source, skip: result.skip }, "agent.compact");
+      this.logger.info({ agentId, provider, reason, source, skip: result.skip }, "agent.compact.before");
       return { skip: result.skip };
     } catch (error) {
       this.logger.warn({ err: error, agentId, provider }, "agent.compact hooks failed");

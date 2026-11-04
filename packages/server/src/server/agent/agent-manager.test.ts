@@ -12707,7 +12707,7 @@ test("agent.compact fires once per threshold crossing for providers without a pr
     compactThreshold: 0.8,
     pluginLifecycle: {
       before: async (name, request) => {
-        if (name === "agent.compact") requests.push(request);
+        if (name === "agent.compact.before") requests.push(request);
         return request;
       },
       emit: () => {},
@@ -12773,7 +12773,7 @@ test("providers with a pre-compact hook get beforeCompact instead of the thresho
     logger,
     pluginLifecycle: {
       before: async (name, request) => {
-        if (name !== "agent.compact") return request;
+        if (name !== "agent.compact.before") return request;
         const compact = request as { source: string; reason: string; skip: boolean };
         requests.push(compact);
         return { ...compact, skip: true } as typeof request;
