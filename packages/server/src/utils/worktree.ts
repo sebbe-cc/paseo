@@ -1843,7 +1843,11 @@ function normalizeRequiredBaseBranch(baseBranch: string): string {
 async function resolveCheckoutBranchBaseRef(cwd: string, branchName: string): Promise<string> {
   const defaultBranch = await resolveRepositoryDefaultBranch(cwd);
   if (defaultBranch) {
-    return defaultBranch;
+    const available = await runGitCommand(["show-ref", "--verify", "--quiet", defaultBranch], {
+      cwd,
+      acceptExitCodes: [0, 1],
+    });
+    if (available.exitCode === 0) return defaultBranch;
   }
   // COMPAT(worktreeCreationDefault): added in v0.15.0; remove after 2027-05-04 when creation supplies its own qualified base.
   // Preserve local-only creation policy here; comparison readers use only the persisted ref.
