@@ -262,7 +262,7 @@ function pickSnapshot(
   entry: UsageReportEntry,
   available: boolean,
   now: number,
-): UsageReportEntry["lastSuccessful"] {
+): UsageReportEntry["lastSuccessful"] | null {
   // COMPAT(usageLastSuccessful): added in v0.12.0, remove after 2027-04-17 once daemon floor >= v0.12.0.
   // Older daemons cannot provide history; a failed attempt is never a successful update.
   if (available) return null;

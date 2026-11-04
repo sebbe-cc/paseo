@@ -417,11 +417,12 @@ it("prefers source-owned observation time over poll time", () => {
   const observedAt = new Date(Date.now() - 60_000).toISOString();
   const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
   if (live.report.status !== "available") throw new Error("fixture must be available");
+  const liveReport = live.report;
   const withObserved: UsageReportEntry = {
     ...live,
     fetchedAt: new Date().toISOString(),
     successfulAt: new Date().toISOString(),
-    report: { ...live.report, observedAt },
+    report: { ...liveReport, observedAt },
   };
   const resolved = resolveUsageReport(withObserved, i18n.t);
   expect(resolved.successfulAt).toBe(observedAt);
@@ -433,11 +434,12 @@ it("hides quota observed past the ceiling even when the poll is fresh", () => {
   const observedAt = new Date(Date.now() - 45 * 60_000).toISOString();
   const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
   if (live.report.status !== "available") throw new Error("fixture must be available");
+  const liveReport = live.report;
   const aged: UsageReportEntry = {
     ...live,
     fetchedAt: new Date().toISOString(),
     successfulAt: new Date().toISOString(),
-    report: { ...live.report, observedAt },
+    report: { ...liveReport, observedAt },
   };
   const resolved = resolveUsageReport(aged, i18n.t);
   expect(resolved.windows).toEqual([]);
@@ -450,11 +452,12 @@ it("R4: an observation exactly at the ceiling is still fresh; 1ms later it is no
   // lands provably past it. Both live and retained paths.
   const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
   if (live.report.status !== "available") throw new Error("fixture must be available");
+  const liveReport = live.report;
   const atExactly = (ms: number): UsageReportEntry => ({
     ...live,
     fetchedAt: new Date().toISOString(),
     successfulAt: new Date().toISOString(),
-    report: { ...live.report, observedAt: new Date(Date.now() - ms).toISOString() },
+    report: { ...liveReport, observedAt: new Date(Date.now() - ms).toISOString() },
   });
   expect(resolveUsageReport(atExactly(1_800_000), i18n.t).windows).toHaveLength(1);
   const past = resolveUsageReport(atExactly(1_800_001), i18n.t);
@@ -462,13 +465,14 @@ it("R4: an observation exactly at the ceiling is still fresh; 1ms later it is no
   expect(past.messages).toHaveLength(1);
   const base = entry({ windows: [{ id: "primary", label: "Primary", usedPct: 61 }] });
   if (base.report.status !== "available") throw new Error("fixture must be available");
+  const baseReport = base.report;
   const retainedAt = (ms: number): UsageReportEntry => ({
     ...base,
     fetchedAt: new Date().toISOString(),
     report: { status: "error", error: "proxy down" },
     lastSuccessful: {
       fetchedAt: new Date().toISOString(),
-      report: { ...base.report, observedAt: new Date(Date.now() - ms).toISOString() },
+      report: { ...baseReport, observedAt: new Date(Date.now() - ms).toISOString() },
     },
   });
   expect(resolveUsageReport(retainedAt(1_800_000), i18n.t).windows).toHaveLength(1);
@@ -480,13 +484,14 @@ it("serves retained history only while its own observation is fresh", () => {
   const staleObservedAt = new Date(Date.now() - 45 * 60_000).toISOString();
   const base = entry({ windows: [{ id: "primary", label: "Primary", usedPct: 61 }] });
   if (base.report.status !== "available") throw new Error("fixture must be available");
+  const baseReport = base.report;
   const failureWith = (observedAt: string): UsageReportEntry => ({
     ...base,
     fetchedAt: new Date().toISOString(),
     report: { status: "error", error: "proxy down" },
     lastSuccessful: {
       fetchedAt: new Date().toISOString(),
-      report: { ...base.report, observedAt },
+      report: { ...baseReport, observedAt },
     },
   });
   const fresh = resolveUsageReport(failureWith(freshObservedAt), i18n.t);
@@ -502,10 +507,11 @@ it("R2: future observations never authorize quota, live or retained", () => {
   const futureObservedAt = new Date(Date.now() + 60_000).toISOString();
   const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
   if (live.report.status !== "available") throw new Error("fixture must be available");
+  const liveReport = live.report;
   const futureLive: UsageReportEntry = {
     ...live,
     fetchedAt: new Date().toISOString(),
-    report: { ...live.report, observedAt: futureObservedAt },
+    report: { ...liveReport, observedAt: futureObservedAt },
   };
   const resolved = resolveUsageReport(futureLive, i18n.t);
   expect(resolved.windows).toEqual([]);
@@ -517,7 +523,7 @@ it("R2: future observations never authorize quota, live or retained", () => {
     report: { status: "error", error: "proxy down" },
     lastSuccessful: {
       fetchedAt: new Date().toISOString(),
-      report: { ...live.report, observedAt: futureObservedAt },
+      report: { ...liveReport, observedAt: futureObservedAt },
     },
   };
   const retained = resolveUsageReport(futureRetained, i18n.t);
@@ -529,11 +535,12 @@ it("R4: resolve exposes the source-owned observation as render input", () => {
   const freshObservedAt = new Date(Date.now() - 60_000).toISOString();
   const live = entry({ windows: [{ id: "five_hour", label: "5-hour", usedPct: 34 }] });
   if (live.report.status !== "available") throw new Error("fixture must be available");
+  const liveReport = live.report;
 
   // Live source-owned observation passes through for the card expiry timer.
   const withObserved: UsageReportEntry = {
     ...live,
-    report: { ...live.report, observedAt: freshObservedAt },
+    report: { ...liveReport, observedAt: freshObservedAt },
   };
   expect(resolveUsageReport(withObserved, i18n.t).observedAt).toBe(freshObservedAt);
 
@@ -549,7 +556,7 @@ it("R4: resolve exposes the source-owned observation as render input", () => {
     report: { status: "error", error: "proxy down" },
     lastSuccessful: {
       fetchedAt: new Date().toISOString(),
-      report: { ...live.report, observedAt: freshObservedAt },
+      report: { ...liveReport, observedAt: freshObservedAt },
     },
   };
   const failed = resolveUsageReport(failure, i18n.t);
