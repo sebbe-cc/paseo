@@ -421,7 +421,7 @@ async function maybeRemoveDirectory(
       dependencies,
     ))
   ) {
-    return false;
+    return { removedDirectory: false };
   }
 
   const archivedWorkspaceIdSet = new Set(archivedWorkspaceIds);
