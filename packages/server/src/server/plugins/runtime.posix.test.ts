@@ -2067,6 +2067,32 @@ export default function contribute(server) {
   }
 });
 
+it("forwards usage.invalidated from the worker to the usage-invalidated listener", async () => {
+  const directory = await createPlugin(
+    "usage-invalidator",
+    `
+export default function contribute(server) {
+  server.invalidateUsage("fixture", "fixture:one");
+  return () => {};
+}
+`,
+  );
+  const seen: Array<{ pluginId: string; sourceId: string; reportId?: string }> = [];
+  const runtime = createTestRuntime({
+    onUsageInvalidated: (pluginId, sourceId, reportId) => {
+      seen.push({ pluginId, sourceId, reportId });
+    },
+  });
+  try {
+    await runtime.startPlugin("usage-invalidator", directory);
+    await expect
+      .poll(() => seen, { timeout: 10_000 })
+      .toEqual([{ pluginId: "usage-invalidator", sourceId: "fixture", reportId: "fixture:one" }]);
+  } finally {
+    await runtime.stopAll();
+  }
+});
+
 const examplesDirectory = fileURLToPath(
   new URL("../../../../../plugin-examples/", import.meta.url),
 );

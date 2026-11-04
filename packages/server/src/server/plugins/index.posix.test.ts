@@ -288,6 +288,62 @@ describe("PluginService", () => {
     expect(await provider.getCatalogCacheKey!({ scope: "global" })).toBeUndefined();
   });
 
+  it("refetches a cached usage report after the worker invalidates it", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
+    roots.push(home);
+    const directory = await createPlugin(
+      "usage-invalidator",
+      `export default function contribute(server) {
+  let fetches = 0;
+  server.registerUsageSource({
+    id: "invalidated",
+    label: "Invalidated",
+    input: { parseAsync: async (value) => value },
+    discover: async () => [{ key: "one", input: {} }],
+    fetch: async () => {
+      fetches += 1;
+      return { status: "available", windows: [{ id: "w", label: "W", usedPct: fetches }] };
+    },
+  });
+  server.registerProvider({
+    id: "invalidator",
+    label: "Invalidator",
+    async status() {
+      server.invalidateUsage("invalidated", "invalidated:one");
+      return { available: true };
+    },
+    async connect() { throw new Error("not opened by this test"); },
+  });
+  return () => {};
+}`,
+    );
+    const service = createService(home);
+
+    await service.start();
+    try {
+      await service.installDirectory({ path: directory });
+      const first = await service.listUsageReports();
+      expect(first).toMatchObject([
+        { id: "invalidated:one", report: { status: "available", windows: [{ usedPct: 1 }] } },
+      ]);
+      // Cached: a second query serves the same entry without refetching.
+      expect((await service.listUsageReports())[0]).toBe(first[0]);
+      // The status call returns after the worker sent its signal, so the
+      // invalidation is processed before the next query runs.
+      const [provider] = service.getProviderRegistrations();
+      await provider!.status!({});
+      const second = await service.listUsageReports();
+      expect(second[0]?.report).toMatchObject({
+        status: "available",
+        windows: [{ usedPct: 2 }],
+      });
+      expect(second[0]).not.toBe(first[0]);
+      expect((await service.listUsageReports())[0]).toBe(second[0]);
+    } finally {
+      await service.stopAllPlugins();
+    }
+  });
+
   it("publishes provider registrations only while their plugin is running", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
     roots.push(home);
