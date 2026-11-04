@@ -2,7 +2,7 @@
 title: Plugin reference
 description: Local plugin files, client and server runtimes, platform limits, contributions, RPCs, lifecycle, hosts, and CLI commands.
 nav: Reference
-order: 48
+order: 49
 category: Plugins
 ---
 
@@ -628,405 +628,11 @@ export default function contribute(client: PluginClientContext) {
 }
 ```
 
-Cleanup can be async. Release timers, watchers, sockets, and other resources created by the plugin. Paseo also removes registrations, unmounts surfaces, rejects pending RPCs, closes the plugin's daemon session, and stops its subprocess on reload, disable, removal, disconnect, or daemon shutdown.
+Cleanup can be async. Release timers, watchers, sockets, and other resources created by the plugin. Reload, disable, and removal dispose the affected installation. Stopping a server plugin also closes its daemon session and stops its subprocess. Client installations follow [Hosts and lifecycle](#hosts-and-lifecycle), including retention during a temporary disconnect.
 
 ## Lifecycle hooks
 
-In `index.server.ts`:
-
-```ts
-import type { PluginServerContext } from "@getpaseo/plugin/server";
-
-export default function contribute(server: PluginServerContext) {
-  server.on("agent.turn_ended", (event) => {
-    console.log(event.agent.id, event.outcome);
-  });
-
-  return () => {};
-}
-```
-
-| Register                        | Callback receives                  | Return                                                       |
-| ------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
-| `server.on(name, callback)`     | `(event, { paseo, signal })`       | `void` or `Promise<void>`                                    |
-| `server.before(name, callback)` | `({ request }, { paseo, signal })` | Modified request, or `undefined` to keep it; async supported |
-
-Hooks run on the daemon while the plugin is enabled, even with no app connected.
-
-### Change configuration and inject an MCP server
-
-Add this callback inside `contribute(server)`. Replace the placeholder URL with your MCP endpoint.
-
-```ts
-server.before("agent.create", ({ request }) => {
-  if (request.config.provider !== "codex") {
-    return request;
-  }
-
-  return {
-    ...request,
-    config: {
-      ...request.config,
-      providerOptions: {
-        ...request.config.providerOptions,
-        sandbox_mode: "workspace-write",
-        approval_policy: "on-request",
-      },
-      mcpServers: {
-        ...request.config.mcpServers,
-        company: {
-          type: "http",
-          url: "https://tools.example.com/mcp",
-        },
-      },
-    },
-  };
-});
-```
-
-| Input                                       | Result                        |
-| ------------------------------------------- | ----------------------------- |
-| `providerOptions.sandbox_mode: "read-only"` | `"workspace-write"`           |
-| `providerOptions.web_search: "disabled"`    | Preserved by the spread       |
-| Existing `mcpServers.search`                | Preserved by the spread       |
-| Existing `mcpServers.company`               | Replaced with the entry above |
-
-The selected provider validates `providerOptions` and must support the configured MCP servers.
-Explicit Codex sandbox and approval options override its mode presets.
-
-### Inject environment variables on every session opening
-
-```ts
-server.before("agent.session_open", ({ request }) => {
-  return {
-    ...request,
-    env: {
-      ...request.env,
-      COMPANY_ENV: "development",
-    },
-  };
-});
-```
-
-This runs on create, resume, refresh, and import. To inject only on creation, set `env` in an
-`agent.create` callback instead.
-
-### Choose workspace isolation
-
-```ts
-server.before("workspace.create", ({ request }) => {
-  if (request.source.kind !== "directory") {
-    return request;
-  }
-
-  return {
-    ...request,
-    source: {
-      kind: "worktree",
-      cwd: request.source.path,
-      action: "branch-off",
-    },
-  };
-});
-```
-
-**Result:** an explicit directory creation request becomes a worktree request. Existing workspaces
-and directory lookup/import operations are unaffected.
-
-### Send a follow-up when a turn ends
-
-Copy [server/inspect.ts](https://github.com/getpaseo/paseo/blob/main/plugin-examples/lifecycle-actions/server/inspect.ts)
-into your plugin. The helper imports types from `@getpaseo/protocol/agent-types`; add
-`@getpaseo/protocol` at the same version as your plugin SDK to your development dependencies
-and install them before loading the plugin. `latestOutputText` joins text chunks after the latest user message.
-
-```ts
-import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { latestOutputText } from "./server/inspect";
-
-export default function contribute(server: PluginServerContext) {
-  server.on("agent.turn_ended", async (event, context) => {
-    if (event.outcome.kind === "canceled") {
-      return;
-    }
-
-    const agent = context.paseo.agents.ref(event.agent.id);
-    const page = await agent.timeline.refetch({ direction: "tail", limit: 20 });
-    const text = latestOutputText(page.entries.map(({ item }) => item));
-    if (/out of credits/i.test(text)) {
-      await agent.send("Try again.");
-    }
-  });
-
-  return () => {};
-}
-```
-
-```text
-Turn ends: "out of credits"
-  → plugin sends "Try again."
-  → a new turn starts
-```
-
-The handler fetches only the last 20 timeline items. Output before that page is not inspected.
-Use `cursor` and `direction` to page further when your plugin needs more history.
-
-This sends a new message with the existing SDK. Persistent matches keep sending follow-ups;
-add limits or delays in your plugin when needed. Attachments and tool effects are not replayed.
-
-### Answer a permission request
-
-Using `shellCommand` from the same [helper file](https://github.com/getpaseo/paseo/blob/main/plugin-examples/lifecycle-actions/server/inspect.ts):
-
-```ts
-import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { shellCommand } from "./server/inspect";
-
-export default function contribute(server: PluginServerContext) {
-  server.on("agent.permission_requested", async (event, context) => {
-    const command = shellCommand(event.request);
-    if (command === null) {
-      return;
-    }
-
-    const agent = context.paseo.agents.ref(event.agent.id);
-    if (/\brm\s+-rf\b/.test(command)) {
-      await agent.respondToPermission({
-        requestId: event.request.id,
-        response: { behavior: "deny", message: "Recursive deletion is blocked." },
-      });
-      return;
-    }
-
-    if (command.trim() === "git status") {
-      await agent.respondToPermission({
-        requestId: event.request.id,
-        response: { behavior: "allow" },
-      });
-    }
-  });
-
-  return () => {};
-}
-```
-
-| Request                  | Result                    |
-| ------------------------ | ------------------------- |
-| `rm -rf build`           | Declined                  |
-| `git status`             | Approved                  |
-| Other command or request | Left pending for the user |
-| Already-resolved request | SDK response fails        |
-
-The regex is an example policy, not a shell parser. Permission requests can also be questions,
-plans, and mode changes; requesting permission does not end the turn.
-
-### Events
-
-| Name                         | Event fields                                            | Trigger                                            |
-| ---------------------------- | ------------------------------------------------------- | -------------------------------------------------- |
-| `agent.created`              | `agent`                                                 | Ordinary creation finishes; excludes import/resume |
-| `agent.closed`               | `agent`                                                 | A live agent runtime closes                        |
-| `agent.turn_started`         | `agent`, `turnId`                                       | Live turn starts                                   |
-| `agent.turn_ended`           | `agent`, `turnId`, `outcome`, deprecated `timeline: []` | Live turn completes, fails, or is canceled         |
-| `agent.permission_requested` | `agent`, `request`                                      | Permission or question becomes pending             |
-| `agent.permission_resolved`  | `agent`, `requestId`, `resolution`                      | Pending request is answered or cleared             |
-| `agent.archived`             | `agent`, `archivedAt`                                   | Archive state is saved                             |
-| `workspace.created`          | `workspace`                                             | Record created; directory available                |
-| `workspace.archived`         | `workspace`                                             | Archive state is saved                             |
-
-Agent events exclude the daemon's private disposable helpers. Public background workspaces and
-their ordinary agents run the same lifecycle hooks as other workspaces. Archive events can precede
-runtime/worktree cleanup; observe lifecycle completion separately when cleanup matters.
-
-`agent.turn_ended.timeline` is deprecated and always empty. Fetch history on demand with
-`context.paseo.agents.ref(event.agent.id).timeline.refetch({ direction: "tail", limit: 20 })`.
-The hook payload size does not grow with conversation history.
-
-**Shared payload shapes** (`@getpaseo/plugin/server`):
-
-```ts
-interface PluginHookAgent {
-  id: string;
-  workspaceId: string | null;
-  parentAgentId: string | null;
-  provider: string;
-  cwd: string;
-  title: string | null;
-}
-
-interface PluginHookWorkspace {
-  id: string;
-  projectId: string;
-  cwd: string;
-  name: string | null;
-  archivedAt: string | null;
-}
-
-type PluginTurnOutcome =
-  | { kind: "completed" }
-  | { kind: "failed"; error: { message: string; code?: string } }
-  | { kind: "canceled"; reason: string };
-```
-
-| Field        | Shape / meaning                                                                                       |
-| ------------ | ----------------------------------------------------------------------------------------------------- |
-| `turnId`     | Provider-reported `string` or `null`; can repeat after a session reopens                              |
-| `timeline`   | `readonly AgentTimelineItem[]`; complete snapshot including earlier conversation; text may span items |
-| `request`    | SDK `AgentPermissionRequest`; `kind` is `tool`, `plan`, `question`, `mode`, or `other`                |
-| `resolution` | SDK `AgentPermissionResponse`                                                                         |
-| `archivedAt` | Timestamp string                                                                                      |
-
-### Before hooks
-
-| Name                 | Request fields                                                                                                                                         | Editable                                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `agent.create`       | `config`, optional `env`, `labels`, `initialPrompt`                                                                                                    | Public agent config except `cwd`; `env` (`labels`/`initialPrompt` read-only)                                      |
-| `agent.session_open` | `agentId`, `workspaceId`, `provider`, `cwd`, `reason`, `purpose`, `env`, `labels`, `initialPrompt`, optional `systemPrompt`/`daemonAppendSystemPrompt` | `env`, plus `systemPrompt`/`daemonAppendSystemPrompt` on interactive opens; history opens keep saved instructions |
-| `agent.turn_prepare` | `agent` (with `labels`), `turn` (`prompt`, `kind`, `purpose`, `turnNumber`), `accumulatedContext`                                                      | Returns hidden `context` only; never edits the prompt or identity                                                 |
-| `workspace.create`   | `source`, optional `title`, `firstAgentContext`                                                                                                        | Entire explicit creation request                                                                                  |
-
-**`agent.create.config`** uses `AgentSessionConfig`:
-
-| Fields                                        | Constraint                                                                 |
-| --------------------------------------------- | -------------------------------------------------------------------------- |
-| `provider`, `model`                           | Separate fields; changing provider may require changing model/mode/options |
-| `modeId`, `thinkingOptionId`, `featureValues` | Provider-specific selections                                               |
-| `title`, `systemPrompt`                       | Agent configuration                                                        |
-| `providerOptions`                             | Opaque provider-specific options                                           |
-| `mcpServers`, `toolPolicy`                    | MCP configuration and exact-tool preapprovals                              |
-| `cwd`                                         | Cannot change                                                              |
-
-**`agent.create` readable context:** besides `config` and `env`, the hook sees
-`labels` (the verified labels the agent will be registered with, for example a
-`gc-session` role marker) and `initialPrompt` (the first user prompt when the
-caller supplied one, otherwise `null`; normal creation happens before the first
-prompt, which arrives per turn via `agent.turn_prepare`). Both are read-only:
-changing them fails the operation. `cwd` still cannot move.
-
-**`agent.session_open` request example:**
-
-```json
-{
-  "agentId": "agent-123",
-  "workspaceId": "workspace-456",
-  "provider": "codex",
-  "cwd": "/projects/shop",
-  "reason": "resume",
-  "purpose": "interactive",
-  "env": { "COMPANY_ENV": "development" },
-  "labels": { "gc-session": "worker" },
-  "initialPrompt": null,
-  "systemPrompt": "You are the worker.",
-  "daemonAppendSystemPrompt": null
-}
-```
-
-| Field                      | Values                                                                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `workspaceId`              | String or `null`                                                                                                        |
-| `reason`                   | `create`, `resume`, `refresh`, `import`                                                                                 |
-| `purpose`                  | `interactive`, `history`                                                                                                |
-| `labels`                   | Verified agent labels; read-only                                                                                        |
-| `initialPrompt`            | First user prompt when known, otherwise `null`; read-only                                                               |
-| `systemPrompt`             | Stable role instructions; recomposable on interactive opens, frozen on history opens                                    |
-| `daemonAppendSystemPrompt` | Daemon-level append; same recomposition rule as `systemPrompt`                                                          |
-| `env`                      | Launch override map; excludes the daemon's inherited environment. Replace the map to add, replace, or remove overrides. |
-
-A hook may return changed `systemPrompt`/`daemonAppendSystemPrompt` when
-`purpose` is `interactive` (create, resume, refresh, import). The daemon applies
-them to the session going forward, so a resumed or refreshed agent picks up
-fresh plugin instructions instead of a frozen copy. When `purpose` is `history`
-the open never runs the model and must leave the saved instructions unchanged;
-changing them fails the open, exactly like changing `labels` or `initialPrompt`.
-
-### Ordering and returned values
-
-```text
-Creation request
-  → agent.create hooks (plugin-ID order; registration order within each plugin)
-  → resolve defaults and validate provider configuration
-  → derive launch configuration with Paseo runtime tools and daemon prompt
-  → agent.session_open hooks (same ordering; env plus interactive instruction recomposition)
-  → set PASEO_AGENT_ID and PASEO_AGENT_CWD
-  → open provider session and save agent configuration
-
-Every foreground turn
-  → agent.turn_prepare hooks (same ordering; fail-open, see below)
-  → hidden context wrapped around the provider-bound prompt
-  → provider runs the turn; the stored timeline keeps the original user text
-```
-
-| Callback returns                                        | Next callback receives                              |
-| ------------------------------------------------------- | --------------------------------------------------- |
-| `{ ...request, env: { ...request.env, REGION: "eu" } }` | Prior request with `REGION` added/replaced          |
-| `{ ...request, env: { REGION: "eu" } }`                 | Prior request with the entire override map replaced |
-| `undefined`                                             | Unchanged request                                   |
-| Throws or returns invalid data                          | Operation fails; later callbacks do not run         |
-
-No automatic deep merge. Later callbacks can overwrite earlier values. Agent configuration is
-saved; environment overrides are not persisted with it.
-
-### Hidden per-turn context (`agent.turn_prepare`)
-
-Stable role instructions live in `config.systemPrompt` and are mapped per
-provider (Claude preset append, Codex per-turn `developerInstructions`, Pi
-`before_agent_start`, Muse/Omp session prompt). Changing context — memory,
-retrieved facts, compaction-sensitive state — arrives per turn instead:
-
-```ts
-server.before("agent.turn_prepare", ({ request }) => {
-  if (request.turn.purpose !== "interactive") {
-    return;
-  }
-  return { context: `Open tasks for ${request.turn.prompt}` };
-});
-```
-
-The hook sees verified identity (`agent.id`, `provider`, `cwd`, `labels`),
-the untouched prompt snapshot (`turn.prompt`), and lifecycle status
-(`turn.kind` is `start`, `resume`, `refresh`, `compaction`, or `next`;
-`turnNumber` counts foreground turns from 1). It returns only `{ context }`
-(a string or string array); it cannot change the prompt, the agent, or start
-a turn. The daemon delivers the composed blocks as hidden model context
-wrapped in a `<system-reminder data-paseo-turn-context>` marker around the
-provider-bound prompt, identically on Claude, Codex, Muse, and Pi. The stored
-timeline keeps the original user text, so there is no visible extra message,
-and identical blocks from several plugins are sent once per turn (capped at
-8000 characters).
-
-| Contract               | Behavior                                                                                                                                                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Cancellation / timeout | 5 seconds per turn across all `turn_prepare` hooks; a timeout contributes nothing and the turn starts. The signal aborts on plugin stop.                                                                                 |
-| Ordering               | Plugin-ID order, registration order within each plugin; each hook sees earlier hooks' blocks in `accumulatedContext`.                                                                                                    |
-| Replacement / dedup    | Exact duplicate blocks are delivered once per turn. A plugin replaces its own text by returning the new text; there is no cross-turn memory — every turn recomposes from scratch.                                        |
-| Fail-open              | A throwing hook, an invalid return, or a timeout is logged against the plugin and skipped; the turn still starts with the remaining blocks (possibly none). A failing hook never stops the start.                        |
-| History opens          | `turn_prepare` never runs for `history` resumes; reading history starts no model run.                                                                                                                                    |
-| Post-compaction/resume | The next turn after a completed compaction carries `kind: "compaction"`; the first turn after a resume or refresh carries `resume` / `refresh`, so memory plugins can re-inject without relying on frozen session state. |
-
-### Context and cleanup
-
-| Contract                           | Behavior                                                                                                                                                                                             |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `context.paseo`                    | Existing SDK connected to this daemon                                                                                                                                                                |
-| `context.signal`                   | Aborted on invocation timeout or plugin stop; pass to external requests                                                                                                                              |
-| Input data                         | Detached snapshot; change state through returned requests or SDK commands                                                                                                                            |
-| Registration result                | Idempotent remover, e.g. `const remove = server.on(...); remove();`                                                                                                                                  |
-| Reload, disable, removal, shutdown | Remaining registrations removed                                                                                                                                                                      |
-| Unknown hook name                  | Registration fails                                                                                                                                                                                   |
-| Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation; an event handler logs an error. `agent.turn_prepare` is the exception: it is fail-open with a 5 second budget (see below). |
-| Event-handler error                | Logged against plugin; original operation continues                                                                                                                                                  |
-| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                                                                                                                        |
-| Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                                                                                                            |
-
-### Complete examples
-
-| Plugin                                                                                                 | Includes                                                                     |
-| ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [lifecycle-logger](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-logger)       | All eleven hooks; JSON logs with environment values redacted                 |
-| [lifecycle-actions](https://github.com/getpaseo/paseo/tree/main/plugin-examples/lifecycle-actions)     | Follow-ups, permissions, environment, provider switching, worktree selection |
-| [agent-configuration](https://github.com/getpaseo/paseo/tree/main/plugin-examples/agent-configuration) | MCP injection and Codex sandbox/approval options                             |
-
-Read logger output with `paseo plugin logs lifecycle-logger` or the host's `daemon.log`.
+Register async handlers with `server.addHook(name, handler)`. See [Hooks](/docs/plugins/hooks) for names, payloads, ordering, errors, and complete examples.
 
 ## Screens and sidebar items
 
@@ -2411,7 +2017,7 @@ Hiding preserves the registration, so showing it again restores its position. It
 an action already in progress.
 
 `remove()` is idempotent. Updates after removal do nothing. Paseo removes outstanding buttons when
-the plugin installation or host connection is torn down. Return cleanup from the client entry for
+the plugin installation is disposed (see [Hosts and lifecycle](#hosts-and-lifecycle)). Return cleanup from the client entry for
 your subscriptions, timers, and other resources.
 
 ## Use the Paseo SDK
@@ -2739,9 +2345,11 @@ Plugins are installed per daemon. When the same contribution exists on several c
 
 Attachment sources remain scoped to each composer's host.
 
-Workspace panels and Command Center items stay scoped to the active host and exact cached context.
-Reload replaces their registrations. Disable, removal, host disconnect, and evaluation failure
-remove Command Center items and clear the installation's query state. An already-restored panel tab
+A dropped connection keeps client plugin registrations, mounted surfaces, local state, and query caches. Reconnecting through the existing `DaemonClient` object keeps unchanged installations and refreshes their settings. Consume SDK observation snapshots to refresh other daemon state; setup does not run again for an unchanged installation. Daemon calls still depend on connectivity.
+
+Switching connections (for example, from direct to relay) currently replaces the `DaemonClient` object and reinstalls client plugins. Reload, changed bundles or requirements, disable, plugin removal, and host removal also dispose affected installations and clear their query state. A replacement that fails evaluation leaves its contributions unavailable.
+
+Workspace panels and Command Center items stay scoped to the active host and exact cached context. An already-restored panel tab
 remains as unavailable until its matching contribution returns or the user closes it. Panel render
 failures stay inside the plugin error boundary.
 
@@ -2943,3 +2551,13 @@ Use `paseo plugin ls` to read the current status and error.
 | Edited code does not appear                                           | Run `npm run typecheck`, then `paseo plugin reload <id>`.                                                                                          |
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
+
+### Fork: turn context and recomposable instructions
+
+`agent.turn_prepare.before` contributes hidden `{ context }` for the next model
+request without changing the saved user prompt. Contributions accumulate in
+registration order, deduplicate, and cap at 8,000 characters; errors fail open.
+`agent.create.before` also exposes read-only `labels` and `initialPrompt`.
+`agent.open.before` supports `initialPrompt` and instruction recomposition via
+`systemPrompt` and `daemonAppendSystemPrompt` on interactive opens; history opens
+must preserve instructions. Legacy `before("agent.turn_prepare", ...)` works.
