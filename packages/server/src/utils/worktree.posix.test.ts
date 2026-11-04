@@ -297,7 +297,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
         expect(diff.diff).toContain("+feature change");
         expect(status).toMatchObject({
           isGit: true,
-          baseRef: "main",
+          baseRef: "refs/heads/main",
           aheadBehind: { ahead: 1, behind: 0 },
         });
         expect(result.comparisonBaseRef).toBe("refs/heads/main");
