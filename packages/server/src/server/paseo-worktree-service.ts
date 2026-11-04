@@ -201,7 +201,7 @@ export async function attemptFirstAgentBranchAutoName(options: {
   }
   if (
     !metadata ||
-    metadata.version !== 2 ||
+    metadata.version === 1 ||
     metadata.firstAgentBranchAutoName?.status !== "pending"
   ) {
     return { attempted: false, renamed: false, branchName: null };

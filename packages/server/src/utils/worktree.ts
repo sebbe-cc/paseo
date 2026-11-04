@@ -1409,9 +1409,23 @@ export const createWorktree = async ({
       });
     }
 
+    const selectedBase = sourcePlan.metadataBaseRef ?? sourcePlan.metadataBaseRefName;
+    const { stdout: fullBaseOut } = await runGitCommand(
+      ["rev-parse", "--symbolic-full-name", selectedBase],
+      { cwd },
+    );
+    const fullBase = fullBaseOut.trim();
+    const { stdout: forkOut } = await runGitCommand(["merge-base", selectedBase, "HEAD"], {
+      cwd: worktreePath,
+    });
+    // COMPAT(workspaceBaseV3): added in v0.15.0; remove after 2027-05-04 with SHA-based creation callers.
+    // A revision-only caller has no branch identity to persist; its migration requires caller input.
     await writePaseoWorktreeMetadata(worktreePath, {
       baseRefName: sourcePlan.metadataBaseRefName,
-      ...(sourcePlan.metadataBaseRef ? { baseRef: sourcePlan.metadataBaseRef } : {}),
+      baseRef: fullBase || sourcePlan.metadataBaseRef,
+      ...(fullBase.startsWith("refs/heads/") || fullBase.startsWith("refs/remotes/")
+        ? { forkSha: forkOut.trim() }
+        : {}),
       ...(sourcePlan.changeRequestLookupTarget
         ? { changeRequestLookupTarget: sourcePlan.changeRequestLookupTarget }
         : {}),

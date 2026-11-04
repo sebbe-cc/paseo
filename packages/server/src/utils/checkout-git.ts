@@ -884,6 +884,7 @@ export interface CheckoutStatusGitNonPaseo {
   currentBranch: string | null;
   isDirty: boolean;
   baseRef: string | null;
+  base?: WorkspaceBase | null;
   aheadBehind: AheadBehind | null;
   // Remote-tracking ref for currentBranch, e.g. "refs/remotes/origin/main". Null when the
   // branch has no upstream or git could not resolve it. aheadOfOrigin/behindOfOrigin are
@@ -903,6 +904,7 @@ export interface CheckoutStatusGitPaseo {
   currentBranch: string | null;
   isDirty: boolean;
   baseRef: string;
+  base?: WorkspaceBase | null;
   aheadBehind: AheadBehind | null;
   upstreamRef: string | null;
   aheadOfOrigin: number | null;
@@ -960,6 +962,7 @@ export type CheckoutSnapshotFacts =
       paseoWorktree: PaseoWorktreeForCwd;
       storedBaseRef: string | null;
       resolvedBaseRef: string | null;
+      base?: WorkspaceBase | null;
       mainRepoRoot: string | null;
       comparisonBaseRef: string | null;
       branchRemoteName: string | null;
@@ -1286,40 +1289,16 @@ async function getPaseoWorktreeForCwd(
   };
 }
 
-// Worktrees created before baseRef existed only stored the stripped name; it resolves
-// local-first, which is the base they were actually cut from.
+// Legacy worktrees may only store a name. Qualify it once at the resolver boundary.
 function storedBaseRefFromMetadata(metadata: PaseoWorktreeMetadata | null): string | null {
   return metadata?.baseRef ?? metadata?.baseRefName ?? null;
-}
-
-async function readPaseoWorktreeBaseRef(worktreeRoot: string): Promise<string | null> {
-  return storedBaseRefFromMetadata(await readPaseoWorktreeMetadata(worktreeRoot));
-}
-
-async function getStoredBaseRefForCwd(
-  cwd: string,
-  context?: CheckoutContext,
-): Promise<string | null> {
-  if (context?.facts?.isGit) {
-    return context.facts.storedBaseRef;
-  }
-  const paseoWorktree = await getPaseoWorktreeForCwd(cwd, { context });
-  if (!paseoWorktree.isPaseoOwnedWorktree) {
-    return null;
-  }
-
-  return readPaseoWorktreeBaseRef(paseoWorktree.worktreeRoot);
 }
 
 async function getResolvedBaseRefForCwd(
   cwd: string,
   context?: CheckoutContext,
 ): Promise<string | null> {
-  if (context?.facts?.isGit) {
-    return context.facts.resolvedBaseRef;
-  }
-  const { resolvedBaseRef } = await resolveBaseRefForCwd(cwd, context);
-  return resolvedBaseRef;
+  return (await resolveWorkspaceBase(cwd, context))?.ref ?? null;
 }
 
 interface BaseRefResolution {
@@ -1337,10 +1316,10 @@ async function resolveBaseRefForCwd(
       resolvedBaseRef: context.facts.resolvedBaseRef,
     };
   }
-  const storedBaseRef = await getStoredBaseRefForCwd(cwd, context);
+  const base = await resolveWorkspaceBase(cwd, context);
   return {
-    storedBaseRef,
-    resolvedBaseRef: storedBaseRef ?? (await resolveBaseRef(cwd, context)),
+    storedBaseRef: base?.source === "stored" ? base.ref : null,
+    resolvedBaseRef: base?.ref ?? null,
   };
 }
 
@@ -1605,73 +1584,93 @@ export async function resolveRepositoryDefaultBranch(
   try {
     const { stdout } = await getRunGitCommand(context)(
       ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-      {
-        cwd: repoRoot,
-        envOverlay: READ_ONLY_GIT_ENV,
-      },
+      { cwd: repoRoot, envOverlay: READ_ONLY_GIT_ENV },
     );
     const ref = stdout.trim();
-    if (ref) {
-      // Prefer a local branch name (e.g. "main") over the remote-tracking ref (e.g. "origin/main")
-      // so that status/diff/merge all operate against the same base ref.
-      const remoteShort = ref.replace(/^refs\/remotes\//, "");
-      const localName = remoteShort.startsWith("origin/")
-        ? remoteShort.slice("origin/".length)
-        : remoteShort;
-      try {
-        await getRunGitCommand(context)(
-          ["show-ref", "--verify", "--quiet", `refs/heads/${localName}`],
-          {
-            cwd: repoRoot,
-            envOverlay: READ_ONLY_GIT_ENV,
-          },
-        );
-        return localName;
-      } catch {
-        await getRunGitCommand(context)(["show-ref", "--verify", "--quiet", ref], {
-          cwd: repoRoot,
-          envOverlay: READ_ONLY_GIT_ENV,
-        });
-        return remoteShort;
-      }
-    }
+    return ref.startsWith("refs/remotes/origin/") ? ref : null;
   } catch {
-    // A stale origin/HEAD must fall through to the available local branches.
+    return null;
   }
+}
 
-  const { stdout } = await getRunGitCommand(context)(["branch", "--format=%(refname:short)"], {
-    cwd: repoRoot,
-    envOverlay: READ_ONLY_GIT_ENV,
-  });
-  const branches = new Set(
-    stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0),
+export interface WorkspaceBase {
+  ref: string;
+  forkSha: string | null;
+  source: "stored" | "default";
+  missing: boolean;
+}
+
+/** The sole comparison policy. Never replace a deleted explicit base with the repo default. */
+export async function resolveWorkspaceBase(
+  cwd: string,
+  context?: CheckoutContext,
+): Promise<WorkspaceBase | null> {
+  if (context?.facts?.isGit && context.facts.base !== undefined) return context.facts.base;
+  const root = await getWorktreeRoot(cwd, context);
+  if (!root) return null;
+  const metadata = await readPaseoWorktreeMetadata(root);
+  const stored = storedBaseRefFromMetadata(metadata);
+  const candidate = stored ?? (await resolveRepositoryDefaultBranch(cwd, context));
+  if (!candidate) return null;
+  // COMPAT(workspaceBaseV3): added in v0.15.0; remove after 2027-05-04 with the legacy metadata reader.
+  const ref = isQualifiedBranchRef(candidate)
+    ? candidate
+    : await qualifyLegacyBaseRef(cwd, candidate, context);
+  const missing = !(await doesGitRefExist(cwd, ref, context));
+  const forkSha = metadata?.version === 3 ? metadata.forkSha : await tryResolveMergeBase(cwd, ref);
+  if (missing && (!forkSha || !(await doesGitCommitExist(cwd, forkSha, context)))) {
+    throw new Error(`Base ref not found: ${ref}; no saved fork point is available`);
+  }
+  return { ref, forkSha, source: stored ? "stored" : "default", missing };
+}
+
+async function qualifyLegacyBaseRef(
+  cwd: string,
+  ref: string,
+  context?: CheckoutContext,
+): Promise<string> {
+  if (/^[0-9a-f]{40,64}$/i.test(ref)) {
+    throw new Error(`Workspace base is a commit (${ref}); set a qualified branch base`);
+  }
+  const name = branchNameFromRef(ref);
+  const candidates = ref.startsWith("origin/")
+    ? [`refs/remotes/${ref}`]
+    : [`refs/remotes/origin/${name}`, `refs/heads/${name}`];
+  for (const candidate of candidates) {
+    if (await doesGitRefExist(cwd, candidate, context)) return candidate;
+  }
+  throw new Error(`Base ref not found: ${ref}; no saved fork point is available`);
+}
+
+async function doesGitCommitExist(
+  cwd: string,
+  sha: string,
+  context?: CheckoutContext,
+): Promise<boolean> {
+  const result = await getRunGitCommand(context)(
+    ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
+    {
+      cwd,
+      envOverlay: READ_ONLY_GIT_ENV,
+      acceptExitCodes: [0, 1],
+    },
   );
-
-  if (branches.has("main")) {
-    return "main";
-  }
-  if (branches.has("master")) {
-    return "master";
-  }
-
-  return null;
+  return result.exitCode === 0;
 }
 
-async function resolveBaseRef(repoRoot: string, context?: CheckoutContext): Promise<string | null> {
-  return resolveRepositoryDefaultBranch(repoRoot, context);
+function workspaceComparisonRef(base: WorkspaceBase): string {
+  return base.missing ? base.forkSha! : base.ref;
 }
 
-interface ComparisonBaseRefName {
-  localName: string;
-  originRef: string;
-}
-
-function normalizeComparisonBaseRefName(input: string): ComparisonBaseRefName {
-  const localName = branchNameFromRef(input);
-  return { localName, originRef: `origin/${localName}` };
+async function resolveOperationComparisonRef(
+  cwd: string,
+  ref: string,
+  context?: CheckoutContext,
+): Promise<string> {
+  const base = await resolveWorkspaceBase(cwd, context);
+  return base && isSameBaseRef(base.ref, ref)
+    ? workspaceComparisonRef(base)
+    : resolveBestComparisonBaseRef(cwd, ref, context);
 }
 
 function resolveMergeTargetBranch(baseRef: string): string {
@@ -1714,64 +1713,7 @@ async function resolveBestComparisonBaseRef(
     }
     throw new Error(`Base ref not found: ${baseRef}`);
   }
-  const normalized = normalizeComparisonBaseRefName(baseRef);
-  const [hasLocal, hasOrigin] = await Promise.all([
-    doesGitRefExist(cwd, `refs/heads/${normalized.localName}`, context),
-    doesGitRefExist(cwd, `refs/remotes/origin/${normalized.localName}`, context),
-  ]);
-
-  if (hasOrigin) {
-    return normalized.originRef;
-  }
-  if (hasLocal) {
-    return normalized.localName;
-  }
-
-  const refName =
-    baseRef.startsWith("origin/") || baseRef.startsWith("refs/remotes/origin/")
-      ? normalized.originRef
-      : normalized.localName;
-  throw new Error(`Base branch not found locally or on origin: ${refName}`);
-}
-
-async function resolveMostAheadBaseRef(cwd: string, baseRef: string): Promise<string> {
-  if (isQualifiedBranchRef(baseRef)) {
-    if (await doesGitRefExist(cwd, baseRef)) {
-      return baseRef;
-    }
-    throw new Error(`Base ref not found: ${baseRef}`);
-  }
-  const normalizedBaseRef = branchNameFromRef(baseRef);
-  const [hasLocal, hasOrigin] = await Promise.all([
-    doesGitRefExist(cwd, `refs/heads/${normalizedBaseRef}`),
-    doesGitRefExist(cwd, `refs/remotes/origin/${normalizedBaseRef}`),
-  ]);
-
-  if (hasLocal && !hasOrigin) {
-    return normalizedBaseRef;
-  }
-  if (!hasLocal && hasOrigin) {
-    return `origin/${normalizedBaseRef}`;
-  }
-  if (!hasLocal && !hasOrigin) {
-    throw new Error(`Base branch not found locally or on origin: ${normalizedBaseRef}`);
-  }
-
-  const { stdout } = await runGitCommand(
-    ["rev-list", "--left-right", "--count", `${normalizedBaseRef}...origin/${normalizedBaseRef}`],
-    { cwd, envOverlay: READ_ONLY_GIT_ENV },
-  );
-  const [localOnlyRaw, originOnlyRaw] = stdout.trim().split(/\s+/);
-  const localOnly = Number.parseInt(localOnlyRaw ?? "0", 10);
-  const originOnly = Number.parseInt(originOnlyRaw ?? "0", 10);
-  if (Number.isNaN(localOnly) || Number.isNaN(originOnly)) {
-    return normalizedBaseRef;
-  }
-  if (originOnly > localOnly) {
-    return `origin/${normalizedBaseRef}`;
-  }
-
-  return normalizedBaseRef;
+  return qualifyLegacyBaseRef(cwd, baseRef, context);
 }
 
 async function getAheadBehind(
@@ -1780,14 +1722,13 @@ async function getAheadBehind(
   currentBranch: string,
   context?: CheckoutContext,
 ): Promise<AheadBehind | null> {
-  const normalizedBaseRef = branchNameFromRef(baseRef);
-  if (!normalizedBaseRef || !currentBranch || normalizedBaseRef === currentBranch) {
+  if (!currentBranch) {
     return null;
   }
   const comparisonBaseRef =
     context?.facts?.isGit && context.facts.resolvedBaseRef === baseRef
       ? context.facts.comparisonBaseRef
-      : await resolveBestComparisonBaseRef(cwd, baseRef, context);
+      : await resolveOperationComparisonRef(cwd, baseRef, context);
   if (!comparisonBaseRef) {
     return null;
   }
@@ -2112,23 +2053,15 @@ export async function getCheckoutSnapshotFacts(
   const paseoWorktreeMetadata = inspected.paseoWorktree.isPaseoOwnedWorktree
     ? await readPaseoWorktreeMetadata(inspected.paseoWorktree.worktreeRoot)
     : null;
-  const storedBaseRef = storedBaseRefFromMetadata(paseoWorktreeMetadata);
-  const resolvedBaseRef = storedBaseRef ?? (await resolveBaseRef(cwd, context));
+  const base = await resolveWorkspaceBase(cwd, context);
+  const storedBaseRef = base?.source === "stored" ? base.ref : null;
+  const resolvedBaseRef = base?.ref ?? null;
   const mainRepoRoot = await getMainRepoRootFromCommonDir(
     cwd,
     inspected.gitCommonDir,
     context,
   ).catch(() => null);
-  let comparisonBaseRef: string | null = null;
-  if (
-    resolvedBaseRef &&
-    inspected.currentBranch &&
-    branchNameFromRef(resolvedBaseRef) !== inspected.currentBranch
-  ) {
-    comparisonBaseRef = await resolveBestComparisonBaseRef(cwd, resolvedBaseRef, context).catch(
-      () => null,
-    );
-  }
+  const comparisonBaseRef = base ? workspaceComparisonRef(base) : null;
 
   let branchRemoteName: string | null = null;
   let branchMergeRef: string | null = null;
@@ -2178,6 +2111,7 @@ export async function getCheckoutSnapshotFacts(
     paseoWorktree: inspected.paseoWorktree,
     storedBaseRef,
     resolvedBaseRef,
+    base,
     mainRepoRoot,
     comparisonBaseRef,
     branchRemoteName,
@@ -2352,10 +2286,6 @@ export async function getCheckoutStatus(
       ? await getAheadBehind(cwd, baseRef, currentBranch, factsContext)
       : null;
   const upstreamStatus = facts.upstreamStatus;
-  // The wire carries the display name: clients label the base with it and send it back to
-  // request diffs and merges. The exact ref stays in worktree.json and in facts, where the
-  // comparisons and actions read it.
-  const displayBaseRef = baseRef ? branchNameFromRef(baseRef) : null;
   const upstreamRef = upstreamStatus?.ref ?? null;
   const aheadOfOrigin = upstreamStatus?.aheadBehind.ahead ?? null;
   const behindOfOrigin = upstreamStatus?.aheadBehind.behind ?? null;
@@ -2367,7 +2297,8 @@ export async function getCheckoutStatus(
       mainRepoRoot: mainRepoRoot ?? worktreeRoot,
       currentBranch,
       isDirty,
-      baseRef: displayBaseRef ?? baseRef,
+      baseRef,
+      base: facts.base,
       aheadBehind,
       upstreamRef,
       aheadOfOrigin,
@@ -2385,7 +2316,8 @@ export async function getCheckoutStatus(
       mainRepoRoot && resolve(mainRepoRoot) !== resolve(worktreeRoot) ? mainRepoRoot : null,
     currentBranch,
     isDirty,
-    baseRef: displayBaseRef,
+    baseRef,
+    base: facts.base,
     aheadBehind,
     upstreamRef,
     aheadOfOrigin,
@@ -2591,28 +2523,6 @@ export interface CheckoutCommitsResult {
   commits: CheckoutCommit[];
 }
 
-async function tryResolveCheckoutCommitsBaseRef(
-  cwd: string,
-  baseRef: string | null,
-  currentBranch: string,
-): Promise<string | null> {
-  if (!baseRef) {
-    return null;
-  }
-  const normalizedBaseRef = branchNameFromRef(baseRef);
-  if (!normalizedBaseRef || normalizedBaseRef === currentBranch) {
-    return null;
-  }
-  try {
-    return await resolveMostAheadBaseRef(cwd, baseRef);
-  } catch (error) {
-    if (isQualifiedBranchRef(baseRef)) {
-      throw error;
-    }
-    return null;
-  }
-}
-
 export async function listCheckoutCommits({
   cwd,
   context,
@@ -2625,21 +2535,9 @@ export async function listCheckoutCommits({
     return { baseRef: null, commits: [] };
   }
 
-  const { resolvedBaseRef } = await resolveBaseRefForCwd(cwd, context);
-  const normalizedBaseRef = resolvedBaseRef ? branchNameFromRef(resolvedBaseRef) : null;
-  let comparisonBaseRef = await tryResolveCheckoutCommitsBaseRef(
-    cwd,
-    resolvedBaseRef,
-    currentBranch,
-  );
-  if (!comparisonBaseRef && normalizedBaseRef && normalizedBaseRef !== currentBranch) {
-    // Saved worktree metadata can outlive a renamed or deleted base branch.
-    comparisonBaseRef = await tryResolveCheckoutCommitsBaseRef(
-      cwd,
-      await resolveBaseRef(cwd),
-      currentBranch,
-    );
-  }
+  const base = await resolveWorkspaceBase(cwd, context);
+  if (!base) throw new Error("Unable to determine workspace base");
+  const comparisonBaseRef = workspaceComparisonRef(base);
 
   let workspaceRecords: ParsedCheckoutCommit[] = [];
   let baseRevision = "HEAD";
@@ -2661,7 +2559,7 @@ export async function listCheckoutCommits({
     : [];
   const records = [...workspaceRecords, ...baseRecords];
   if (records.length === 0) {
-    return { baseRef: comparisonBaseRef, commits: [] };
+    return { baseRef: base.ref, commits: [] };
   }
 
   const unpushedShas = await getUnpushedCommitShas(cwd);
@@ -2678,7 +2576,7 @@ export async function listCheckoutCommits({
     files: record.files,
   }));
 
-  return { baseRef: comparisonBaseRef, commits };
+  return { baseRef: base.ref, commits };
 }
 
 const commitRenamesCache = new TTLCache<string, Promise<ReadonlyMap<string, string>>>({
@@ -2957,23 +2855,12 @@ async function resolveShortstatComparisonRef(input: {
   facts?: CheckoutSnapshotFacts | null;
   context?: CheckoutContext;
 }): Promise<string | null> {
-  const { cwd, currentBranch, localBaseRef, facts, context } = input;
-  if (!currentBranch) {
-    return null;
+  const { cwd, facts, context } = input;
+  if (facts?.isGit && facts.base !== undefined) {
+    return facts.base ? workspaceComparisonRef(facts.base) : null;
   }
-
-  if (localBaseRef && currentBranch !== localBaseRef) {
-    try {
-      return facts?.isGit && facts.resolvedBaseRef === localBaseRef && facts.comparisonBaseRef
-        ? facts.comparisonBaseRef
-        : await resolveBestComparisonBaseRef(cwd, localBaseRef, context);
-    } catch {
-      return null;
-    }
-  }
-
-  const hasOrigin = await doesGitRefExist(cwd, `refs/remotes/origin/${currentBranch}`, context);
-  return hasOrigin ? `origin/${currentBranch}` : null;
+  const base = await resolveWorkspaceBase(cwd, context);
+  return base ? workspaceComparisonRef(base) : null;
 }
 
 function getOrLoadCheckoutShortstat(
@@ -3019,6 +2906,7 @@ export interface CheckoutRefDerivedState {
   aheadBehind: AheadBehind | null;
   diffStat: CheckoutShortstat | null;
   upstreamStatus: UpstreamStatus | null;
+  base?: WorkspaceBase | null;
 }
 
 function normalizeRemoteTrackingRef(ref: string): string {
@@ -3091,6 +2979,11 @@ export async function getCheckoutRefDerivedState(
     upstreamRef,
   } = getCheckoutRefMovement(facts, movedRemoteRefs);
 
+  let base = facts.base;
+  if (baseMoved && base !== undefined) {
+    base = await resolveWorkspaceBase(cwd, { ...context, facts: null });
+    facts = { ...facts, base, comparisonBaseRef: base ? workspaceComparisonRef(base) : null };
+  }
   let aheadBehind = current.aheadBehind;
   let diffStat = current.diffStat;
   if (baseMoved && currentBranch && facts.resolvedBaseRef) {
@@ -3123,7 +3016,7 @@ export async function getCheckoutRefDerivedState(
       : null;
   }
 
-  return { aheadBehind, diffStat, upstreamStatus };
+  return { aheadBehind, diffStat, upstreamStatus, base };
 }
 
 export interface CheckoutWorktreeState {
@@ -3520,9 +3413,9 @@ async function resolveCheckoutDiffRefs(
     requestedBaseRef: compare.baseRef,
   });
   if (!baseRef) {
-    return null;
+    throw new Error("Unable to determine workspace base");
   }
-  const bestBaseRef = await resolveBestComparisonBaseRef(cwd, baseRef);
+  const bestBaseRef = await resolveOperationComparisonRef(cwd, baseRef, context);
   return {
     baseRef: (await tryResolveMergeBase(cwd, bestBaseRef)) ?? bestBaseRef,
     targetRef: compare.mode === "base" ? "HEAD" : undefined,
@@ -3882,7 +3775,13 @@ export async function mergeToBase(
   if (!currentBranch) {
     throw new Error("Unable to determine current branch for merge");
   }
+  const workspaceBase = await resolveWorkspaceBase(cwd, context);
+  if (workspaceBase?.missing)
+    throw new Error(`Base ref not found: ${workspaceBase.ref}; cannot merge to a deleted branch`);
   const normalizedBaseRef = resolveMergeTargetBranch(baseRef);
+  if (!(await doesGitRefExist(cwd, `refs/heads/${normalizedBaseRef}`, context))) {
+    throw new Error(`No local merge target is recorded for base ref ${baseRef}`);
+  }
   const currentWorktreeRoot = (await getWorktreeRoot(cwd, context)) ?? cwd;
   if (normalizedBaseRef === currentBranch) {
     return currentWorktreeRoot;
@@ -3967,7 +3866,7 @@ export async function mergeFromBase(
     }
   }
 
-  const bestBaseRef = await resolveMostAheadBaseRef(cwd, baseRef);
+  const bestBaseRef = await resolveOperationComparisonRef(cwd, baseRef, context);
   if (bestBaseRef === currentBranch) {
     return;
   }

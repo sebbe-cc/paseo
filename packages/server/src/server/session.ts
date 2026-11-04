@@ -1,3 +1,4 @@
+import { resolveWorkspaceBase } from "../utils/checkout-git.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -5670,6 +5671,17 @@ export class Session {
     }
   }
 
+  private async describeWorkspaceBase(
+    workspace: PersistedWorkspaceRecord,
+  ): Promise<Pick<WorkspaceDescriptorPayload, "base" | "baseError">> {
+    if (workspace.kind === "directory") return { base: null };
+    try {
+      return { base: await resolveWorkspaceBase(workspace.cwd) };
+    } catch (error) {
+      return { base: null, baseError: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   private async describeWorkspaceRecord(
     workspace: PersistedWorkspaceRecord,
     projectRecord?: PersistedProjectRecord | null,
@@ -5690,6 +5702,7 @@ export class Session {
 
     return {
       id: workspace.workspaceId,
+      ...(await this.describeWorkspaceBase(workspace)),
       projectId: workspace.projectId,
       projectDisplayName: resolvedProjectRecord
         ? resolveProjectDisplayName(resolvedProjectRecord)
@@ -5781,6 +5794,7 @@ export class Session {
   ): Promise<WorkspaceDescriptorPayload> {
     const projectRecord = await this.projectRegistry.get(result.workspace.projectId);
     return {
+      ...(await this.describeWorkspaceBase(result.workspace)),
       id: result.workspace.workspaceId,
       projectId: result.workspace.projectId,
       projectDisplayName: projectRecord
