@@ -48,6 +48,7 @@ interface PluginRuntimePort {
   wait?: PluginLifecycle["wait"];
   catalog: PluginRuntime["catalog"];
   invoke(pluginId: string, method: string, input: unknown): Promise<unknown>;
+  getRpcMethods?: PluginRuntime["getRpcMethods"];
   getLogs(pluginId: string): PluginLogEntry[];
   clearLogs(pluginId: string): void;
   hasVoiceProvider?: PluginRuntime["hasVoiceProvider"];
@@ -269,7 +270,10 @@ export class PluginService {
           item.description = manifest.description;
           item.icon = manifest.icon;
           item.media = manifest.media;
+          if (manifest.cli) item.cli = manifest.cli;
         }
+        const rpcMethods = this.runtime.getRpcMethods?.(id);
+        if (rpcMethods) item.rpcMethods = rpcMethods;
         item.installation = await this.managedSources
           ?.describe(id, source.path)
           .catch(() => undefined);
