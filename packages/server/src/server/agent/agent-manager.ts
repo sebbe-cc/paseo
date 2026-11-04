@@ -1,4 +1,4 @@
-import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
+import type { SessionOpenWireRequest, AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
 import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
@@ -5692,7 +5692,7 @@ export class AgentManager {
     cwd: string,
     env: Record<string, string> | undefined,
     opening: SessionOpening | undefined,
-  ): PluginSessionOpenRequest {
+  ): SessionOpenWireRequest {
     return {
         agentId,
         provider: client.provider,
@@ -5784,8 +5784,8 @@ export class AgentManager {
    * opens keep the saved instructions untouched.
    */
   private static diffSessionOpenInstructions(
-    request: PluginSessionOpenRequest,
-    transformed: PluginSessionOpenRequest,
+    request: Pick<PluginSessionOpenRequest, "purpose" | "systemPrompt" | "daemonAppendSystemPrompt">,
+    transformed: Pick<PluginSessionOpenRequest, "purpose" | "systemPrompt" | "daemonAppendSystemPrompt">,
   ): { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null {
     if (request.purpose !== "interactive") return null;
     const systemChanged = (transformed.systemPrompt ?? null) !== (request.systemPrompt ?? null);

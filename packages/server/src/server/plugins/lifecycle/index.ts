@@ -326,8 +326,8 @@ function sameLabels(
 }
 
 function validateSessionOpenResult(
-  previous: z.infer<(typeof beforeSchemas)["agent.session_open"]>,
-  next: z.infer<(typeof beforeSchemas)["agent.session_open"]>,
+  previous: z.infer<(typeof beforeSchemas)["agent.open.before"]>,
+  next: z.infer<(typeof beforeSchemas)["agent.open.before"]>,
 ): void {
   const identityChanged =
     previous.agentId !== next.agentId ||
@@ -354,8 +354,8 @@ function validateSessionOpenResult(
 }
 
 function validateCreateResult(
-  previous: z.infer<(typeof beforeSchemas)["agent.create"]>,
-  next: z.infer<(typeof beforeSchemas)["agent.create"]>,
+  previous: z.infer<(typeof beforeSchemas)["agent.create.before"]>,
+  next: z.infer<(typeof beforeSchemas)["agent.create.before"]>,
 ): void {
   if (previous.config.cwd !== next.config.cwd) {
     throw new Error("agent.create hooks cannot change the workspace directory");
@@ -508,13 +508,15 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
         if (hookName === "agent.turn_prepare.before") {
           return this.invokeTurnPrepare(name, request as PluginBeforeRequests["agent.turn_prepare"], paseo, controller);
         }
+        type MutableHook = Exclude<typeof hookName, "agent.turn_prepare.before">;
+        const mutableHook = hookName as MutableHook;
         for (const handler of this.handlers.get(name) ?? []) {
           controller.signal.throwIfAborted();
           const result = await handler(
             { request: structuredClone(request) },
             { paseo, signal: controller.signal },
           );
-          if (result !== undefined) request = await validateBeforeResult(hookName, request, result);
+          if (result !== undefined) request = await validateBeforeResult(mutableHook, request as PluginWireBeforeRequests[MutableHook], result);
         }
         return request;
       }
