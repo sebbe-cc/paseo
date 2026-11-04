@@ -549,6 +549,13 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       if (controller.signal.aborted) {
         return;
       }
+      // Recheck before every queued playback: the setting can change (or the
+      // turn can move on) while the loop is parked on its timer with no
+      // turn/speech event to reconcile it, e.g. while the mic is muted.
+      if (!canPlayCue()) {
+        stopCue();
+        return;
+      }
       void deps.engine
         .play(cueSource, controller.signal)
         .catch((error) => {

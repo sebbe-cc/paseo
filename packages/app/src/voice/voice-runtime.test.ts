@@ -292,6 +292,26 @@ describe("voice runtime", () => {
     expect(engine.play).not.toHaveBeenCalled();
   });
 
+  it("stops an active thinking tone loop when the setting is flipped off while muted", async () => {
+    let toneEnabled = true;
+    const adapter = createSessionAdapter();
+    const { runtime, engine } = createRuntime({ isThinkingToneEnabled: () => toneEnabled });
+    runtime.registerSession(adapter);
+
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.onTurnEvent("server-1", "agent-1", "turn_started");
+
+    expect(runtime.getSnapshot().phase).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS);
+    expect(engine.play).toHaveBeenCalledTimes(1);
+
+    runtime.toggleMute();
+    toneEnabled = false;
+
+    await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS * 4);
+    expect(engine.play).toHaveBeenCalledTimes(1);
+  });
+
   it("does not restart the thinking tone from local detection jitter while waiting", async () => {
     const adapter = createSessionAdapter();
     let resolvePlay!: (duration: number) => void;
