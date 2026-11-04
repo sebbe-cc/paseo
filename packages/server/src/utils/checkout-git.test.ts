@@ -3371,6 +3371,7 @@ const x = 1;
   });
 
   it("treats differently cased Enterprise remotes as the same repository", async () => {
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: "main", baseRef: "refs/heads/main" });
     execFileSync("git", ["checkout", "-b", "local-feature"], { cwd: repoDir });
     execFileSync("git", ["remote", "add", "origin", "git@github.acme.internal:Acme/Repo.git"], {
       cwd: repoDir,
