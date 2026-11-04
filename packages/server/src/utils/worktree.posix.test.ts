@@ -136,7 +136,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       expect(existsSync(metadataPath)).toBe(true);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({
-        version: 1,
+        version: 3,
         baseRefName: "main",
         changeRequestLookupTarget: { headRef: "hello-world", localBranchName: "hello-world" },
       });
@@ -266,7 +266,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       const metadataPath = await getPaseoWorktreeMetadataPath(result.worktreePath);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({
-        version: 1,
+        version: 3,
         baseRefName: "main",
         changeRequestLookupTarget: { headRef: "feature/x", localBranchName: "feature/x" },
       });
@@ -329,7 +329,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       const metadataPath = await getPaseoWorktreeMetadataPath(result.worktreePath);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({
-        version: 1,
+        version: 3,
         baseRefName: "main",
         changeRequestLookupTarget: { headRef: "dev", localBranchName: "dev" },
       });
@@ -379,7 +379,12 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       expect(existsSync(result.worktreePath)).toBe(true);
       const metadataPath = await getPaseoWorktreeMetadataPath(result.worktreePath);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-      expect(metadata).toMatchObject({ version: 1, baseRefName: "develop" });
+      expect(metadata).toMatchObject({
+        version: 3,
+        baseRefName: "develop",
+        baseRef: "refs/heads/develop",
+        forkSha: expect.any(String),
+      });
     });
 
     it("checks out an existing local branch whose name contains uppercase letters and dots", async () => {
@@ -675,15 +680,18 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       execFileSync("git", ["update-ref", "-d", "refs/remotes/upstream/main"], {
         cwd: result.worktreePath,
       });
-      await expect(
-        getCheckoutDiff(result.worktreePath, { mode: "base", baseRef: "main" }, { paseoHome }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
-      await expect(
-        mergeFromBase(result.worktreePath, { baseRef: "main" }, { paseoHome }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
-      await expect(
-        listCheckoutCommits({ cwd: result.worktreePath, context: { paseoHome } }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
+      const missingBaseDiff = await getCheckoutDiff(
+        result.worktreePath,
+        { mode: "base", baseRef: "main" },
+        { paseoHome },
+      );
+      expect(missingBaseDiff.diff).toContain("later.txt");
+      await mergeFromBase(result.worktreePath, { baseRef: "main" }, { paseoHome });
+      const missingBaseHistory = await listCheckoutCommits({
+        cwd: result.worktreePath,
+        context: { paseoHome },
+      });
+      expect(missingBaseHistory.baseRef).toBe("refs/remotes/upstream/main");
     });
 
     it("records Git-valid characters in a remote base branch", async () => {

@@ -1,3 +1,4 @@
+import type { WorkspaceBase } from "@getpaseo/protocol/messages";
 import { MAX_RELAY_WEBSOCKET_MESSAGE_BYTES } from "@getpaseo/protocol/websocket-message-limit";
 import { resolve, dirname, basename } from "path";
 import {
@@ -1593,13 +1594,6 @@ export async function resolveRepositoryDefaultBranch(
   }
 }
 
-export interface WorkspaceBase {
-  ref: string;
-  forkSha: string | null;
-  source: "stored" | "default";
-  missing: boolean;
-}
-
 /** The sole comparison policy. Never replace a deleted explicit base with the repo default. */
 export async function resolveWorkspaceBase(
   cwd: string,
@@ -1659,7 +1653,10 @@ async function doesGitCommitExist(
 }
 
 function workspaceComparisonRef(base: WorkspaceBase): string {
-  return base.missing ? base.forkSha! : base.ref;
+  if (!base.missing) return base.ref;
+  if (!base.forkSha)
+    throw new Error(`Base ref not found: ${base.ref}; no saved fork point is available`);
+  return base.forkSha;
 }
 
 async function resolveOperationComparisonRef(
@@ -2797,18 +2794,8 @@ async function getCheckoutShortstatUncached(
     }
   }
 
-  const facts = context?.facts;
-  const localBaseRef = facts?.isGit
-    ? facts.resolvedBaseRef
-    : await getResolvedBaseRefForCwd(cwd, context);
-  const currentBranch = facts?.isGit ? facts.currentBranch : await getCurrentBranch(cwd, context);
-  const comparisonRef = await resolveShortstatComparisonRef({
-    cwd,
-    currentBranch,
-    localBaseRef,
-    facts,
-    context,
-  });
+  const base = await resolveWorkspaceBase(cwd, context);
+  const comparisonRef = base ? workspaceComparisonRef(base) : null;
   if (!comparisonRef) {
     return null;
   }
@@ -2846,21 +2833,6 @@ async function getCheckoutShortstatUncached(
   } catch (error) {
     return handleShortstatGitError(error, options?.throwOnGitError);
   }
-}
-
-async function resolveShortstatComparisonRef(input: {
-  cwd: string;
-  currentBranch: string | null;
-  localBaseRef: string | null;
-  facts?: CheckoutSnapshotFacts | null;
-  context?: CheckoutContext;
-}): Promise<string | null> {
-  const { cwd, facts, context } = input;
-  if (facts?.isGit && facts.base !== undefined) {
-    return facts.base ? workspaceComparisonRef(facts.base) : null;
-  }
-  const base = await resolveWorkspaceBase(cwd, context);
-  return base ? workspaceComparisonRef(base) : null;
 }
 
 function getOrLoadCheckoutShortstat(
@@ -2941,11 +2913,7 @@ function getCheckoutRefMovement(
   const normalizedResolvedBase = facts.resolvedBaseRef
     ? branchNameFromRef(facts.resolvedBaseRef)
     : null;
-  const shortstatRemoteRef =
-    currentBranch && (!normalizedResolvedBase || normalizedResolvedBase === currentBranch)
-      ? `origin/${currentBranch}`
-      : null;
-  const baseMoved = [facts.storedBaseRef, facts.resolvedBaseRef, comparisonRef, shortstatRemoteRef]
+  const baseMoved = [facts.storedBaseRef, facts.resolvedBaseRef, comparisonRef]
     .filter((ref): ref is string => Boolean(ref))
     .map(normalizeRemoteTrackingRef)
     .some((ref) => normalizedMoves.has(ref));

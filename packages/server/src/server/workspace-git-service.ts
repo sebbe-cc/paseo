@@ -1,4 +1,4 @@
-import type { WorkspaceBase } from "../utils/checkout-git.js";
+import type { WorkspaceBase } from "@getpaseo/protocol/messages";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";

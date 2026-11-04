@@ -231,6 +231,7 @@ function setupRemoteTrackingMain(
   execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
   execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
   execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+  execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
   execFileSync("git", ["clone", remoteDir, cloneDir]);
   execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: cloneDir });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: cloneDir });
@@ -856,6 +857,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["clone", remoteDir, cloneDir]);
     execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: cloneDir });
@@ -1104,7 +1106,7 @@ const x = 1;
     expect(status).toMatchObject({
       isGit: true,
       isPaseoOwnedWorktree: true,
-      baseRef: "main",
+      baseRef: "refs/heads/main",
       aheadBehind: { ahead: 0, behind: 0 },
       aheadOfOrigin: null,
     });
@@ -1129,7 +1131,7 @@ const x = 1;
       isGit: true,
       hasRemote: true,
       isPaseoOwnedWorktree: true,
-      baseRef: "main",
+      baseRef: "refs/heads/main",
       aheadBehind: { ahead: 1, behind: 0 },
       aheadOfOrigin: null,
     });
@@ -1330,6 +1332,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["clone", remoteDir, cloneDir]);
     execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: cloneDir });
@@ -1354,7 +1357,7 @@ const x = 1;
     if (!status.isGit) {
       return;
     }
-    expect(status.baseRef).toBe("main");
+    expect(status.baseRef).toBe("refs/remotes/origin/main");
     expect(status.aheadBehind).toEqual({ ahead: 1, behind: 0 });
 
     const shortstat = await getCheckoutShortstat(repoDir);
@@ -1367,6 +1370,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["clone", remoteDir, otherClone]);
     execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: otherClone });
@@ -1505,6 +1509,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["clone", remoteDir, otherClone]);
     execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: otherClone });
@@ -1533,6 +1538,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
     execFileSync("git", ["fetch", "origin"], { cwd: repoDir });
 
     execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
@@ -2002,6 +2008,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     // Advance origin/main without advancing local main.
     const otherClone = join(tempDir, "other-clone");
@@ -2033,11 +2040,12 @@ const x = 1;
     });
   });
 
-  it("merges from the most-ahead base ref (local main when it is ahead)", async () => {
+  it("merges from an explicitly selected local base even when origin is behind", async () => {
     const remoteDir = join(tempDir, "remote.git");
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     // Advance local main without pushing.
     writeFileSync(join(repoDir, "local-only.txt"), "local\n");
@@ -2056,7 +2064,7 @@ const x = 1;
       cwd: repoDir,
     });
 
-    await mergeFromBase(repoDir, { baseRef: "main", requireCleanTarget: true });
+    await mergeFromBase(repoDir, { baseRef: "refs/heads/main", requireCleanTarget: true });
 
     execFileSync("git", ["merge-base", "--is-ancestor", localOnlyCommit, "feature"], {
       cwd: repoDir,
@@ -2104,6 +2112,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     const otherClone = join(tempDir, "other-clone");
     execFileSync("git", ["clone", remoteDir, otherClone]);
@@ -2132,6 +2141,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     const invalidatedCwds: string[] = [];
     const github = createGitHubServiceForStatus(null);
@@ -2149,6 +2159,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     writeFileSync(join(repoDir, "conflict.txt"), "local\n");
     execFileSync("git", ["add", "conflict.txt"], { cwd: repoDir });
@@ -2183,6 +2194,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
     execFileSync("git", ["config", "pull.rebase", "true"], { cwd: repoDir });
 
     writeFileSync(join(repoDir, "conflict.txt"), "local\n");
@@ -2228,6 +2240,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
     writeFileSync(join(repoDir, "push.txt"), "push\n");
@@ -2431,6 +2444,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["checkout", "-b", "feature/local-only"], { cwd: repoDir });
     execFileSync("git", ["checkout", "main"], { cwd: repoDir });
@@ -2497,6 +2511,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     writeFileSync(join(repoDir, "local.txt"), "local\n");
     execFileSync("git", ["add", "local.txt"], { cwd: repoDir });
@@ -2531,6 +2546,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     execFileSync("git", ["checkout", "-b", "feature/local"], { cwd: repoDir });
     execFileSync("git", ["checkout", "main"], { cwd: repoDir });
@@ -2594,6 +2610,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     const otherClone = join(tempDir, "other-clone");
     execFileSync("git", ["clone", remoteDir, otherClone]);
@@ -2631,6 +2648,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
 
     const otherClone = join(tempDir, "other-clone");
     execFileSync("git", ["clone", remoteDir, otherClone]);
@@ -2668,6 +2686,7 @@ const x = 1;
     execFileSync("git", ["init", "--bare", "-b", "main", remoteDir]);
     execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
     execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+    execFileSync("git", ["remote", "set-head", "origin", "main"], { cwd: repoDir });
     execFileSync("git", ["checkout", "-b", "feature/shared"], { cwd: repoDir });
     writeFileSync(join(repoDir, "shared.txt"), "shared\n");
     execFileSync("git", ["add", "shared.txt"], { cwd: repoDir });
@@ -3824,7 +3843,7 @@ const x = 1;
 
     const status = await getCheckoutStatus(worktree.worktreePath, { paseoHome });
     expect(status.isGit).toBe(true);
-    expect(status.baseRef).toBe("develop");
+    expect(status.baseRef).toBe("refs/heads/develop");
     expect(status.aheadBehind?.ahead).toBe(1);
 
     const baseDiff = await getCheckoutDiff(worktree.worktreePath, { mode: "base" }, { paseoHome });
@@ -3892,7 +3911,7 @@ const x = 1;
       cwd: repoDir,
     });
 
-    await expect(resolveRepositoryDefaultBranch(repoDir)).resolves.toBe("main");
+    await expect(resolveRepositoryDefaultBranch(repoDir)).resolves.toBe("refs/remotes/origin/main");
   });
 
   it("merges to stored baseRefName when baseRef is not provided", async () => {
@@ -3939,6 +3958,7 @@ const x = 1;
   });
 
   it("falls back to the repository default branch for base-dependent operations when metadata is missing", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
     const worktree = await createLegacyWorktreeForTest({
       branchName: "feature-default-base",
       cwd: repoDir,
@@ -3964,6 +3984,7 @@ const x = 1;
   });
 
   it("falls back to plain git checkout status when Paseo worktree metadata is missing", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
     const worktree = await createLegacyWorktreeForTest({
       branchName: "feature",
       cwd: repoDir,
@@ -3981,7 +4002,7 @@ const x = 1;
     expect(realpathSync.native(status.repoRoot)).toBe(realpathSync.native(worktree.worktreePath));
     expect(status.isPaseoOwnedWorktree).toBe(true);
     expect(realpathSync.native(status.mainRepoRoot ?? "")).toBe(realpathSync.native(repoDir));
-    expect(status.baseRef).toBe("main");
+    expect(status.baseRef).toBe("refs/remotes/origin/main");
   });
 
   describe("parseWorktreeList", () => {

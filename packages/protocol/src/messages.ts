@@ -4078,6 +4078,8 @@ export const WorkspaceBaseSchema = z.object({
   missing: z.boolean(),
 });
 
+export type WorkspaceBase = z.infer<typeof WorkspaceBaseSchema>;
+
 const WorkspaceGitRuntimePayloadSchema = z
   .object({
     currentBranch: z.string().nullable().optional(),

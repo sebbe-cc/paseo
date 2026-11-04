@@ -1436,7 +1436,7 @@ export const createWorktree = async ({
     return {
       branchName: sourcePlan.branchName,
       worktreePath,
-      comparisonBaseRef: sourcePlan.metadataBaseRef ?? sourcePlan.metadataBaseRefName,
+      comparisonBaseRef: fullBase || selectedBase,
     };
   } catch (error) {
     if (
