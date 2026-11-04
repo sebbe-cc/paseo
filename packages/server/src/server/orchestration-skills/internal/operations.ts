@@ -4,9 +4,12 @@ import path from "node:path";
 import type { AgentSkillSelection } from "@getpaseo/protocol/messages";
 import {
   isLegacyCodexCopy,
+  isSkillTargetReadOnlyError,
   listFilesRecursive,
   readManagedFilesManifest,
   removeSkill,
+  type ReadOnlySkillTarget,
+  SkillTargetReadOnlyError,
   syncSkills,
 } from "./sync.js";
 
@@ -201,13 +204,21 @@ async function applySkills(
     .filter((op) => op.kind === "add" || op.kind === "update")
     .map((op) => op.name);
   if (writes.length > 0) {
+    // Read-only targets (nix-managed catalog) are collected per skill so the
+    // remaining skills still converge; anything else aborts as before.
+    const readOnly: ReadOnlySkillTarget[] = [];
     await syncSkills({
       sourceDir: targets.sourceDir,
       agentsDir: targets.agentsDir,
       claudeDir: targets.claudeDir,
       codexDir: targets.codexDir,
       skillNames: writes,
+      onSkillError: (_skillName, error) => {
+        if (!isSkillTargetReadOnlyError(error)) throw error;
+        readOnly.push(...error.targets);
+      },
     });
+    if (readOnly.length > 0) throw new SkillTargetReadOnlyError(readOnly);
   }
 
   for (const op of status.ops) {
