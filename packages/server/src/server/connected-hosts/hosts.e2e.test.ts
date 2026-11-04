@@ -1,4 +1,5 @@
 import { z } from "zod";
+import pino from "pino";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -9,6 +10,47 @@ import { createTestPaseoDaemon, type TestPaseoDaemon } from "../test-utils/paseo
 import type { HostDirectory } from "@getpaseo/protocol/hosts";
 
 const cleanup: (() => Promise<unknown>)[] = [];
+
+// These asynchronous failures otherwise disappear into the fixture's silent logger.
+// Only completion errors and filesystem metadata belong in CI, never prompts or credentials.
+function completionLogger() {
+  return pino(
+    {
+      level: "warn",
+      serializers: {
+        err: (error) => ({
+          type: error.name,
+          code: error.code,
+          syscall: error.syscall,
+          path: typeof error.path === "string" ? basename(error.path) : undefined,
+          dest: typeof error.dest === "string" ? basename(error.dest) : undefined,
+        }),
+      },
+    },
+    {
+      write(line) {
+        const record = JSON.parse(line);
+        if (
+          record.context !== "Failed to dispatch queued agent message" &&
+          ![
+            "Agent message batch dispatch failed",
+            "Retrying finish subscription",
+            "Finish subscription failed",
+          ].includes(record.msg)
+        )
+          return;
+        console.error("Completion diagnostic", {
+          time: record.time,
+          message: record.msg,
+          agentId: record.agentId,
+          messageIds: record.messageIds,
+          subscription: record.subscription,
+          error: record.err,
+        });
+      },
+    },
+  );
+}
 afterEach(async () => {
   for (const close of cleanup.splice(0).toReversed()) await close();
 });
@@ -1502,7 +1544,7 @@ test(
 );
 
 test(
-  "remote agent reports, local CLI sends and automatic completion share the recipient batch",
+  "remote agent reports, local CLI sends and automatic completion reach the same recipient",
   { timeout: 30000 },
   async () => {
     const parentPrompts: string[] = [];
@@ -1512,6 +1554,7 @@ test(
       finishChild.resolve();
     });
     const a = await daemon({
+      logger: completionLogger(),
       agentClients: createTestAgentClients({
         onStartTurn: (prompt, config) => {
           if (config.title === "Batch parent")
@@ -1590,7 +1633,10 @@ test(
     });
     expect(report.isError).not.toBe(true);
     expect(report.structuredContent).toMatchObject({ deliveryStatus: "queued", serverId: aId });
-    expect(parentPrompts).toEqual([]);
+    // A CLI process can take longer than the two-second quiet window to start.
+    // Exercise each delivery across windows; delivery.test.ts owns batching with a clock.
+    await expect.poll(() => parentPrompts, { timeout: 10000 }).toHaveLength(1);
+    expect(parentPrompts[0]).toContain("REMOTE_REPORT &lt;ready&gt;");
 
     const cli = await promisify(execFile)(
       process.execPath,
@@ -1613,7 +1659,8 @@ test(
       },
     );
     expect(JSON.parse(cli.stdout)).toMatchObject({ status: "queued" });
-    expect(parentPrompts).toEqual([]);
+    await expect.poll(() => parentPrompts, { timeout: 10000 }).toHaveLength(2);
+    expect(parentPrompts[1]).toContain("LOCAL_CLI_REPORT");
     const receiptStates = async () => {
       const directory = join(a.paseoHome, "agent-requests");
       const receipts = await Promise.all(
@@ -1628,14 +1675,16 @@ test(
         .map((receipt) => receipt.state)
         .sort();
     };
-    expect(await receiptStates()).toEqual(["pending", "pending"]);
     finishChild.resolve();
-    await expect.poll(() => parentPrompts, { timeout: 10000 }).toHaveLength(1);
-    expect(parentPrompts[0]).toContain("REMOTE_REPORT &lt;ready&gt;");
-    expect(parentPrompts[0]).toContain("LOCAL_CLI_REPORT");
-    expect(parentPrompts[0]).toContain('event="finished"');
-    expect(parentPrompts[0]).toContain(`source-agent-id="${child.id}"`);
-    await expect.poll(receiptStates, { timeout: 10000 }).toEqual(["completed", "completed"]);
+    await expect.poll(() => parentPrompts, { timeout: 10000 }).toHaveLength(3);
+    expect(parentPrompts[2]).toContain('event="finished"');
+    expect(parentPrompts[2]).toContain(`source-agent-id="${child.id}"`);
+    await expect
+      .poll(receiptStates, {
+        timeout: 10000,
+        message: "Parent accepted the batch; waiting for durable receipt commits",
+      })
+      .toEqual(["completed", "completed"]);
     const timeline = await origin.client.fetchAgentTimeline(parent.id);
     const messages = timeline.entries.flatMap((row) =>
       row.item.type === "tool_call" && row.item.agentMessage ? [row.item.agentMessage] : [],
@@ -1822,6 +1871,7 @@ test(
     });
     const a = await daemon({
       mcpEnabled: true,
+      logger: completionLogger(),
       agentClients: createTestAgentClients({
         onStartTurn: (prompt) => {
           if (String(prompt).includes('kind="agent-notification"'))
@@ -1883,8 +1933,14 @@ test(
     await expect.poll(() => parentPrompts, { timeout: 10000 }).toHaveLength(2);
     expect(parentPrompts[1]).toContain('event="finished"');
     await expect
-      .poll(async () =>
-        JSON.parse(await readFile(join(a.paseoHome, "finish-subscriptions.json"), "utf8")),
+      // Provider start precedes dispatch acknowledgment and the durable removal commit.
+      .poll(
+        async () =>
+          JSON.parse(await readFile(join(a.paseoHome, "finish-subscriptions.json"), "utf8")),
+        {
+          timeout: 10000,
+          message: "Parent accepted completion; waiting for durable intent removal",
+        },
       )
       .toEqual([]);
   },
@@ -1957,6 +2013,7 @@ test.each(["removed", "disabled"] as const)(
     cleanup.push(async () => finish.resolve());
     const a = await daemon({
       mcpEnabled: true,
+      logger: completionLogger(),
       agentClients: createTestAgentClients({
         onStartTurn: (prompt) => {
           if (String(prompt).includes('kind="agent-notification"'))
@@ -2015,8 +2072,10 @@ test.each(["removed", "disabled"] as const)(
     expect(parentPrompts[0]).toContain("is unknown.");
     expect(parentPrompts[0]).not.toContain("finished.");
     await expect
-      .poll(async () =>
-        JSON.parse(await readFile(join(a.paseoHome, "finish-subscriptions.json"), "utf8")),
+      .poll(
+        async () =>
+          JSON.parse(await readFile(join(a.paseoHome, "finish-subscriptions.json"), "utf8")),
+        { timeout: 10000 },
       )
       .toEqual([]);
     if (availability === "removed")
@@ -2032,3 +2091,80 @@ test.each(["removed", "disabled"] as const)(
     ).toEqual([]);
   },
 );
+
+test(
+  "a 50 MiB timeline crosses a routed host without dropping content or the route",
+  { timeout: 30000 },
+  async () => {
+    const b = await daemon();
+    const a = await daemon();
+    const destination = await api(b);
+    const origin = await api(a);
+    const workspace = await destination.paseo.workspaces.create({
+      source: { kind: "directory", path: b.staticDir },
+    });
+    const agent = await workspace.agents.create({
+      config: { provider: "claude/claude-test", modeId: "full-access" },
+      title: "Large history",
+    });
+    // Keep each row below the established item budget; exercise transport size across rows.
+    const text = "x".repeat(240 * 1024);
+    const rowCount = 220;
+    for (let index = 0; index < rowCount; index++) {
+      await b.daemon.agentManager.appendTimelineItem(agent.id, { type: "user_message", text });
+    }
+    await origin.paseo.hosts.add({ connection: `127.0.0.1:${b.port}` });
+    const serverId = (await online(origin.paseo)).hosts[0]!.serverId!;
+    const remote = await origin.paseo.hosts.client(serverId);
+    const response = await remote.agents.ref(agent.id).timeline.refetch({ limit: 0 });
+    const messages = response.entries.flatMap((row) =>
+      row.item.type === "user_message" ? [row.item.text] : [],
+    );
+    expect(messages).toHaveLength(rowCount);
+    expect(messages.every((message) => message === text)).toBe(true);
+    expect(
+      messages.reduce((bytes, message) => bytes + Buffer.byteLength(message), 0),
+    ).toBeGreaterThan(50 * 1024 * 1024);
+    expect((await remote.workspaces.list()).entries).toHaveLength(1);
+    await remote.dispose();
+  },
+);
+
+test("a pre-write host budget rejection leaves sibling routes connected", async () => {
+  const { HostTransportBudget } = await import("@getpaseo/client/node");
+  const b = await daemon();
+  const origin = createHostClient(
+    `127.0.0.1:${b.port}`,
+    { clientId: "budget-origin", reconnect: { enabled: false } },
+    new HostTransportBudget(1024 * 1024),
+  );
+  cleanup.push(() => origin.close());
+  await origin.connect();
+  const serverId = origin.getLastServerInfoMessage()!.serverId;
+  const routeIds = [
+    await origin.openHostLink("budget-first"),
+    await origin.openHostLink("budget-sibling"),
+  ];
+  const peers = routeIds.map(
+    (id, index) =>
+      new DaemonClient({
+        url: "ws://host-link/ws",
+        clientId: `budget-child-${index}`,
+        reconnect: { enabled: false },
+        transportFactory: createHostChannelTransport(origin, serverId, `budget-${index}`, id),
+      }),
+  );
+  for (const peer of peers) {
+    cleanup.push(() => peer.close());
+    await peer.connect();
+  }
+  await expect(async () =>
+    origin.sendHostFrame(routeIds[0]!, new Uint8Array(2 * 1024 * 1024)),
+  ).rejects.toMatchObject({ code: "resource_limit" });
+  await peers[1]!.ping({ timeoutMs: 2000 });
+  expect([origin.isConnected, ...peers.map((peer) => peer.isConnected)]).toEqual([
+    true,
+    true,
+    true,
+  ]);
+}, 30000);

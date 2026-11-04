@@ -36,7 +36,11 @@ export interface MarkdownImageContext {
   filePath?: string;
 }
 
-export function useMarkdownSource(text: string, context: MarkdownImageContext) {
+export function useMarkdownSource(
+  text: string,
+  context: MarkdownImageContext,
+  commandNames?: ReadonlySet<string>,
+) {
   const occurrenceKey = useId();
   const workspaceRoot = context.workspaceRoot;
   const batchCandidates = useMemo(() => {
@@ -60,13 +64,14 @@ export function useMarkdownSource(text: string, context: MarkdownImageContext) {
     () =>
       prepareMarkdownSource(text, workspaceRoot, {
         supportsSvg: isWeb,
+        commandNames,
         missingCandidatePaths: fileBatch.missing,
         // Native has no custom link renderer, so missing tokens are
         // rewritten to plain code at the source. Web keeps the links so
         // its renderer can show a tooltip with the searched roots.
         deLinkMissing: !isWeb && fileBatch.supported,
       }),
-    [text, workspaceRoot, fileBatch],
+    [text, workspaceRoot, fileBatch, commandNames],
   );
   const sources = [...new Set(prepared.images.map((image) => image.source))];
   const acquisitions = sources.map((source) => {
