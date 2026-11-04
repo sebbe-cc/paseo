@@ -103,6 +103,7 @@ function initRepo(): { tempDir: string; repoDir: string } {
   execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
   execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoDir });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+  execFileSync("git", ["config", "tag.gpgSign", "false"], { cwd: repoDir });
   writeFileSync(join(repoDir, "file.txt"), "hello\n");
   execFileSync("git", ["add", "."], { cwd: repoDir });
   execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "initial"], { cwd: repoDir });
