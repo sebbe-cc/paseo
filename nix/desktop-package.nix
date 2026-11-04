@@ -105,6 +105,9 @@ buildNpmPackage {
 
     # Native deps (terminal emulation; libuv-linked on Linux)
     npm rebuild node-pty
+    # Device broker (node-hid ships bundled N-API prebuilds, so this is an
+    # offline copy, not a download; the .node must exist outside the asar)
+    npm rebuild node-hid
 
     # Server workspaces (highlight + relay + protocol + client + server + cli)
     npm run build:server
