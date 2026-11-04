@@ -937,6 +937,7 @@ export const ko: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "기준 {{ref}}이(가) 더 이상 존재하지 않습니다. 저장된 분기점과 비교합니다.",
         openChangesTab: "변경사항 탭 열기",
         openDiffTab: "Diff 탭 열기",
         closeChangesTab: "변경사항 탭 닫기",
