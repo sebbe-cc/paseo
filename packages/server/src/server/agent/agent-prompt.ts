@@ -108,7 +108,7 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
-  const snapshot = agentManager.getAgent(agentId);
+  const metadata = agentRunMetadata(agentId, agentManager.getAgent(agentId));
   logger.trace(
     {
       agentId,
@@ -141,6 +141,14 @@ export async function startAgentRun(
   }
 }
 
+function agentRunMetadata(agentId: string, snapshot: ReturnType<AgentRunController["getAgent"]>) {
+  return {
+    agentId,
+    provider: snapshot?.provider,
+    providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+  };
+}
+
 async function startAgentRunInner(
   agentManager: AgentRunController,
   agentId: string,
@@ -156,9 +164,7 @@ async function startAgentRunInner(
     const queued = await agentManager.queueAgentPrompt(agentId, prompt, options?.runOptions);
     logger.trace(
       {
-        agentId,
-        provider: snapshot?.provider,
-        providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+        ...metadata,
         queuedTurnId: queued.turnId,
       },
       "agent.session.queue.request",
@@ -176,9 +182,7 @@ async function startAgentRunInner(
     : await startOrReplaceRun(agentManager, agentId, prompt, options);
   logger.trace(
     {
-      agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+      ...metadata,
       shouldReplace: replaced,
     },
     "agent.session.start_stream.iterator_returned",
@@ -200,18 +204,14 @@ async function startAgentRunInner(
       }
       logger.trace(
         {
-          agentId,
-          provider: snapshot?.provider,
-          providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+          ...metadata,
         },
         "agent.session.iterator.drained",
       );
     } catch (error) {
       logger.trace(
         {
-          agentId,
-          provider: snapshot?.provider,
-          providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+          ...metadata,
           err: error,
         },
         "agent.session.iterator.error",
