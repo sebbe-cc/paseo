@@ -12874,7 +12874,7 @@ test("stale plugin tool refresh keeps old tools when the hooks fail mid-reload",
     expect((liveAfter as unknown as { session: unknown }).session).toBe(sessionBefore);
     expect(client.resumeOverrides).toHaveLength(0);
   } finally {
-    if (agentId) await manager.closeAgent(agent.id).catch(() => undefined);
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -12931,7 +12931,7 @@ test("stale plugin refresh does not acknowledge invalidations arriving mid-refre
     // invalidation lands mid-refresh with newer tools.
     manager.invalidatePluginSessions();
     const pending = manager.reloadStalePluginSession(agent.id);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await vi.waitFor(() => expect(hookCalls).toBe(2));
     currentTools = [toolV2];
     manager.invalidatePluginSessions();
     currentTools = [toolV3];
@@ -12940,11 +12940,12 @@ test("stale plugin refresh does not acknowledge invalidations arriving mid-refre
 
     // The refresh recorded its own generation, so the concurrent invalidation
     // stays stale and the next turn refreshes again with the newest tools.
+    await manager.reloadStalePluginSession(agent.id);
     expect(manager.getPluginTools(agent.id).map((tool) => tool.description)).toEqual(["v3"]);
     expect(hookCalls).toBe(3);
     expect(client.resumeOverrides).toHaveLength(0);
   } finally {
-    if (agentId) await manager.closeAgent(agent.id).catch(() => undefined);
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
   }
 });
