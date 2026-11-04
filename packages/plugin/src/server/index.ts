@@ -5,12 +5,14 @@ export type {
   UsageBalance,
   UsageDetail,
 } from "./usage.js";
+export type {
   PluginHandlerContext,
   PluginServerContext,
   PluginServerContribution,
   PluginSettings,
   PluginSettingsState,
 } from "./contracts.js";
+export type {
   PluginHooks,
   PluginHookEvents,
   PluginHookRequests,
@@ -30,23 +32,16 @@ export type {
 
 export { spawnProcess, execCommand, terminateProcess } from "./process.js";
 
-export { VoiceProviderEventSchema, VoiceProviderCommandSchema } from "./voice.js";
-  VoiceProviderEvent,
-  VoiceProviderRegistration,
-  VoiceProviderSession,
-  VoiceProviderStartContext,
-  VoiceProviderSelection,
-  PluginVoiceHost,
-  VoiceProviderCommand,
-} from "./voice.js";
-
-export { DictationProviderCommandSchema, DictationCommitResultSchema } from "./dictation.js";
-  DictationProviderCommand,
-  DictationProviderRegistration,
-  DictationProviderSelection,
-  DictationProviderSession,
-  DictationProviderStartContext,
-  PluginDictationHost,
-} from "./dictation.js";
 export { defineAgentTool } from "./agent-tools.js";
 export type { AgentToolDefinition, AgentToolResult, AgentToolContext } from "./agent-tools.js";
+
+export { VoiceProviderEventSchema, VoiceProviderCommandSchema } from "./voice.js";
+export type {
+  VoiceProviderEvent, VoiceProviderRegistration, VoiceProviderSession,
+  VoiceProviderStartContext, VoiceProviderSelection, PluginVoiceHost, VoiceProviderCommand,
+} from "./voice.js";
+export { DictationProviderCommandSchema, DictationCommitResultSchema } from "./dictation.js";
+export type {
+  DictationProviderCommand, DictationProviderRegistration, DictationProviderSelection,
+  DictationProviderSession, DictationProviderStartContext, PluginDictationHost,
+} from "./dictation.js";
