@@ -913,9 +913,52 @@ export class AgentManager {
     await this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, async () => {
         if (!this.needsPluginSessionReload(agentId)) return;
-        await this.reloadAgentSessionInternal(agentId);
+        await this.refreshStalePluginTools(agentId);
       }),
     );
+  }
+
+  /**
+   * Re-resolve plugin agent tools without touching the live provider session.
+   *
+   * A plugin reload (or any change to `agent.open.before` hooks) must not
+   * restart running agent sessions: closing and resuming the provider session
+   * drops live turn state and breaks attached surfaces such as voice mode.
+   * Plugin agent tools are resolved per MCP request from {@link getPluginTools},
+   * so refreshing the attached tool list in place is enough — the next turn
+   * picks up the new tools while the live session keeps running. MCP server and
+   * env contributions still only take effect on the next explicit session open.
+   */
+  private async refreshStalePluginTools(agentId: string): Promise<void> {
+    const agent = this.getAgent(agentId);
+    if (agent === null || agent.lifecycle === "closed" || !this.pluginLifecycle) {
+      this.sessionOpenGenerations.set(agentId, this.sessionOpenGeneration);
+      return;
+    }
+    try {
+      const transformed = await this.pluginLifecycle.before("agent.open.before", {
+        agentId,
+        provider: agent.provider,
+        cwd: agent.config.cwd,
+        workspaceId: agent.workspaceId ?? null,
+        reason: "refresh",
+        purpose: "interactive",
+        title: agent.config.title ?? null,
+        labels: { ...agent.labels },
+        tools: [],
+        mcpServers: {},
+        env: { ...agent.launchEnv },
+      });
+      this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
+      this.sessionOpenGenerations.set(agentId, this.sessionOpenGeneration);
+    } catch (error) {
+      // The plugin may be mid-reload. Keep the previous tool list so the turn
+      // can still run, and stay stale so the next turn retries the refresh.
+      this.logger.warn(
+        { err: error, agentId },
+        "Plugin tool refresh failed; keeping previous tools until the next turn",
+      );
+    }
   }
 
   private needsPluginSessionReload(agentId: string): boolean {

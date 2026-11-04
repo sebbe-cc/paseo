@@ -32,6 +32,16 @@ const MIN_STREAMING_SEGMENT_BYTES = Math.round(
 );
 const AgentIdSchema = z.guid();
 
+/**
+ * The target agent was closed or resumed concurrently — for example by a
+ * plugin tool refresh or an explicit reload racing voice mode — so the live
+ * lookup misses it. These errors mean "re-resolve and retry", not failure.
+ */
+function isUnknownAgentError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unknown agent|agent .* not found|no managed session/i.test(message);
+}
+
 type ProcessingPhase = "idle" | "transcribing";
 
 interface VoiceModeBaseConfig {
@@ -513,7 +523,7 @@ export class VoiceSession {
         { agentId, elapsedMs: Date.now() - startedAt },
         "enableVoiceModeForAgent.reloadAgentSession.start",
       );
-      const refreshed = await this.host.reloadAgentSession(agentId, refreshOverrides);
+      const refreshed = await this.reloadVoiceAgentSessionWithRetry(agentId, refreshOverrides);
       this.sessionLogger.info(
         { agentId, refreshedAgentId: refreshed.id, elapsedMs: Date.now() - startedAt },
         "enableVoiceModeForAgent.reloadAgentSession.done",
@@ -524,6 +534,30 @@ export class VoiceSession {
       this.unregisterVoiceCallerContext?.(agentId);
       this.voiceModeBaseConfig = null;
       throw error;
+    }
+  }
+
+  /**
+   * Reload the voice target agent, surviving a concurrent close/resume. When
+   * the agent disappears between the load and the reload — a plugin tool
+   * refresh or an explicit agent reload racing this enable — re-resolve it
+   * from storage and retry once instead of failing with Unknown agent.
+   */
+  private async reloadVoiceAgentSessionWithRetry(
+    agentId: string,
+    overrides: Partial<AgentSessionConfig>,
+  ): Promise<ManagedAgent> {
+    try {
+      return await this.host.reloadAgentSession(agentId, overrides);
+    } catch (error) {
+      if (!isUnknownAgentError(error)) throw error;
+      this.sessionLogger.info(
+        { agentId },
+        "enableVoiceModeForAgent: agent went missing during enable; re-resolving and retrying",
+      );
+      await this.host.loadAgent(agentId);
+      if (this.closed) throw new Error("Voice source is closed", { cause: error });
+      return await this.host.reloadAgentSession(agentId, overrides);
     }
   }
 
@@ -1108,18 +1142,28 @@ export class VoiceSession {
       try {
         await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
       } catch (error) {
-        const message = `Voice interruption failed: ${getErrorMessage(error)}`;
-        this.emit({
-          type: "activity_log",
-          payload: {
-            id: uuidv4(),
-            timestamp: new Date(),
-            type: "error",
-            content: message,
-            metadata: { voiceAbortFailed: true },
-          },
-        });
-        throw error;
+        if (isUnknownAgentError(error)) {
+          // The target agent was reloaded or resumed concurrently and is not
+          // live right now. There is nothing to interrupt; the next transcript
+          // re-resolves the agent instead of failing here.
+          this.sessionLogger.info(
+            { err: error, agentId: this.voiceModeAgentId },
+            "Voice abort: target agent is not live; skipping interruption",
+          );
+        } else {
+          const message = `Voice interruption failed: ${getErrorMessage(error)}`;
+          this.emit({
+            type: "activity_log",
+            payload: {
+              id: uuidv4(),
+              timestamp: new Date(),
+              type: "error",
+              content: message,
+              metadata: { voiceAbortFailed: true },
+            },
+          });
+          throw error;
+        }
       }
     }
 
