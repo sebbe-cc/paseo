@@ -5,6 +5,7 @@ import type {
   SidebarWorkspaceEntry,
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
+import { mergeProjectContainerCatalogs } from "@/project-containers";
 import { buildSidebarProjection } from "./sidebar-projection";
 
 function makeWorkspace(
@@ -174,5 +175,31 @@ describe("buildSidebarProjection", () => {
     expect(projection.shortcutModel.shortcutTargets).toEqual([
       { serverId: "srv", workspaceId: "unpinned" },
     ]);
+  });
+  it("numbers workspaces in project-container order and skips collapsed containers", () => {
+    const input = twoProjectInput("project");
+    const now = "2026-09-25T00:00:00.000Z";
+    const container = { name: "Heads", createdAt: now, updatedAt: now };
+    const containers = mergeProjectContainerCatalogs({
+      catalogs: [
+        {
+          serverId: "srv",
+          containers: [{ ...container, id: "pcnt_1", projectIds: ["other-project"] }],
+        },
+      ],
+    });
+    const expanded = buildSidebarProjection({
+      ...input,
+      projectContainers: { containers, collapsedContainerKeys: new Set() },
+    });
+    expect(expanded.shortcutModel.shortcutTargets.map((t) => t.workspaceId)).toEqual([
+      "second",
+      "first",
+    ]);
+    const collapsed = buildSidebarProjection({
+      ...input,
+      projectContainers: { containers, collapsedContainerKeys: new Set(["heads"]) },
+    });
+    expect(collapsed.shortcutModel.shortcutTargets.map((t) => t.workspaceId)).toEqual(["first"]);
   });
 });
