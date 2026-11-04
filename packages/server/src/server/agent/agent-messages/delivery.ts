@@ -12,8 +12,10 @@ interface Message {
   sessionMode?: string;
   unarchive?: boolean;
   clearPendingPermissions?: boolean;
-  // Wide on purpose: "queue" (pa-r6a9i) flows from session.ts through this
-  // queue into sendPreparedPromptToAgent, which takes the full
+  // Wide on purpose: topic-introduced behaviors (e.g. voice's "steer_only" and
+  // "queue" from pa-r6a9i, both in the protocol ActiveTurnBehaviorSchema) flow
+  // from session.ts through this queue into sendPreparedPromptToAgent, which
+  // already takes the full
   // ActiveTurnBehavior. Grouping below keeps distinct values in separate
   // batches by equality, so no coercion is needed here.
   activeTurnBehavior?: ActiveTurnBehavior;
