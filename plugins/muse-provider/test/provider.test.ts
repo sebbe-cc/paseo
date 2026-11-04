@@ -1207,6 +1207,41 @@ test("session.opened advertises session.subsession so the daemon accepts child s
   await h.wait((e) => e.type === "session.opened" && e.sessionId === "fixture-child");
 });
 
+test("three parallel workflow children project as three subagents sharing one turn", async () => {
+  const h = await harness("subagent-3", { MUSE_TEST_CHILD: "workflow", MUSE_TEST_CHILD_SEQ: "1" });
+  await h.open();
+  await h.prompt();
+  for (const id of ["fixture-child-1", "fixture-child-2", "fixture-child-3"]) {
+    expect(await h.wait((e) => e.type === "session.opened" && e.sessionId === id)).toMatchObject({
+      parentSessionId: "paseo-session",
+      restoration: "parent",
+    });
+  }
+  await h.wait((e) => e.type === "session.turn" && e.state === "completed");
+  const opened = h.events.filter(
+    (e) => e.type === "session.opened" && e.parentSessionId === "paseo-session",
+  );
+  expect(opened.map((e) => e.sessionId).sort()).toEqual([
+    "fixture-child-1",
+    "fixture-child-2",
+    "fixture-child-3",
+  ]);
+  for (const id of ["fixture-child-1", "fixture-child-2", "fixture-child-3"]) {
+    expect(
+      h.events.filter(
+        (e) =>
+          e.type === "timeline.item" && e.sessionId === id && e.item.type === "assistant_message",
+      ),
+    ).toHaveLength(1);
+  }
+  expect(
+    (await h.recorded())
+      .filter((f) => f.method === "session/read")
+      .map((f) => f.params.sessionId)
+      .sort(),
+  ).toEqual(["fixture-child-1", "fixture-child-2", "fixture-child-3"]);
+});
+
 test("without session.subsession the parent gets a timeline error instead of a projected child", async () => {
   const withoutSubsession = PROVIDER_CAPABILITIES.filter(
     (capability) => capability !== "session.subsession",
