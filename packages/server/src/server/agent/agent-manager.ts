@@ -770,6 +770,17 @@ function resolveCompactThreshold(configured: number | undefined): number {
   return configured ?? (Number(process.env.PASEO_COMPACT_THRESHOLD) || 0.8);
 }
 
+interface SessionOpening {
+      reason: PluginSessionOpenRequest["reason"];
+      purpose: PluginSessionOpenRequest["purpose"];
+      workspaceId?: string | null;
+      labels?: Record<string, string>;
+      initialPrompt?: string | null;
+      systemPrompt?: string | null;
+      daemonAppendSystemPrompt?: string | null;
+      title?: string | null;
+    }
+
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly turnNumbers = new Map<string, number>();
@@ -5675,23 +5686,38 @@ export class AgentManager {
     }
   }
 
+  private createSessionOpenRequest(
+    agentId: string,
+    client: AgentClient,
+    cwd: string,
+    env: Record<string, string> | undefined,
+    opening: SessionOpening | undefined,
+  ): PluginSessionOpenRequest {
+    return {
+        agentId,
+        provider: client.provider,
+        cwd,
+        workspaceId: opening?.workspaceId ?? null,
+        reason: opening?.reason ?? "resume",
+        purpose: opening?.purpose ?? "interactive",
+        env: { ...env },
+        labels: { ...opening?.labels },
+        initialPrompt: opening?.initialPrompt ?? this.readInitialPromptText(agentId),
+        systemPrompt: opening?.systemPrompt ?? null,
+        daemonAppendSystemPrompt: opening?.daemonAppendSystemPrompt ?? null,
+        title: opening?.title ?? null,
+        tools: [],
+        mcpServers: {},
+      };
+  }
+
   private async buildLaunchContext(
     agentId: string,
     client: AgentClient,
     cwd: string,
     paseoToolPolicy: ProviderPaseoToolsPolicy | undefined,
     env?: Record<string, string>,
-    opening?: {
-      reason: PluginSessionOpenRequest["reason"];
-      purpose: PluginSessionOpenRequest["purpose"];
-      workspaceId?: string | null;
-      labels?: Record<string, string>;
-      initialPrompt?: string | null;
-      systemPrompt?: string | null;
-      daemonAppendSystemPrompt?: string | null;
-      title?: string | null;
-      labels?: Record<string, string>;
-    },
+    opening?: SessionOpening,
   ): Promise<{
     context: AgentLaunchContext;
     instructions: { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null;
@@ -5706,23 +5732,7 @@ export class AgentManager {
     let mcpServers: AgentSessionConfig["mcpServers"];
     let mcpServerOwners: Record<string, string> | undefined;
     if (this.pluginLifecycle) {
-      const purpose = opening?.purpose ?? "interactive";
-      const request: PluginSessionOpenRequest = {
-        agentId,
-        provider: client.provider,
-        cwd,
-        workspaceId: opening?.workspaceId ?? null,
-        reason: opening?.reason ?? "resume",
-        purpose,
-        env: { ...env },
-        labels: { ...opening?.labels },
-        initialPrompt: opening?.initialPrompt ?? this.readInitialPromptText(agentId),
-        systemPrompt: opening?.systemPrompt ?? null,
-        daemonAppendSystemPrompt: opening?.daemonAppendSystemPrompt ?? null,
-        title: opening?.title ?? null,
-        tools: [],
-        mcpServers: {},
-      };
+      const request = this.createSessionOpenRequest(agentId, client, cwd, env, opening);
       const transformed = await this.pluginLifecycle.before("agent.open.before", request);
       env = transformed.env;
       instructions = AgentManager.diffSessionOpenInstructions(request, transformed);
