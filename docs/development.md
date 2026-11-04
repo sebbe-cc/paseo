@@ -29,6 +29,13 @@ the titlebar row. Production builds leave the variable unset and show no label.
 
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
+When launching Electron on a Mac over SSH for microphone testing, use macOS
+LaunchServices: `open -n -a /path/to/Electron.app --env NAME=value --args /path/to/packages/desktop`.
+Set a separate `PASEO_HOME` and `PASEO_ELECTRON_USER_DATA_DIR`, and point
+`EXPO_DEV_URL` at the test renderer. Directly spawning the executable from SSH
+can attribute microphone access to `sshd-keygen-wrapper`; macOS denies it without
+a prompt while Chromium reports permission granted and sends all-zero PCM.
+
 ## Nix desktop package
 
 The flake exposes `packages.<system>.desktop` on Linux and macOS:

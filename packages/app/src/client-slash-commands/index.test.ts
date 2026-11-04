@@ -66,6 +66,7 @@ describe("resolveClientSlashCommand", () => {
         command.execution,
       ]),
     ).toEqual([
+      ["voice-target", [], "immediate"],
       ["exit", ["quit", "q"], "immediate"],
       ["clear", ["new"], "immediate"],
     ]);
@@ -136,4 +137,13 @@ describe("buildDraftAgentSetup", () => {
       thinkingOptionId: "runtime-thinking",
     });
   });
+});
+
+it("resolves /voice-target as a local immediate action rather than an agent prompt", () => {
+  expect(resolveClientSlashCommand({ text: "/voice-target", hasAttachments: false })).toMatchObject(
+    { kind: "make-voice-target", execution: "immediate" },
+  );
+  expect(
+    resolveClientSlashCommand({ text: "/voice-target other", hasAttachments: false }),
+  ).toBeNull();
 });
