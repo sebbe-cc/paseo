@@ -1845,6 +1845,11 @@ async function resolveCheckoutBranchBaseRef(cwd: string, branchName: string): Pr
   if (defaultBranch) {
     return defaultBranch;
   }
+  // COMPAT(worktreeCreationDefault): added in v0.15.0; remove after 2027-05-04 when creation supplies its own qualified base.
+  // Preserve local-only creation policy here; comparison readers use only the persisted ref.
+  for (const localDefault of ["main", "master"]) {
+    if (await localBranchExists(cwd, localDefault)) return `refs/heads/${localDefault}`;
+  }
   const currentBranch = await getCurrentBranch(cwd);
   return currentBranch && currentBranch !== branchName ? currentBranch : branchName;
 }
