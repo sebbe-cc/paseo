@@ -276,7 +276,7 @@ function pickObservedAgeText(
   snapshotObservedAt: number | null,
   entry: UsageReportEntry,
   available: boolean,
-  snapshot: UsageReportEntry["lastSuccessful"],
+  snapshot: UsageReportEntry["lastSuccessful"] | null,
 ): string | null {
   // Source-owned observation time is the truth for freshness displays;
   // poll/attempt time is only a fallback for sources that omit it.
@@ -340,7 +340,7 @@ export function resolveUsageReport(entry: UsageReportEntry, t: TFunction) {
  */
 function resolveObservedAt(
   liveObservedAt: number | null,
-  snapshot: UsageReportEntry["lastSuccessful"],
+  snapshot: UsageReportEntry["lastSuccessful"] | null,
 ): string | null {
   if (liveObservedAt !== null) return new Date(liveObservedAt).toISOString();
   if (!snapshot) return null;
