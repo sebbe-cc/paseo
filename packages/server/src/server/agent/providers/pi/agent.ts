@@ -64,7 +64,11 @@ import {
   streamPiHistory,
   type PiCapturedUserMessageEntry,
 } from "./history-mapper.js";
-import { materializeProviderImage } from "../provider-image-output.js";
+import {
+  materializeProviderImage,
+  renderProviderImageOutputAsAssistantMarkdown,
+  type ProviderImageOutput,
+} from "../provider-image-output.js";
 import { PiCliRuntime } from "./cli-runtime.js";
 import {
   createPiExtensionHost,
@@ -89,6 +93,7 @@ import {
   mapToolDetail,
   parseToolArgs,
   parseToolResult,
+  splitPiToolResultImages,
   type PiToolResult,
   type PiTrackedToolCall,
 } from "./tool-call-mapper.js";
@@ -368,9 +373,9 @@ function piModelSupportsImageInput(model: PiModel | null | undefined): boolean {
   return model?.input?.includes("image") === true;
 }
 
-function renderTextOnlyImageHint(image: { data: string; mimeType: string }): string {
+async function renderTextOnlyImageHint(image: { data: string; mimeType: string }): Promise<string> {
   try {
-    const materialized = materializeProviderImage({
+    const materialized = await materializeProviderImage({
       data: image.data,
       mimeType: image.mimeType,
     });
@@ -380,10 +385,10 @@ function renderTextOnlyImageHint(image: { data: string; mimeType: string }): str
   }
 }
 
-function convertPromptInput(
+async function convertPromptInput(
   prompt: AgentPromptInput,
   options: { model: PiModel | null | undefined },
-): PiPromptPayload {
+): Promise<PiPromptPayload> {
   if (typeof prompt === "string") {
     return { text: prompt };
   }
@@ -406,7 +411,7 @@ function convertPromptInput(
           mimeType: block.mimeType,
         });
       } else {
-        textParts.push(renderTextOnlyImageHint(block));
+        textParts.push(await renderTextOnlyImageHint(block));
       }
       continue;
     }
@@ -1194,6 +1199,7 @@ export class PiRpcAgentSession implements AgentSession {
   private readonly contextUserEntries: PiCapturedEntry[] = [];
   private readonly treeUserEntriesById = new Map<string, PiCapturedEntry>();
   private readonly pendingExtensionResults = new Map<string, PendingExtensionResult>();
+  private compactionPromise: Promise<void> | null = null;
   private outOfBandCompactionEmit: ((event: AgentStreamEvent) => void) | null = null;
   private outOfBandCompactionStarted = false;
   private outOfBandCompactionCompleted = false;
@@ -1205,6 +1211,7 @@ export class PiRpcAgentSession implements AgentSession {
   private closed = false;
   private readonly closeController = new AbortController();
   private readonly pendingExtensionHydrations = new Set<Promise<void>>();
+  private pendingOutput: Promise<void> | null = null;
   // Pi publishes the terminal before acknowledging abort. Autonomous runs have no
   // turn ID; retain their errors too until the cancellation request settles.
   private interruptingTurn: { turnId: string | undefined; error: string | null } | null = null;
@@ -1284,7 +1291,6 @@ export class PiRpcAgentSession implements AgentSession {
       throw new Error("A Pi turn is already active");
     }
 
-    const payload = convertPromptInput(prompt, { model: this.state.model });
     const turnId = randomUUID();
     this.activeTurnId = turnId;
     this.usagePoller.startTurn();
@@ -1296,11 +1302,23 @@ export class PiRpcAgentSession implements AgentSession {
     this.activePromptRequestId = null;
     this.pendingSteerSubmissions.length = 0;
     this.clearNoTurnBuffers();
+    const payload = await convertPromptInput(prompt, { model: this.state.model });
+    if (this.closed) throw new Error("Pi session is closed");
+    if (this.activeTurnId !== turnId) return { turnId };
     this.activeNoTurnPromptText = payload.text;
     const shouldProbeForNoTurnPrompt = this.parseSlashCommandInput(payload.text) !== null;
 
     void (async () => {
       try {
+        if (this.compactionPromise) {
+          // Pi RPC rejects prompts until the manual compaction request settles.
+          await this.compactionPromise.catch(() => undefined);
+          const turnCanceled =
+            this.closed || this.activeTurnId !== turnId || this.interruptingTurn?.turnId === turnId;
+          if (turnCanceled) {
+            return;
+          }
+        }
         const ack = await this.runtimeSession.prompt(payload.text, payload.images);
         this.activePromptRequestId = ack.requestId ?? null;
         const correlatedResult = ack.requestId
@@ -1358,7 +1376,9 @@ export class PiRpcAgentSession implements AgentSession {
     if (this.closed || this.activeTurnId !== options.expectedTurnId) {
       return { status: "unavailable" };
     }
-    const payload = convertPromptInput(prompt, { model: this.state.model });
+    const payload = await convertPromptInput(prompt, { model: this.state.model });
+    if (this.closed || this.activeTurnId !== options.expectedTurnId)
+      return { status: "unavailable" };
     // Pi rejects steer RPCs that are extension commands, so slash inputs keep the
     // interrupt-and-replace fallback where they can run directly.
     if (this.parseSlashCommandInput(payload.text)) {
@@ -1586,6 +1606,23 @@ export class PiRpcAgentSession implements AgentSession {
     return await resultPromise;
   }
 
+  async canStopRuntime(): Promise<boolean> {
+    if (
+      this.closed ||
+      this.activeTurnId ||
+      this.pendingExtensionUiRequests.size ||
+      this.pendingExtensionResults.size ||
+      this.pendingExtensionHydrations.size ||
+      this.pendingOutput ||
+      this.pendingSteerSubmissions.length ||
+      this.pendingNoTurnOutputs.length ||
+      this.interruptingTurn
+    )
+      return false;
+    const state = await this.runtimeSession.getState();
+    return !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0;
+  }
+
   async close(): Promise<void> {
     if (this.closed) {
       return;
@@ -1597,7 +1634,7 @@ export class PiRpcAgentSession implements AgentSession {
     try {
       await this.runtimeSession.close();
     } finally {
-      await Promise.all(this.pendingExtensionHydrations);
+      await Promise.all([this.pendingOutput, ...this.pendingExtensionHydrations]);
       this.rejectAllExtensionResults(new Error("Pi session closed"));
       this.cleanup?.();
     }
@@ -1661,9 +1698,31 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   private emit(event: AgentStreamEvent): void {
-    for (const subscriber of this.subscribers) {
-      subscriber(event);
+    if (this.pendingOutput) {
+      this.emitAsync(() => Promise.resolve([event]));
+      return;
     }
+    this.publish(event);
+  }
+
+  private publish(event: AgentStreamEvent): void {
+    for (const subscriber of this.subscribers) subscriber(event);
+  }
+
+  // Keep timeline order while images are materialized, without delaying provider state changes.
+  private emitAsync(render: () => Promise<AgentStreamEvent[]>): void {
+    const pending = (this.pendingOutput ?? Promise.resolve())
+      .then(render)
+      .then((events) => {
+        if (!this.closed) for (const event of events) this.publish(event);
+        return undefined;
+      })
+      .catch((error) => this.logger.error({ err: error }, "Pi output rendering failed"));
+    this.pendingOutput = pending;
+    void pending.then(() => {
+      if (this.pendingOutput === pending) this.pendingOutput = null;
+      return undefined;
+    });
   }
 
   private emitExtensionOutput(output: PiExtensionEventOutput | undefined, turnId?: string): void {
@@ -1793,7 +1852,8 @@ export class PiRpcAgentSession implements AgentSession {
     this.outOfBandCompactionStarted = false;
     this.outOfBandCompactionCompleted = false;
     try {
-      await this.runtimeSession.compact(customInstructions);
+      this.compactionPromise = this.runtimeSession.compact(customInstructions);
+      await this.compactionPromise;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (
@@ -1819,6 +1879,7 @@ export class PiRpcAgentSession implements AgentSession {
         },
       });
     } finally {
+      this.compactionPromise = null;
       if (this.outOfBandCompactionEmit === emit && !this.outOfBandCompactionStarted) {
         this.outOfBandCompactionEmit = null;
         this.outOfBandCompactionStarted = false;
@@ -2288,8 +2349,11 @@ export class PiRpcAgentSession implements AgentSession {
       this.activeToolCalls.get(event.toolCallId) ?? parseToolArgs(event.toolName, null);
     this.activeToolCalls.delete(event.toolCallId);
 
-    const result = parseToolResult(event.result);
-    const error = event.isError ? event.result : null;
+    // Pull image blocks out of the result so base64 never reaches the tool output, then render
+    // each one as an assistant_message markdown image after the tool_call (mirroring the Claude
+    // provider, upstream #1717).
+    const { images, result } = splitPiToolResultImages(parseToolResult(event.result));
+    const error = event.isError ? result : null;
     const status = event.isError ? "failed" : "completed";
     this.extensionHost.onToolEnd({
       callId: event.toolCallId,
@@ -2299,6 +2363,30 @@ export class PiRpcAgentSession implements AgentSession {
       result,
     });
     this.emitToolCallEvent(event.toolCallId, toolCall, status, result, error);
+    if (images.length === 0) return;
+    const turnId = this.currentTurnIdForEvent();
+    this.emitAsync(() => this.renderToolResultImages(images, turnId));
+  }
+
+  private async renderToolResultImages(
+    images: ProviderImageOutput[],
+    turnId: string | undefined,
+  ): Promise<AgentStreamEvent[]> {
+    const events: AgentStreamEvent[] = [];
+    for (const image of images) {
+      const imageItem = await renderProviderImageOutputAsAssistantMarkdown(image, {
+        materialize: materializeProviderImage,
+      });
+      if (imageItem && !this.closed) {
+        events.push({
+          type: "timeline",
+          provider: this.provider,
+          turnId,
+          item: imageItem,
+        });
+      }
+    }
+    return events;
   }
 
   private emitCompactionTimeline(input: {
