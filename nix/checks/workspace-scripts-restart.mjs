@@ -36,6 +36,7 @@ await writeFile(
       listen: `127.0.0.1:${daemonPort}`,
       relay: { enabled: false },
       mcp: { enabled: false },
+      serviceProxy: { publicBaseUrl: "https://scripts.example.test" },
     },
     features: { webUi: { enabled: false }, dictation: { enabled: false } },
     pluginsEnabled: false,
@@ -124,7 +125,8 @@ try {
   script = await cli(["script", "start", "web", "--workspace", workspace.workspaceId]);
   const first = await eventually(async () => JSON.parse(await readFile(record, "utf8")));
   assert.equal(first.port, script.port);
-  await proxyResponds(script.hostname);
+  assert(script.publicProxyUrl);
+  await proxyResponds(new URL(script.publicProxyUrl).hostname);
   const workers = await workerPids();
   for (let restart = 0; restart < 2; restart++) {
     await cli(["daemon", "stop", "--keep-terminals", "--timeout", "25"]);
@@ -139,8 +141,9 @@ try {
     assert.equal(restored.port, first.port);
     assert.equal(restored.terminalId, script.terminalId);
     assert.equal(restored.hostname, script.hostname);
+    assert.equal(restored.publicProxyUrl, script.publicProxyUrl);
     assert.deepEqual(await workerPids(), workers);
-    await proxyResponds(script.hostname);
+    await proxyResponds(new URL(script.publicProxyUrl).hostname);
     await assert.rejects(
       cli(["script", "start", "web", "--workspace", workspace.workspaceId]),
       (error) => /already running/.test(`${error.message} ${error.stdout} ${error.stderr}`),
@@ -159,7 +162,7 @@ try {
     await assert.rejects(exec("ps", ["-o", "stat=", "-p", String(first.pid)], { env }), () => true);
   });
   script = await cli(["script", "start", "web", "--workspace", workspace.workspaceId]);
-  await proxyResponds(script.hostname);
+  await proxyResponds(new URL(script.publicProxyUrl).hostname);
   assert.equal((await readFile(starts, "utf8")).trim().split("\n").length, 2);
   await cli(["script", "stop", "web", "--workspace", workspace.workspaceId]);
   console.log(
@@ -169,6 +172,7 @@ try {
       terminalId: script.terminalId,
       originalPort: first.port,
       proxy: "passed",
+      public_virtual_host: "passed",
       no_duplicate: "passed",
       stop_releases_port: "passed",
       restart_after_stop: "passed",
