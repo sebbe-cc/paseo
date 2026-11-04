@@ -3331,6 +3331,7 @@ const x = 1;
   });
 
   it("keeps the local branch lookup when same-repo tracking points at the base branch", async () => {
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: "main", baseRef: "refs/heads/main" });
     execFileSync("git", ["checkout", "-b", "tender-parrot"], { cwd: repoDir });
     execFileSync("git", ["remote", "add", "origin", "https://github.com/getpaseo/paseo.git"], {
       cwd: repoDir,
@@ -3347,6 +3348,7 @@ const x = 1;
   });
 
   it("keeps the local branch lookup when a fork tracks the upstream base branch", async () => {
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: "main", baseRef: "refs/heads/main" });
     execFileSync("git", ["checkout", "-b", "local-feature"], { cwd: repoDir });
     execFileSync("git", ["remote", "add", "origin", "git@github.com:contributor/paseo.git"], {
       cwd: repoDir,
