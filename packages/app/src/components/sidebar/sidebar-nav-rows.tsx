@@ -4,6 +4,7 @@ import { memo, useCallback, useMemo, useRef, type ComponentType, type ReactNode 
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { SidebarGlobalVoice } from "./sidebar-global-voice";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItem } from "@/plugins/sidebar-items";
@@ -37,15 +38,13 @@ interface SidebarNavRowsProps extends SidebarNavRowProps {
 
 /**
  * Top-level sidebar navigation, ordered and filtered by the user's
- * `sidebarNavItems` preference. Renders nothing — not even the bordered group
- * wrapper — when every item is hidden and there is no `firstRowTrailing`.
+ * `sidebarNavItems` preference. Global voice remains available even when all
+ * navigation items are hidden.
  */
 export function SidebarNavRows({ style, onBeforeNavigate, firstRowTrailing }: SidebarNavRowsProps) {
   const { items } = useSidebarNavItems("header");
   const visibleItems = useMemo(() => items.filter((item) => item.visible), [items]);
   const groupRef = useRef<View | null>(null);
-
-  if (visibleItems.length === 0 && !firstRowTrailing) return null;
 
   const [firstRow, ...restRows] = visibleItems.map((item) => {
     if (item.kind === "plugin") {
@@ -74,6 +73,7 @@ export function SidebarNavRows({ style, onBeforeNavigate, firstRowTrailing }: Si
         firstRow
       )}
       {restRows}
+      <SidebarGlobalVoice />
     </View>
   );
 }

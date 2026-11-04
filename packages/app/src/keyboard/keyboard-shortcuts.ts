@@ -160,6 +160,7 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
     "show-shortcuts",
     "toggle-settings",
     "cycle-theme",
+    "global-voice-toggle",
   ],
   workspaces: [
     "new-agent",
@@ -245,6 +246,7 @@ const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
   "focus-message-input": "settings.shortcuts.help.focusMessageInput",
   "cycle-agent-mode": "settings.shortcuts.help.cycleAgentMode",
   "voice-toggle": "settings.shortcuts.help.toggleVoiceMode",
+  "global-voice-toggle": "settings.shortcuts.help.toggleGlobalVoice",
   "dictation-toggle": "settings.shortcuts.help.startStopDictation",
   "agent-interrupt": "settings.shortcuts.help.interruptAgent",
   "voice-mute-toggle": "settings.shortcuts.help.muteUnmuteVoiceMode",
@@ -1085,6 +1087,14 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       section: "agent-input",
       label: "Cycle agent mode",
     },
+  },
+  {
+    id: "global-voice-toggle",
+    action: "voice.global.toggle",
+    combo: "",
+    repeat: false,
+    when: { commandCenter: false },
+    help: { id: "global-voice-toggle", section: "general", label: "Toggle global voice" },
   },
   {
     id: "message-input-voice-toggle-cmd-shift-d-mac",
