@@ -91,7 +91,11 @@ import {
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
-import type { PaseoToolCatalogFactory } from "./tools/types.js";
+import type {
+  PaseoToolCatalog,
+  PaseoToolCatalogFactory,
+  PaseoToolDefinition,
+} from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
 import {
   ProviderSubagentStore,
@@ -781,6 +785,12 @@ export class AgentManager {
   private sessionOpenGeneration = 0;
   private readonly sessionOpenGenerations = new Map<string, number>();
   private readonly attachedPluginTools = new Map<string, AttachedAgentTool[]>();
+  /**
+   * Native tool catalogs handed to provider sessions at open. Providers hold
+   * the same object and read it per call, so a tool refresh syncs this map in
+   * place instead of reopening the session.
+   */
+  private readonly paseoToolCatalogs = new Map<string, PaseoToolCatalog>();
   private readonly pluginAgentTools: PluginAgentToolsRuntime | undefined;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
@@ -924,10 +934,11 @@ export class AgentManager {
    * A plugin reload (or any change to `agent.open.before` hooks) must not
    * restart running agent sessions: closing and resuming the provider session
    * drops live turn state and breaks attached surfaces such as voice mode.
-   * Plugin agent tools are resolved per MCP request from {@link getPluginTools},
-   * so refreshing the attached tool list in place is enough — the next turn
-   * picks up the new tools while the live session keeps running. MCP server and
-   * env contributions still only take effect on the next explicit session open.
+   * The attached tool list is refreshed in place, the shared native tool
+   * catalog is synced in place, and the live session re-advertises its
+   * provider tool registrations — the next turn picks up the new tools while
+   * the live session keeps running. MCP server and env contributions still
+   * only take effect on the next explicit session open.
    */
   private async refreshStalePluginTools(agentId: string): Promise<void> {
     const agent = this.getAgent(agentId);
@@ -935,8 +946,13 @@ export class AgentManager {
       this.sessionOpenGenerations.set(agentId, this.sessionOpenGeneration);
       return;
     }
+    // Record the generation being refreshed, not the latest one: an
+    // invalidation arriving while the hooks below are pending must leave this
+    // agent stale so the next turn refreshes again.
+    const targetGeneration = this.sessionOpenGeneration;
+    let transformed: { tools: AttachedAgentTool[] };
     try {
-      const transformed = await this.pluginLifecycle.before("agent.open.before", {
+      const result = await this.pluginLifecycle.before("agent.open.before", {
         agentId,
         provider: agent.provider,
         cwd: agent.config.cwd,
@@ -949,8 +965,7 @@ export class AgentManager {
         mcpServers: {},
         env: { ...agent.launchEnv },
       });
-      this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
-      this.sessionOpenGenerations.set(agentId, this.sessionOpenGeneration);
+      transformed = { tools: result.tools as AttachedAgentTool[] };
     } catch (error) {
       // The plugin may be mid-reload. Keep the previous tool list so the turn
       // can still run, and stay stale so the next turn retries the refresh.
@@ -958,7 +973,48 @@ export class AgentManager {
         { err: error, agentId },
         "Plugin tool refresh failed; keeping previous tools until the next turn",
       );
+      return;
     }
+    this.attachedPluginTools.set(agentId, transformed.tools);
+    try {
+      await this.refreshAgentToolCatalog(agentId);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId },
+        "Native tool catalog refresh failed; keeping previous tools until the next turn",
+      );
+      return;
+    }
+    this.sessionOpenGenerations.set(agentId, targetGeneration);
+  }
+
+  /**
+   * Sync the live native tool catalog with the refreshed attachments and ask
+   * the provider session to re-advertise its tool registrations. Providers
+   * hold the catalog object handed over at open and read it per call, so
+   * syncing its entries in place hot-swaps definitions and execution without
+   * reopening the session. Agents without a bound native catalog (MCP-only
+   * providers) resolve fresh tools per request and need nothing here.
+   */
+  private async refreshAgentToolCatalog(agentId: string): Promise<void> {
+    const current = this.paseoToolCatalogs.get(agentId);
+    if (!current || !this.paseoToolCatalogFactory) return;
+    const fresh = await this.paseoToolCatalogFactory({
+      callerAgentId: agentId,
+      paseoToolPolicy: this.paseoToolPolicies.get(agentId),
+    });
+    const currentTools = current.tools as Map<string, PaseoToolDefinition>;
+    for (const [name, definition] of fresh.tools) {
+      currentTools.set(name, definition);
+    }
+    // Deleting not-yet-visited keys during Map iteration is well-defined:
+    // they are simply skipped.
+    for (const name of currentTools.keys()) {
+      if (!fresh.tools.has(name)) {
+        currentTools.delete(name);
+      }
+    }
+    await this.getAgent(agentId)?.session?.updatePaseoTools?.();
   }
 
   private needsPluginSessionReload(agentId: string): boolean {
@@ -986,10 +1042,15 @@ export class AgentManager {
     const agent = this.getAgent(agentId);
     if (!agent || agent.lifecycle === "closed") throw new Error(`Agent is not live: ${agentId}`);
     if (!this.pluginAgentTools) throw new Error("Plugin tools are unavailable");
+    // Handlers capture the attachment from open time, which can predate a
+    // plugin reload. Resolve against the current attachments so execution
+    // targets the live plugin instance instead of the retired one.
+    const current =
+      this.getPluginTools(agentId).find((candidate) => candidate.name === tool.name) ?? tool;
     const record = await this.registry?.get(agentId);
     return this.pluginAgentTools.callTool(
-      tool.pluginId,
-      tool.pluginInstanceId,
+      current.pluginId,
+      current.pluginInstanceId,
       describeHookAgent({ ...agent, title: record?.title ?? agent.config.title }),
       tool.name,
       input,
@@ -999,6 +1060,7 @@ export class AgentManager {
 
   private detachPluginTools(agentId: string): void {
     this.attachedPluginTools.delete(agentId);
+    this.paseoToolCatalogs.delete(agentId);
     this.sessionOpenGenerations.delete(agentId);
     this.pluginAgentTools?.detachTools(agentId);
   }
@@ -5672,7 +5734,10 @@ export class AgentManager {
           callerAgentId: agentId,
           paseoToolPolicy,
         });
-        if (useNativeTools) context.paseoTools = catalog;
+        if (useNativeTools) {
+          context.paseoTools = catalog;
+          this.paseoToolCatalogs.set(agentId, catalog);
+        }
       } catch (error) {
         this.detachPluginTools(agentId);
         throw error;

@@ -55,8 +55,9 @@ import type {
   ImportProviderSessionContext,
   ResolveAgentDefaultModeInput,
 } from "./agent-sdk-types.js";
-import type { PaseoToolCatalog } from "./tools/types.js";
+import type { PaseoToolCatalog, PaseoToolDefinition } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
+import { registerPluginTools } from "./tools/plugin-tools.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
 
@@ -12698,7 +12699,7 @@ test("an out-of-band command racing idle cleanup waits for the resumed runtime",
   expect(h.prompts).toEqual([]);
 });
 
-test("plugin reload refreshes agent tools without restarting the live session", async () => {
+test("plugin reload hot-swaps native tools without restarting the live session", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-plugin-refresh-"));
   const toolV1: AttachedAgentTool = {
     name: "orbit_ready",
@@ -12715,41 +12716,90 @@ test("plugin reload refreshes agent tools without restarting the live session", 
     pluginInstanceId: "instance-2",
   };
   let currentTools: AttachedAgentTool[] = [toolV1];
+  let openHookCalls = 0;
   const lifecycle = {
-    before: async (name: string, request: Record<string, unknown>) =>
-      name === "agent.open.before" ? { ...request, tools: currentTools } : request,
+    before: async (name: string, request: Record<string, unknown>) => {
+      if (name !== "agent.open.before") return request;
+      openHookCalls += 1;
+      return { ...request, tools: currentTools };
+    },
     emit: () => undefined,
     wait: async () => undefined,
   } as unknown as PluginLifecycle;
+  const toolCalls: Array<{ pluginId: string; pluginInstanceId: string; name: string }> = [];
   const pluginAgentTools: PluginAgentToolsRuntime = {
     isToolPluginAvailable: () => true,
     detachTools: () => undefined,
-    callTool: async () => ({ text: "ok" }),
+    callTool: async (pluginId, pluginInstanceId, _agent, name) => {
+      toolCalls.push({ pluginId, pluginInstanceId, name });
+      return { text: `ok:${name}` };
+    },
   };
-  class CloseRecordingClient extends TestAgentClient {
-    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
-      return new CloseRecordingTestAgentSession(config);
+  class UpdateSpySession extends CloseRecordingTestAgentSession {
+    updatePaseoToolsCalls = 0;
+    override async updatePaseoTools(): Promise<void> {
+      this.updatePaseoToolsCalls += 1;
     }
   }
-  const client = new CloseRecordingClient();
+  class NativeClient extends TestAgentClient {
+    override readonly capabilities = { ...TEST_CAPABILITIES, supportsNativePaseoTools: true };
+    lastLaunchContext: AgentLaunchContext | undefined;
+    override async createSession(
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.lastLaunchContext = launchContext;
+      return new UpdateSpySession(config);
+    }
+  }
+  const client = new NativeClient();
   const manager = new AgentManager({
     clients: { codex: client },
     pluginLifecycle: lifecycle,
     pluginAgentTools,
     logger,
   });
+  manager.setPaseoToolCatalogFactory(({ callerAgentId }) => {
+    const tools = new Map<string, PaseoToolDefinition>();
+    registerPluginTools({
+      agentManager: manager,
+      callerAgentId,
+      scope: "agent",
+      tools,
+      builtinNames: new Set(),
+      policy: undefined,
+    });
+    return {
+      tools,
+      getTool: (name: string) => tools.get(name),
+      executeTool: async (name: string, input: unknown) => {
+        const tool = tools.get(name);
+        if (!tool) throw new Error(`Paseo tool not found: ${name}`);
+        return tool.handler(input, {});
+      },
+    };
+  });
+  const toolNew: AttachedAgentTool = {
+    name: "orbit_new",
+    description: "new",
+    inputSchema: { type: "object" },
+    pluginId: "orbit",
+    pluginInstanceId: "instance-2",
+  };
   let agentId: string | null = null;
   try {
     const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
       workspaceId: undefined,
     });
     agentId = agent.id;
+    const providerCatalog = client.lastLaunchContext?.paseoTools;
+    if (!providerCatalog) throw new Error("Provider session was not given a native catalog");
     expect(manager.getPluginTools(agent.id).map((tool) => tool.description)).toEqual(["v1"]);
     const liveBefore = manager.getAgent(agent.id);
     const sessionBefore = (liveBefore as unknown as { session: unknown }).session;
 
-    // Simulate `paseo plugin reload orbit`: the hooks change, the generation bumps.
-    currentTools = [toolV2];
+    // Simulate `paseo plugin reload orbit`: a changed tool plus a newly added one.
+    currentTools = [toolV2, toolNew];
     manager.invalidatePluginSessions();
     await manager.reloadStalePluginSession(agent.id);
 
@@ -12758,11 +12808,22 @@ test("plugin reload refreshes agent tools without restarting the live session", 
     expect((liveAfter as unknown as { session: unknown }).session).toBe(sessionBefore);
     expect((sessionBefore as CloseRecordingTestAgentSession).closed).toBe(false);
     expect(client.resumeOverrides).toHaveLength(0);
-    // The next turn picks up the reloaded tools.
-    expect(manager.getPluginTools(agent.id).map((tool) => tool.description)).toEqual(["v2"]);
+    expect(manager.getPluginTools(agent.id).map((tool) => tool.description)).toEqual(["v2", "new"]);
+    // The provider-held catalog object executes through the new instance,
+    // including the newly added tool — no session reload involved.
+    await providerCatalog.executeTool("orbit_ready", {});
+    await providerCatalog.executeTool("orbit_new", {});
+    expect(toolCalls).toEqual([
+      { pluginId: "orbit", pluginInstanceId: "instance-2", name: "orbit_ready" },
+      { pluginId: "orbit", pluginInstanceId: "instance-2", name: "orbit_new" },
+    ]);
+    expect((sessionBefore as UpdateSpySession).updatePaseoToolsCalls).toBe(1);
     // Once refreshed, a repeat check is a no-op.
+    const hookCallsAfterRefresh = openHookCalls;
     await manager.reloadStalePluginSession(agent.id);
     expect(client.resumeOverrides).toHaveLength(0);
+    expect((sessionBefore as UpdateSpySession).updatePaseoToolsCalls).toBe(1);
+    expect(openHookCalls).toBe(hookCallsAfterRefresh);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
@@ -12813,7 +12874,77 @@ test("stale plugin tool refresh keeps old tools when the hooks fail mid-reload",
     expect((liveAfter as unknown as { session: unknown }).session).toBe(sessionBefore);
     expect(client.resumeOverrides).toHaveLength(0);
   } finally {
-    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    if (agentId) await manager.closeAgent(agent.id).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("stale plugin refresh does not acknowledge invalidations arriving mid-refresh", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-plugin-refresh-race-"));
+  const toolV2: AttachedAgentTool = {
+    name: "orbit_ready",
+    description: "v2",
+    inputSchema: { type: "object" },
+    pluginId: "orbit",
+    pluginInstanceId: "instance-2",
+  };
+  const toolV3: AttachedAgentTool = {
+    name: "orbit_ready",
+    description: "v3",
+    inputSchema: { type: "object" },
+    pluginId: "orbit",
+    pluginInstanceId: "instance-3",
+  };
+  let currentTools: AttachedAgentTool[] = [];
+  let hookCalls = 0;
+  const releaseHook = deferred<void>();
+  const lifecycle = {
+    before: async (name: string, request: Record<string, unknown>) => {
+      if (name !== "agent.open.before") return request;
+      hookCalls += 1;
+      if (hookCalls === 2) await releaseHook.promise;
+      return { ...request, tools: currentTools };
+    },
+    emit: () => undefined,
+    wait: async () => undefined,
+  } as unknown as PluginLifecycle;
+  const pluginAgentTools: PluginAgentToolsRuntime = {
+    isToolPluginAvailable: () => true,
+    detachTools: () => undefined,
+    callTool: async () => ({ text: "ok" }),
+  };
+  const client = new TestAgentClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    pluginLifecycle: lifecycle,
+    pluginAgentTools,
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    // First invalidation starts a refresh whose hooks stay pending; a second
+    // invalidation lands mid-refresh with newer tools.
+    manager.invalidatePluginSessions();
+    const pending = manager.reloadStalePluginSession(agent.id);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    currentTools = [toolV2];
+    manager.invalidatePluginSessions();
+    currentTools = [toolV3];
+    releaseHook.resolve();
+    await pending;
+
+    // The refresh recorded its own generation, so the concurrent invalidation
+    // stays stale and the next turn refreshes again with the newest tools.
+    expect(manager.getPluginTools(agent.id).map((tool) => tool.description)).toEqual(["v3"]);
+    expect(hookCalls).toBe(3);
+    expect(client.resumeOverrides).toHaveLength(0);
+  } finally {
+    if (agentId) await manager.closeAgent(agent.id).catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
   }
 });

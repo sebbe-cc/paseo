@@ -478,6 +478,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     revertFiles: inner.revertFiles?.bind(inner),
     revertBoth: inner.revertBoth?.bind(inner),
     tryHandleOutOfBand: inner.tryHandleOutOfBand?.bind(inner),
+    updatePaseoTools: inner.updatePaseoTools?.bind(inner),
   } satisfies ForwardedAgentSession;
 }
 
