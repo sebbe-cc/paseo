@@ -497,6 +497,36 @@ describe("one workspace comparison base", () => {
     await mergeFromBase(repoDir);
   });
 
+  it("compares detached HEAD through the same base as a named checkout", async () => {
+    const { repoDir } = initRepoOnMain();
+    git(["checkout", "-b", "feature"], repoDir);
+    commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+    git(["checkout", "--detach", "HEAD"], repoDir);
+    expect(await getCheckoutStatus(repoDir)).toMatchObject({
+      currentBranch: null,
+      baseRef: "refs/heads/main",
+      aheadBehind: { ahead: 1, behind: 0 },
+    });
+    expect((await listCheckoutCommits({ cwd: repoDir })).commits.map((c) => c.subject)).toEqual([
+      "Feature work",
+      "initial",
+    ]);
+    expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).toContain("feature.txt");
+  });
+
+  it("rejects an unrelated base instead of using a direct diff or dropping base history", async () => {
+    const { repoDir } = initRepoOnMain();
+    git(["checkout", "--orphan", "unrelated"], repoDir);
+    git(["rm", "-rf", "."], repoDir);
+    commitFile(repoDir, "other.txt", "other\n", "Unrelated history");
+    await expect(getCheckoutDiff(repoDir, { mode: "all" })).rejects.toThrow(
+      "has no common ancestor with HEAD",
+    );
+    await expect(listCheckoutCommits({ cwd: repoDir })).rejects.toThrow(
+      "has no common ancestor with HEAD",
+    );
+  });
+
   it("reports an unavailable implicit base instead of an empty diff", async () => {
     const { repoDir } = initRepoOnMain();
     rmSync(join(repoDir, ".git", "paseo", "worktree.json"));

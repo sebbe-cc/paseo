@@ -2278,10 +2278,7 @@ export async function getCheckoutStatus(
   const baseRef = facts.resolvedBaseRef;
   const mainRepoRoot = facts.mainRepoRoot;
   const factsContext = { ...context, facts };
-  const aheadBehind =
-    baseRef && currentBranch
-      ? await getAheadBehind(cwd, baseRef, currentBranch, factsContext)
-      : null;
+  const aheadBehind = baseRef ? await getAheadBehind(cwd, baseRef, "HEAD", factsContext) : null;
   const upstreamStatus = facts.upstreamStatus;
   const upstreamRef = upstreamStatus?.ref ?? null;
   const aheadOfOrigin = upstreamStatus?.aheadBehind.ahead ?? null;
@@ -2527,33 +2524,20 @@ export async function listCheckoutCommits({
   cwd: string;
   context?: CheckoutContext;
 }): Promise<CheckoutCommitsResult> {
-  const currentBranch = await getCurrentBranch(cwd);
-  if (!currentBranch) {
-    return { baseRef: null, commits: [] };
-  }
-
   const base = await resolveWorkspaceBase(cwd, context);
   if (!base) throw new Error("Unable to determine workspace base");
   const comparisonBaseRef = workspaceComparisonRef(base);
 
-  let workspaceRecords: ParsedCheckoutCommit[] = [];
-  let baseRevision = "HEAD";
-  if (comparisonBaseRef) {
-    const [records, mergeBase] = await Promise.all([
-      getCheckoutCommitRecords({ cwd, revision: `${comparisonBaseRef}..HEAD` }),
-      tryResolveMergeBase(cwd, comparisonBaseRef),
-    ]);
-    workspaceRecords = records;
-    baseRevision = mergeBase ?? "";
-  }
-
-  const baseRecords = baseRevision
-    ? await getCheckoutCommitRecords({
-        cwd,
-        revision: baseRevision,
-        maxCount: CHECKOUT_BASE_COMMIT_LIMIT,
-      })
-    : [];
+  const [workspaceRecords, baseRevision] = await Promise.all([
+    getCheckoutCommitRecords({ cwd, revision: `${comparisonBaseRef}..HEAD` }),
+    tryResolveMergeBase(cwd, comparisonBaseRef),
+  ]);
+  if (!baseRevision) throw new Error(`Workspace base ${base.ref} has no common ancestor with HEAD`);
+  const baseRecords = await getCheckoutCommitRecords({
+    cwd,
+    revision: baseRevision,
+    maxCount: CHECKOUT_BASE_COMMIT_LIMIT,
+  });
   const records = [...workspaceRecords, ...baseRecords];
   if (records.length === 0) {
     return { baseRef: base.ref, commits: [] };
@@ -2954,8 +2938,8 @@ export async function getCheckoutRefDerivedState(
   }
   let aheadBehind = current.aheadBehind;
   let diffStat = current.diffStat;
-  if (baseMoved && currentBranch && facts.resolvedBaseRef) {
-    aheadBehind = await getAheadBehind(cwd, facts.resolvedBaseRef, currentBranch, {
+  if (baseMoved && facts.resolvedBaseRef) {
+    aheadBehind = await getAheadBehind(cwd, facts.resolvedBaseRef, "HEAD", {
       ...context,
       facts,
     });
@@ -3384,8 +3368,10 @@ async function resolveCheckoutDiffRefs(
     throw new Error("Unable to determine workspace base");
   }
   const bestBaseRef = await resolveOperationComparisonRef(cwd, baseRef, context);
+  const mergeBase = await tryResolveMergeBase(cwd, bestBaseRef);
+  if (!mergeBase) throw new Error(`Workspace base ${baseRef} has no common ancestor with HEAD`);
   return {
-    baseRef: (await tryResolveMergeBase(cwd, bestBaseRef)) ?? bestBaseRef,
+    baseRef: mergeBase,
     targetRef: compare.mode === "base" ? "HEAD" : undefined,
     includeUntracked: compare.mode === "all",
   };
