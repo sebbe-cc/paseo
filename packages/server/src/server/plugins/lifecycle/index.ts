@@ -335,21 +335,21 @@ function validateSessionOpenResult(
     previous.provider !== next.provider ||
     previous.cwd !== next.cwd ||
     previous.reason !== next.reason ||
-    previous.purpose !== next.purpose || previous.title !== next.title;
+    previous.purpose !== next.purpose || previous.title !== next.title || !sameLabels(previous.labels, next.labels);
   if (identityChanged) {
-    throw new Error("agent.session_open hooks can only change env");
+    throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
   }
   const contextChanged =
     !sameLabels(previous.labels, next.labels) ||
     (previous.initialPrompt ?? null) !== (next.initialPrompt ?? null);
   if (contextChanged) {
-    throw new Error("agent.session_open hooks cannot change labels or initialPrompt");
+    throw new Error("agent.open.before hooks cannot change labels or initialPrompt");
   }
   const instructionsChanged =
     (next.systemPrompt ?? null) !== (previous.systemPrompt ?? null) ||
     (next.daemonAppendSystemPrompt ?? null) !== (previous.daemonAppendSystemPrompt ?? null);
   if (previous.purpose === "history" && instructionsChanged) {
-    throw new Error("agent.session_open hooks cannot change instructions for history opens");
+    throw new Error("agent.open.before hooks cannot change instructions for history opens");
   }
 }
 

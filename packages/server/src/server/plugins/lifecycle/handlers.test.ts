@@ -356,7 +356,7 @@ test("agent.session_open rejects instruction changes for history opens", async (
       },
       paseo,
     ),
-  ).rejects.toThrow("agent.session_open hooks cannot change instructions for history opens");
+  ).rejects.toThrow("agent.open.before hooks cannot change instructions for history opens");
 });
 
 test("agent.turn_prepare accumulates hidden context in order without touching identity", async () => {
