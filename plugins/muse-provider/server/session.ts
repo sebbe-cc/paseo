@@ -195,6 +195,10 @@ export class Session {
     this.buffered.length = 0;
     await this.notifications;
     await this.readCatalog();
+    // session/start has no effort slot and session/resume does not restore it,
+    // so mirror the effective level into the host default now that the catalog
+    // default is known. Fresh and resumed sessions converge here alike.
+    await this.applyReasoningEffort();
     await this.live().commands.refresh();
     this.publishPersistence();
     this.publishConfig();
@@ -233,6 +237,32 @@ export class Session {
       model,
       thinkingOption: this.config.thinkingOption ?? selected?.defaultThinkingOptionId,
     };
+  }
+
+  private effectiveReasoningEffort(): z.infer<typeof effortSchema> | undefined {
+    const configured = effortSchema.safeParse(this.config.thinkingOption);
+    if (configured.success) return configured.data;
+    const selected = this.catalog.models.find((model) => model.id === this.config.model);
+    const catalogDefault = effortSchema.safeParse(selected?.defaultThinkingOptionId);
+    return catalogDefault.success ? catalogDefault.data : undefined;
+  }
+
+  private async applyReasoningEffort(): Promise<void> {
+    const reasoningEffort = this.effectiveReasoningEffort();
+    if (!reasoningEffort) return;
+    try {
+      await this.host.command(
+        "session/setReasoningEffort",
+        { sessionId: this.live().nativeId, reasoningEffort },
+        ackSchema,
+      );
+    } catch (error) {
+      // Hosts that predate session/setReasoningEffort keep working: every
+      // turn/start still carries the level. Mirror failure must never break
+      // open or configure.
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Muse reasoning effort default not applied: ${detail}\n`);
+    }
   }
 
   async prompt(prompt: ProviderPrompt): Promise<void> {
@@ -296,11 +326,13 @@ export class Session {
       );
       this.config = { ...this.config, model: changes.model };
     }
-    // Muse receives configured thinking effort on each turn/start, rather than a session mutation.
+    // The chosen level rides each turn/start and is also mirrored into the
+    // host's standing session default below, so host-side work observes it.
     if (changes.thinkingOption !== undefined) {
       const thinkingOption =
         changes.thinkingOption === null ? undefined : effortSchema.parse(changes.thinkingOption);
       this.config = { ...this.config, thinkingOption };
+      await this.applyReasoningEffort();
     }
     if (changes.mode !== undefined) {
       const mode = approvalModeSchema.parse(changes.mode ?? "onRequest");
