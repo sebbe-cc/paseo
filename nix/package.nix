@@ -45,6 +45,7 @@ buildNpmPackage rec {
       # a docs-only commit produce a new npm-deps .drv, and so a new desktop
       # .drv, and so a full rebuild for a byte-identical result.
       && !(lib.hasPrefix "/docs" relPath)
+      && !(lib.hasPrefix "/nix/checks" relPath)
       && !(lib.hasPrefix "/.github" relPath)
       && !(lib.hasPrefix "/.agents" relPath)
       && !(lib.hasPrefix "/.claude" relPath)

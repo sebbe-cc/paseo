@@ -85,6 +85,11 @@
             assert packages.desktop.meta.license.spdxId == license;
             pkgs.runCommand "paseo-license-metadata" { } "touch $out";
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          workspace-scripts-restart = pkgs.callPackage ./nix/checks/workspace-scripts-restart.nix {
+            paseo = packages.paseo;
+          };
+        }
       );
 
       nixosModules.default = self.nixosModules.paseo;
