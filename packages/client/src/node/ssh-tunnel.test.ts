@@ -98,7 +98,7 @@ test("a closed ssh stdin logs and closes the tunnel instead of throwing EPIPE", 
   }, 5);
   cleanup.push(() => clearInterval(writer));
 
-  await once(client, "close");
+  await new Promise<void>((resolve) => client.once("close", () => resolve()));
   expect(uncaught).not.toHaveBeenCalled();
   expect(warn).toHaveBeenCalledWith(
     "SSH tunnel stdin failed",
