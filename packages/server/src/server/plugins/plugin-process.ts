@@ -288,6 +288,12 @@ export function createPluginWorker(options: {
         register(contract, (input, context) => handler(contract.input.parse(input), context)),
       registerProvider,
       registerUsageSource,
+      invalidateUsage: (sourceId, reportId) =>
+        send({
+          type: "usage.invalidated",
+          sourceId,
+          ...(reportId === undefined ? {} : { reportId }),
+        }),
       registerSettings,
       addHook: hooks.addHook,
       on: hooks.on,

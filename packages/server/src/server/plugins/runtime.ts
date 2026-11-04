@@ -127,6 +127,7 @@ interface RemoteProviderConnection {
 interface PluginRuntimeDependencies {
   settingsDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
+  onUsageInvalidated?: (pluginId: string, sourceId: string, reportId?: string) => void;
   spawnChild?: () => PluginChild;
   sessionHost?: PluginPaseoSessionHost;
 }
@@ -1003,6 +1004,10 @@ export class PluginRuntime {
     }
     if (message.type === "settings.changed") {
       this.dependencies.onSettingsChanged?.(loaded.id, message.settingsId);
+      return;
+    }
+    if (message.type === "usage.invalidated") {
+      this.dependencies.onUsageInvalidated?.(loaded.id, message.sourceId, message.reportId);
       return;
     }
     if (message.type.startsWith("provider.")) {

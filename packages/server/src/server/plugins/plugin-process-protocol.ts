@@ -79,6 +79,7 @@ export type PluginProcessRequest =
 
 export type PluginProcessMessage =
   | { type: "settings.changed"; settingsId: string }
+  | { type: "usage.invalidated"; sourceId: string; reportId?: string }
   | { type: "hooks.changed"; hooks: string[] }
   | {
       type: "ready";
@@ -267,6 +268,13 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
   "type",
   [
     z.object({ type: z.literal("settings.changed"), settingsId: z.string() }).strict(),
+    z
+      .object({
+        type: z.literal("usage.invalidated"),
+        sourceId: z.string().min(1),
+        reportId: z.string().min(1).optional(),
+      })
+      .strict(),
     z.object({ type: z.literal("hooks.changed"), hooks: hooksSchema }).strict(),
     z
       .object({

@@ -29,10 +29,12 @@ afterEach(async () => {
 });
 function registration(
   registerUsageSource = (_source: UsageSourceRegistration) => {},
+  invalidateUsage = (_sourceId: string, _reportId?: string) => {},
 ): ProviderRegistration {
   let provider: ProviderRegistration | undefined;
   const server = {
     registerUsageSource,
+    invalidateUsage,
     registerProvider(value: ProviderRegistration) {
       provider = value;
     },
@@ -45,6 +47,7 @@ async function harness(
   scenario = "text-reasoning",
   env: Record<string, string> = {},
   providerOptions?: Record<string, unknown>,
+  hooks?: { onInvalidate?: (sourceId: string, reportId?: string) => void },
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "muse-provider-test-"));
   roots.push(root);
@@ -56,9 +59,12 @@ async function harness(
   };
   await writeFile(requests, "");
   let usageSource!: UsageSourceRegistration;
-  const provider = registration((source) => {
-    usageSource = source;
-  });
+  const provider = registration(
+    (source) => {
+      usageSource = source;
+    },
+    (sourceId, reportId) => hooks?.onInvalidate?.(sourceId, reportId),
+  );
   const connection = await provider.connect({
     launch,
     versions: [1],
@@ -1545,6 +1551,83 @@ test("close retains the last observed values without waking a host", async () =>
   });
   // Seed at open plus the live read before close; the retained fetch wakes no host.
   expect((await h.recorded()).filter((frame) => frame.method === "usage/read")).toHaveLength(2);
+});
+
+function observedOf(entries: Awaited<ReturnType<UsageSourceRegistry["listReports"]>>) {
+  const report = entries[0]?.report;
+  return report?.status === "available"
+    ? report.details?.find((detail) => detail.id === "observed")?.value
+    : undefined;
+}
+
+test("an observed change invalidates the registry cache so the next query refetches", async () => {
+  const t0 = 1700000000000;
+  const t1 = 1700000000001;
+  const t2 = 1700000000002;
+  const windowAt = (usedPercent: number) => ({
+    usedPercent,
+    resetsAtMs: 1700018000000,
+    windowDurationMins: 300,
+  });
+  const registry = new UsageSourceRegistry();
+  const invalidated: Array<{ sourceId: string; reportId?: string }> = [];
+  const h = await harness(
+    "catalog-controls",
+    {
+      MUSE_TEST_USAGE: JSON.stringify({
+        usage: {
+          observedAtMs: t0,
+          tier: "Pro",
+          window: windowAt(10),
+          weekly: { usedPercent: 20, resetsAtMs: 1700604800000 },
+        },
+      }),
+      MUSE_TEST_USAGE_CHANGED: JSON.stringify([
+        {
+          observedAtMs: t1,
+          tier: "Pro",
+          window: windowAt(75),
+          weekly: { usedPercent: 105, resetsAtMs: 1700604800000 },
+        },
+        {
+          observedAtMs: t2,
+          tier: "Pro",
+          window: windowAt(80),
+          weekly: { usedPercent: 110, resetsAtMs: 1700604800000 },
+        },
+      ]),
+    },
+    undefined,
+    {
+      // The daemon's job in production: runtime forwards the worker signal to
+      // the registry. The test wires the same call directly.
+      onInvalidate: (sourceId, reportId) => {
+        invalidated.push({ sourceId, reportId });
+        registry.invalidateReports(reportId === undefined ? { sourceId } : { sourceId, reportId });
+      },
+    },
+  );
+  registry.register(h.usageSource);
+  await h.open();
+  // usage/read always serves the seed; T1/T2 only ever arrive as events, so a
+  // card showing T2 proves the event→store→invalidate→refetch path. T2 is
+  // emitted by the first live read, so the first query can only cache T0/T1.
+  const deadline = Date.now() + 5000;
+  let entries = await registry.listReports();
+  while (observedOf(entries) !== new Date(t2).toISOString()) {
+    if (Date.now() > deadline) break;
+    await delay(10);
+    entries = await registry.listReports();
+  }
+  expect(observedOf(entries)).toBe(new Date(t2).toISOString());
+  expect(entries).toMatchObject([
+    { report: { status: "available", windows: [{ usedPct: 80 }, { usedPct: 110 }] } },
+  ]);
+  // The cached entry serves repeated queries without refetching.
+  expect((await registry.listReports())[0]).toBe(entries[0]);
+  // The threading fired with a targeted report id, not a blanket drop.
+  expect(entries[0]!.id).toMatch(/^muse:[a-f0-9]{64}$/);
+  expect(invalidated).toContainEqual({ sourceId: "muse", reportId: entries[0]!.id });
 });
 
 test("a terminal before turn admission does not start an idle watchdog", async () => {

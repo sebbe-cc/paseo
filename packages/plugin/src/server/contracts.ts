@@ -40,6 +40,12 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
   ): void;
   registerProvider(provider: ProviderRegistration): void;
   registerUsageSource(source: UsageSourceRegistration): void;
+  /**
+   * Drops the daemon's cached reports for a usage source so the next query
+   * refetches. Call it when an observed change makes the cache stale; the
+   * daemon refetches on demand, nothing is pushed to clients by this call.
+   */
+  invalidateUsage(sourceId: string, reportId?: string): void;
 }
 
 export type PluginServerContribution = (server: PluginServerContext) => PluginCleanup;

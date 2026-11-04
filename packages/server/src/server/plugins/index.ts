@@ -125,6 +125,12 @@ export class PluginService {
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
+        onUsageInvalidated: (_pluginId, sourceId, reportId) => {
+          this.usageSources.invalidateReports({
+            sourceId,
+            ...(reportId === undefined ? {} : { reportId }),
+          });
+        },
       });
     this.managedSources = dependencies.managedSources ?? null;
     this.builtinPlugins = dependencies.builtinPlugins ?? new BuiltinPluginLoader(undefined, []);

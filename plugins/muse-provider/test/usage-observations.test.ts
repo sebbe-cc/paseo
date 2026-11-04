@@ -52,6 +52,23 @@ test("recordObservation drops invalid observations without touching the store", 
   expect(usage.latest(account)?.window.usedPercent).toBe(75);
 });
 
+test("recordObservation notifies only on a strictly newer stored observation", () => {
+  const usage = new Usage();
+  const seen: string[] = [];
+  usage.onDidChange = (account) => seen.push(account);
+  const { account } = usage.remember(launch({ HOME: "/usage/home" }));
+  expect(usage.recordObservation(account, observation())).toBe(true);
+  expect(seen).toEqual([account]);
+  expect(usage.recordObservation(account, observation())).toBe(false);
+  expect(usage.recordObservation(account, observation({ observedAtMs: 1699999999999 }))).toBe(
+    false,
+  );
+  expect(usage.recordObservation(account, observation({ tier: "" }))).toBe(false);
+  expect(seen).toEqual([account]);
+  expect(usage.recordObservation(account, observation({ observedAtMs: 1700000000001 }))).toBe(true);
+  expect(seen).toEqual([account, account]);
+});
+
 test("observations from one account never touch another account", () => {
   const usage = new Usage();
   const home = usage.remember(launch({ HOME: "/usage/home" }));

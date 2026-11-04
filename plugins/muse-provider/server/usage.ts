@@ -36,6 +36,12 @@ export class Usage {
     { account: string; read: () => Promise<Observation> }
   >();
   /**
+   * Called with the account key whenever a strictly newer observation is
+   * stored. The subscriber invalidates the daemon's cached reports so the
+   * next query refetches instead of waiting out the cache TTL.
+   */
+  onDidChange?: (account: string) => void;
+  /**
    * Latest validated observation per account. Survives detach: an idle or closed
    * session keeps its last observed values with their age instead of waking a host.
    */
@@ -64,6 +70,7 @@ export class Usage {
     const current = this.observations.get(account);
     if (current && parsed.data.observedAtMs <= current.observedAtMs) return false;
     this.observations.set(account, parsed.data);
+    this.onDidChange?.(account);
     return true;
   }
   /** Latest stored observation for an account, if any host ever reported one. */

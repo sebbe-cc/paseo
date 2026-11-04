@@ -27,6 +27,19 @@ if (process.env.MUSE_TEST_REQUESTS)
     JSON.stringify({ event: "hostStarted", args: process.argv.slice(2) }) + "\n",
   );
 const catalogRows = readFixture("catalog-controls");
+let usageChangedQueue = null;
+function nextUsageChanged() {
+  if (!process.env.MUSE_TEST_USAGE_CHANGED) return null;
+  if (usageChangedQueue === null) {
+    const parsed = JSON.parse(process.env.MUSE_TEST_USAGE_CHANGED);
+    usageChangedQueue = Array.isArray(parsed) ? [...parsed] : [parsed];
+  }
+  // An array emits one observation per usage/read and repeats the last one, so
+  // a test can stage T1 then T2; a single object repeats every time.
+  const next = usageChangedQueue[0];
+  if (usageChangedQueue.length > 1) usageChangedQueue.shift();
+  return next;
+}
 const replacements = new Map();
 const counts = new Map();
 const receipts = new Set();
@@ -171,20 +184,7 @@ function parityResponse(frame) {
     respond(frame, result);
     return true;
   }
-  if (frame.method === "usage/read") {
-    const result = process.env.MUSE_TEST_USAGE
-      ? JSON.parse(process.env.MUSE_TEST_USAGE)
-      : responseFor(catalogRows, "usage/read");
-    respond(frame, result);
-    if (process.env.MUSE_TEST_USAGE_CHANGED) {
-      send({
-        jsonrpc: "2.0",
-        method: "usage/changed",
-        params: JSON.parse(process.env.MUSE_TEST_USAGE_CHANGED),
-      });
-    }
-    return true;
-  }
+  if (usageResponse(frame)) return true;
   if (frame.method === "session/list") {
     const result = responseFor(catalogRows, "session/list");
     result.nextCursor = null;
@@ -229,6 +229,18 @@ function parityResponse(frame) {
   }
   if (skillResponse(frame)) return true;
   return false;
+}
+function usageResponse(frame) {
+  if (frame.method !== "usage/read") return false;
+  const result = process.env.MUSE_TEST_USAGE
+    ? JSON.parse(process.env.MUSE_TEST_USAGE)
+    : responseFor(catalogRows, "usage/read");
+  respond(frame, result);
+  const changed = nextUsageChanged();
+  if (changed) {
+    send({ jsonrpc: "2.0", method: "usage/changed", params: changed });
+  }
+  return true;
 }
 function skillResponse(frame) {
   if (frame.method === "skill/list") {
