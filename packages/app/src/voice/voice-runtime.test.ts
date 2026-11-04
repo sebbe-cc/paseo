@@ -1,3 +1,4 @@
+import { selectVoiceTarget, toggleGlobalVoice } from "./global-voice-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonServerInfo } from "@/stores/session-store";
 import type { AudioEngine } from "@/audio";
@@ -69,11 +70,13 @@ function createServerInfo(): DaemonServerInfo {
 function createRuntime(options?: {
   engine?: AudioEngine;
   getServerInfo?: (serverId: string) => DaemonServerInfo | null;
+  isThinkingToneEnabled?: () => boolean;
 }) {
   const engine = options?.engine ?? createAudioEngineMock();
   const runtime = createVoiceRuntime({
     engine,
     getServerInfo: options?.getServerInfo ?? (() => createServerInfo()),
+    isThinkingToneEnabled: options?.isThinkingToneEnabled,
     activateKeepAwake: vi.fn().mockResolvedValue(undefined),
     deactivateKeepAwake: vi.fn().mockResolvedValue(undefined),
   });
@@ -274,6 +277,19 @@ describe("voice runtime", () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(engine.play).toHaveBeenCalled();
+  });
+
+  it("stays silent while waiting when the thinking tone setting is off", async () => {
+    const adapter = createSessionAdapter();
+    const { runtime, engine } = createRuntime({ isThinkingToneEnabled: () => false });
+    runtime.registerSession(adapter);
+
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.onTurnEvent("server-1", "agent-1", "turn_started");
+
+    expect(runtime.getSnapshot().phase).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS * 4);
+    expect(engine.play).not.toHaveBeenCalled();
   });
 
   it("does not restart the thinking tone from local detection jitter while waiting", async () => {
@@ -534,5 +550,159 @@ describe("voice runtime", () => {
 
     expect(listener).not.toHaveBeenCalled();
     unsubscribe();
+  });
+});
+
+describe("plugin voice lifetime", () => {
+  it("ignores a failed old reconnect after a new agent starts voice", async () => {
+    const adapter = createSessionAdapter();
+    const { runtime, engine } = createRuntime();
+    runtime.registerSession(adapter);
+    await runtime.startVoice("server-1", "agent-1");
+    let rejectReconnect: ((error: Error) => void) | undefined;
+    vi.mocked(adapter.setVoiceMode).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectReconnect = reject;
+        }),
+    );
+    runtime.updateSessionConnection("server-1", false);
+    runtime.updateSessionConnection("server-1", true);
+    await runtime.startVoice("server-1", "agent-2");
+    vi.mocked(engine.stopCapture).mockClear();
+    rejectReconnect!(new Error("old call failed"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.getSnapshot().activeAgentId).toBe("agent-2");
+    expect(runtime.getSnapshot().phase).toBe("listening");
+    expect(engine.stopCapture).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+
+  it("stops capture when the provider ends during a pending microphone start", async () => {
+    const engine = createAudioEngineMock();
+    let finish: (() => void) | undefined;
+    vi.mocked(engine.startCapture).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const adapter = createSessionAdapter();
+    const { runtime } = createRuntime({ engine });
+    runtime.registerSession(adapter);
+    const starting = runtime.startVoice("server-1", "agent-1");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    const ending = runtime.onSessionEnded("server-1");
+    runtime.handleCapturePcm(new Uint8Array(3200));
+    expect(adapter.sendVoiceAudioChunk).not.toHaveBeenCalled();
+    finish!();
+    await starting;
+    await ending;
+    expect(engine.stopCapture).toHaveBeenCalled();
+    expect(runtime.getSnapshot().phase).toBe("disabled");
+  });
+
+  it("gates plugin voice once before microphone capture", async () => {
+    const info = createServerInfo();
+    info.capabilities!.voice!.provider = { pluginId: "live", providerId: "live" };
+    const { runtime, engine } = createRuntime({ getServerInfo: () => info });
+    runtime.registerSession(createSessionAdapter());
+    await expect(runtime.startVoice("server-1", "agent-1")).rejects.toThrow("Update the host");
+    expect(engine.startCapture).not.toHaveBeenCalled();
+    info.features = { pluginVoiceProviders: true };
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.onTurnEvent("server-1", "agent-1", "turn_started");
+    expect(runtime.getSnapshot().phase).toBe("listening");
+    await runtime.destroy();
+  });
+
+  it("feeds Live packets ahead of playback completion and wakes a waiting stream on interruption", async () => {
+    const info = createServerInfo();
+    info.capabilities!.voice!.provider = { pluginId: "live", providerId: "live" };
+    info.features = { pluginVoiceProviders: true };
+    const engine = createAudioEngineMock();
+    const chunks: import("@/audio/audio-engine-types").AudioPlaybackStreamChunk[] = [];
+    let finished = false;
+    const controller = new AbortController();
+    vi.mocked(engine.play).mockImplementation(async (source) => {
+      if (!source.stream) throw new Error("Expected continuous PCM playback");
+      for await (const chunk of source.stream(controller.signal)) chunks.push(chunk);
+      finished = true;
+      return 0.2;
+    });
+    vi.mocked(engine.stop).mockImplementation(() => controller.abort());
+    const adapter = createSessionAdapter();
+    const { runtime } = createRuntime({ engine, getServerInfo: () => info });
+    runtime.registerSession(adapter);
+    await runtime.startVoice("server-1", "agent-1");
+    runtime.handleAudioOutput(
+      "server-1",
+      createAudioPayload({ id: "first", groupId: "live", chunkIndex: 0, isLastChunk: false }),
+    );
+    await vi.waitFor(() => expect(chunks).toHaveLength(1));
+    runtime.handleAudioOutput(
+      "server-1",
+      createAudioPayload({ id: "second", groupId: "live", chunkIndex: 1, isLastChunk: false }),
+    );
+    await vi.waitFor(() => expect(chunks).toHaveLength(2));
+    expect(engine.play).toHaveBeenCalledTimes(1);
+    expect(adapter.audioPlayed).not.toHaveBeenCalled();
+    chunks[0].onPlayed();
+    expect(adapter.audioPlayed).toHaveBeenCalledWith("first");
+    runtime.onServerSpeechStateChanged("server-1", true);
+    await vi.waitFor(() => expect(finished).toBe(true));
+    chunks[1].onPlayed();
+    expect(adapter.audioPlayed).not.toHaveBeenCalledWith("second");
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+});
+
+describe("selected global voice target", () => {
+  it("keeps selection separate from activation and never cancels a running agent during a switch", async () => {
+    const { runtime, engine } = createRuntime();
+    const adapter = createSessionAdapter();
+    runtime.registerSession(adapter);
+    const save = vi.fn();
+    const king = { serverId: "server-1", agentId: "king", title: "King" };
+    const chat = { serverId: "server-1", agentId: "chat", title: "Working chat" };
+    await selectVoiceTarget(runtime, king, save);
+    expect(save).toHaveBeenCalledWith(king);
+    expect(engine.startCapture).not.toHaveBeenCalled();
+    await toggleGlobalVoice(runtime, king);
+    await selectVoiceTarget(runtime, chat, save);
+    expect(runtime.isVoiceModeForAgent("server-1", "chat")).toBe(true);
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    expect(adapter.setVoiceMode).toHaveBeenCalledWith(false);
+    expect(engine.clearQueue).toHaveBeenCalled();
+    await toggleGlobalVoice(runtime, chat);
+    expect(runtime.getSnapshot().isVoiceMode).toBe(false);
+    expect(adapter.abortRequest).not.toHaveBeenCalled();
+    await runtime.destroy();
+  });
+  it("publishes the recipient after a direct chat start", async () => {
+    const engine = createAudioEngineMock();
+    const changed = vi.fn();
+    const runtime = createVoiceRuntime({
+      engine,
+      onTargetChanged: changed,
+      getServerInfo: () => createServerInfo(),
+      activateKeepAwake: async () => {},
+      deactivateKeepAwake: async () => {},
+    });
+    runtime.registerSession(createSessionAdapter());
+    await runtime.startVoice("server-1", "chat");
+    expect(changed).toHaveBeenCalledWith("server-1", "chat");
+    await runtime.destroy();
+  });
+  it("does not start a different host when the selected host is disconnected", async () => {
+    const { runtime, engine } = createRuntime();
+    runtime.registerSession(createSessionAdapter());
+    await expect(
+      toggleGlobalVoice(runtime, { serverId: "offline", agentId: "king", title: "King" }),
+    ).rejects.toThrow("not ready");
+    expect(engine.startCapture).not.toHaveBeenCalled();
+    await runtime.destroy();
   });
 });
