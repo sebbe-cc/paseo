@@ -1,14 +1,8 @@
 import { expect, test } from "vitest";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-<<<<<<< HEAD
 import type { PluginTurnPrepareRequest } from "@getpaseo/plugin/server";
 import { PluginHookHandlers, validateBeforeResult } from "./index.js";
-||||||| d34d17a90
-import { PluginHookHandlers } from "./index.js";
-=======
-import { validateBeforeResult, PluginHookHandlers } from "./index.js";
->>>>>>> v0.15.0
 
 const paseo = createPaseoApi(
   new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "lifecycle-unit" }),
@@ -97,16 +91,11 @@ test("session-open hooks reject changes to session identity instead of silently 
         reason: "resume",
         purpose: "interactive",
         env: {},
-<<<<<<< HEAD
-        labels: {},
         initialPrompt: null,
-||||||| d34d17a90
-=======
         title: null,
         labels: {},
         tools: [],
         mcpServers: {},
->>>>>>> v0.15.0
       },
       paseo,
     ),

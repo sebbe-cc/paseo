@@ -1413,17 +1413,11 @@ export class AgentManager {
         reason: "create",
         purpose: "interactive",
         workspaceId: options.workspaceId ?? null,
-<<<<<<< HEAD
         labels: { ...options.labels },
         initialPrompt: options.initialPrompt ?? null,
         systemPrompt: storedConfig.systemPrompt ?? null,
         daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
-||||||| d34d17a90
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
-=======
         title: options.initialTitle ?? storedConfig.title ?? null,
-        labels: options.labels ?? {},
->>>>>>> v0.15.0
       },
     );
     const launchContext = opened.context;
@@ -1530,27 +1524,13 @@ export class AgentManager {
       : resumeOptions;
     const purpose = currentResumeOptions?.purpose ?? "interactive";
 
-<<<<<<< HEAD
+    const launchEnv = record?.launchEnv;
     const preparedResume = await this.prepareSessionConfig(mergedConfig, resolvedAgentId, {
-      purpose,
+      purpose, env: launchEnv,
     });
     let storedConfig = preparedResume.storedConfig;
     let launchConfig = preparedResume.launchConfig;
     const paseoToolPolicy = preparedResume.paseoToolPolicy;
-||||||| d34d17a90
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      mergedConfig,
-      resolvedAgentId,
-      { purpose },
-    );
-=======
-    const launchEnv = record?.launchEnv;
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      mergedConfig,
-      resolvedAgentId,
-      { purpose, env: launchEnv },
-    );
->>>>>>> v0.15.0
     const client = this.requireClient(handle.provider);
     const available = await client.isAvailable();
     if (!available) {
@@ -1569,16 +1549,11 @@ export class AgentManager {
         reason: "resume",
         purpose,
         workspaceId: options?.workspaceId ?? null,
-<<<<<<< HEAD
         labels: { ...options?.labels },
         initialPrompt: null,
         systemPrompt: storedConfig.systemPrompt ?? null,
         daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
-||||||| d34d17a90
-=======
         title: record?.title ?? mergedConfig.title ?? null,
-        labels: record?.labels ?? options?.labels ?? {},
->>>>>>> v0.15.0
       },
     );
     const launchContext = openedResume.context;
@@ -1651,16 +1626,10 @@ export class AgentManager {
         reason: "import",
         purpose: "interactive",
         workspaceId: input.workspaceId,
-<<<<<<< HEAD
         labels: { ...input.labels },
         initialPrompt: null,
         systemPrompt: storedConfig.systemPrompt ?? null,
         daemonAppendSystemPrompt: storedConfig.daemonAppendSystemPrompt ?? null,
-||||||| d34d17a90
-      { reason: "import", purpose: "interactive", workspaceId: input.workspaceId },
-=======
-        labels: input.labels ?? {},
->>>>>>> v0.15.0
       },
     );
     const launchContext = openedImport.context;
@@ -1752,21 +1721,8 @@ export class AgentManager {
       ...overrides,
       provider,
     } as AgentSessionConfig;
-<<<<<<< HEAD
-    const preparedRefresh = await this.prepareSessionConfig(refreshConfig, agentId);
+    const preparedRefresh = await this.prepareSessionConfig(refreshConfig, agentId, { env: existing.launchEnv });
     const paseoToolPolicy = preparedRefresh.paseoToolPolicy;
-||||||| d34d17a90
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      refreshConfig,
-      agentId,
-    );
-=======
-    const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      refreshConfig,
-      agentId,
-      { env: existing.launchEnv },
-    );
->>>>>>> v0.15.0
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
     const opened = await this.openRefreshedSession(
@@ -1776,20 +1732,6 @@ export class AgentManager {
       preparedRefresh.storedConfig,
       preparedRefresh.launchConfig,
       paseoToolPolicy,
-<<<<<<< HEAD
-||||||| d34d17a90
-      undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
-=======
-      existing.launchEnv,
-      {
-        reason: "refresh",
-        purpose: "interactive",
-        workspaceId: existing.workspaceId,
-        title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
-        labels: existing.labels,
-      },
->>>>>>> v0.15.0
     );
     const storedConfig = opened.storedConfig;
     const launchConfig = opened.launchConfig;
@@ -4221,13 +4163,9 @@ export class AgentManager {
   private discardRetainedAgentState(agentId: string): void {
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
-<<<<<<< HEAD
     this.turnNumbers.delete(agentId);
     this.pendingTurnKinds.delete(agentId);
-||||||| d34d17a90
-=======
     this.detachPluginTools(agentId);
->>>>>>> v0.15.0
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }
@@ -5736,18 +5674,13 @@ export class AgentManager {
       reason: PluginSessionOpenRequest["reason"];
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
-<<<<<<< HEAD
       labels?: Record<string, string>;
       initialPrompt?: string | null;
       systemPrompt?: string | null;
       daemonAppendSystemPrompt?: string | null;
-||||||| d34d17a90
-=======
       title?: string | null;
       labels?: Record<string, string>;
->>>>>>> v0.15.0
     },
-<<<<<<< HEAD
   ): Promise<{
     context: AgentLaunchContext;
     instructions: { systemPrompt?: string | null; daemonAppendSystemPrompt?: string | null } | null;
@@ -5756,25 +5689,14 @@ export class AgentManager {
       systemPrompt?: string | null;
       daemonAppendSystemPrompt?: string | null;
     } | null = null;
-||||||| d34d17a90
-  ): Promise<AgentLaunchContext> {
-=======
-  ): Promise<AgentLaunchContext> {
     // A plugin changing during this open must still make the resulting session stale.
     const generation = this.sessionOpenGeneration;
     this.detachPluginTools(agentId);
     let mcpServers: AgentSessionConfig["mcpServers"];
     let mcpServerOwners: Record<string, string> | undefined;
->>>>>>> v0.15.0
     if (this.pluginLifecycle) {
-<<<<<<< HEAD
       const purpose = opening?.purpose ?? "interactive";
       const request: PluginSessionOpenRequest = {
-||||||| d34d17a90
-      const request: PluginSessionOpenRequest = {
-=======
-      const request = {
->>>>>>> v0.15.0
         agentId,
         provider: client.provider,
         cwd,
@@ -5782,31 +5704,22 @@ export class AgentManager {
         reason: opening?.reason ?? "resume",
         purpose,
         env: { ...env },
-<<<<<<< HEAD
         labels: { ...opening?.labels },
         initialPrompt: opening?.initialPrompt ?? this.readInitialPromptText(agentId),
         systemPrompt: opening?.systemPrompt ?? null,
         daemonAppendSystemPrompt: opening?.daemonAppendSystemPrompt ?? null,
-||||||| d34d17a90
-=======
         title: opening?.title ?? null,
-        labels: opening?.labels ?? {},
         tools: [],
         mcpServers: {},
->>>>>>> v0.15.0
       };
       const transformed = await this.pluginLifecycle.before("agent.open.before", request);
       env = transformed.env;
-<<<<<<< HEAD
       instructions = AgentManager.diffSessionOpenInstructions(request, transformed);
-||||||| d34d17a90
-=======
       if (request.purpose === "interactive") {
         this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
         mcpServers = transformed.mcpServers;
         mcpServerOwners = transformed.mcpServerOwners;
       }
->>>>>>> v0.15.0
     }
     const context: AgentLaunchContext = {
       agentId,
@@ -5837,7 +5750,7 @@ export class AgentManager {
         throw error;
       }
     }
-<<<<<<< HEAD
+    this.sessionOpenGenerations.set(agentId, generation);
     return { context, instructions };
   }
 
@@ -5877,8 +5790,9 @@ export class AgentManager {
       client,
       storedConfig.cwd,
       paseoToolPolicy,
-      undefined,
+      existing.launchEnv,
       {
+        title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
         reason: "refresh",
         purpose: "interactive",
         workspaceId: existing.workspaceId,
@@ -5987,7 +5901,7 @@ export class AgentManager {
     let prepared: PluginTurnPrepareRequest;
     try {
       prepared = await withTimeout(
-        this.pluginLifecycle.before("agent.turn_prepare", request),
+        this.pluginLifecycle.before("agent.turn_prepare.before", request),
         TURN_PREPARE_TIMEOUT_MS,
         `agent.turn_prepare timed out after ${TURN_PREPARE_TIMEOUT_MS}ms`,
       );
@@ -6010,12 +5924,6 @@ export class AgentManager {
       { type: "text", text: `${wrapPromptWithTurnContext("", context)}` },
       ...prompt,
     ] as AgentPromptInput;
-||||||| d34d17a90
-    return context;
-=======
-    this.sessionOpenGenerations.set(agentId, generation);
-    return context;
->>>>>>> v0.15.0
   }
 
   private resolveProviderLaunchConfig(

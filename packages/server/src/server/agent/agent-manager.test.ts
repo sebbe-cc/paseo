@@ -12523,7 +12523,6 @@ test("reads the last durable assistant response without loading a stored-only ch
   expect(manager.getAgent("stored-child")).toBeNull();
 });
 
-<<<<<<< HEAD
 class TurnPrepareRecordingSession extends TestAgentSession {
   readonly receivedPrompts: AgentPromptInput[] = [];
 
@@ -12676,8 +12675,8 @@ test("a failing turn_prepare hook never stops the turn", async () => {
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
-||||||| d34d17a90
-=======
+});
+
 function runtimeCleanup(manager: AgentManager) {
   let now = Date.now();
   let protectedCaller = (_agentId: string) => false;
@@ -12849,5 +12848,4 @@ test("an out-of-band command racing idle cleanup waits for the resumed runtime",
   expect(await command).toEqual({ disposition: "out_of_band" });
   expect(h.commands).toEqual(["/maintenance"]);
   expect(h.prompts).toEqual([]);
->>>>>>> v0.15.0
 });
