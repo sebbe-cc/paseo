@@ -1,7 +1,20 @@
+import type { Command } from "commander";
 import { renderError, toCommandError, defaultOutputOptions } from "./output/render.js";
 import { createCli } from "./cli.js";
 import { classifyInvocation } from "./classify.js";
 import { openDesktopWithProject } from "./commands/open.js";
+import { dispatchPluginCommand, printTopLevelHelp } from "./commands/plugin/dispatch.js";
+
+/** Built-in top-level command names and aliases. Anything else may be a plugin CLI. */
+export function getTopLevelCommandNames(program: Command): Set<string> {
+  const names = new Set<string>();
+  for (const command of program.commands) {
+    names.add(command.name());
+    const alias = command.alias();
+    if (alias) names.add(alias);
+  }
+  return names;
+}
 
 export interface RunCliOptions {
   cwd?: string;
@@ -63,6 +76,26 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   }
 
   const program = createCli();
+  const cliArgs = parseArgv.slice(2);
+  const builtInNames = getTopLevelCommandNames(program);
+  if (cliArgs.length > 0 && cliArgs[0]!.startsWith("-")) {
+    const [first] = cliArgs;
+    if (first === "--help" || first === "-h") {
+      return printTopLevelHelp({
+        helpText: program.helpInformation(),
+        argv: cliArgs,
+        builtInNames,
+      });
+    }
+  } else if (cliArgs.length > 0 && !builtInNames.has(cliArgs[0]!)) {
+    const dispatch = await dispatchPluginCommand({
+      name: cliArgs[0]!,
+      argv: cliArgs.slice(1),
+      cwd: options.cwd ?? process.cwd(),
+      builtInNames,
+    });
+    if (dispatch.handled) return dispatch.exitCode;
+  }
   try {
     await program.parseAsync(parseArgv, { from: "node" });
   } catch (error) {
