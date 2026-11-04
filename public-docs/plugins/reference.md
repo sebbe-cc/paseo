@@ -2552,9 +2552,3 @@ Use `paseo plugin ls` to read the current status and error.
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
 
-### Fork: compaction interception
-
-`server.addHook("agent.compact.before", async ({ request }) => ...)` receives
-`agentId`, `provider`, `reason`, `source`, `usage` and `skip`. Only `skip` may
-change; returning `{ ...request, skip: true }` replaces compaction. The legacy
-`server.before("agent.compact", ...)` registration remains supported.
