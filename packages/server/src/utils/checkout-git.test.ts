@@ -1488,7 +1488,8 @@ const x = 1;
     ]);
   });
 
-  it("falls back to the local base branch when origin is absent", async () => {
+  it("uses an explicitly stored local base when origin is absent", async () => {
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: "main", baseRef: "refs/heads/main" });
     execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
     writeFileSync(join(repoDir, "local-feature.txt"), "feature\n");
     execFileSync("git", ["add", "local-feature.txt"], { cwd: repoDir });
