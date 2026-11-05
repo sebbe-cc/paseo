@@ -154,10 +154,17 @@ import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
+import { SidebarProjectGroupRow } from "@/components/sidebar/sidebar-project-group-row";
+import {
+  buildSidebarProjectListItems,
+  resolveSidebarProjectDrop,
+  type SidebarProjectListItem,
+} from "@/sidebar-project-groups/layout";
+import { useSidebarProjectGroups } from "@/sidebar-project-groups/model";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
-const projectViewKeyExtractor = (project: SidebarProjectEntry) => project.viewKey;
+const projectListItemKeyExtractor = (item: SidebarProjectListItem<SidebarProjectEntry>) => item.key;
 
 const WORKSPACE_STATUS_DOT_WIDTH = 14;
 const ThemedExternalLink = withUnistyles(ExternalLink);
@@ -2174,6 +2181,13 @@ function ProjectModeList({
 }) {
   const { t } = useTranslation();
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
+  const projectGroups = useSidebarProjectGroups();
+  const collapsedProjectGroupKeys = useSidebarCollapsedSectionsStore(
+    (state) => state.collapsedSidebarProjectGroupKeys,
+  );
+  const toggleProjectGroupCollapsed = useSidebarCollapsedSectionsStore(
+    (state) => state.toggleSidebarProjectGroupCollapsed,
+  );
   const [creatingWorkspaceIds, setCreatingWorkspaceIds] = useState<Set<string>>(() => new Set());
   const creatingWorkspaceTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
@@ -2267,9 +2281,34 @@ function ProjectModeList({
     });
   }, [creatingWorkspaceIds, projects]);
 
+  const projectListItems = useMemo(
+    () =>
+      buildSidebarProjectListItems({
+        projects: unpinnedProjects,
+        groups: projectGroups,
+        collapsedGroupKeys: collapsedProjectGroupKeys,
+        filterActive: hasActiveHostFilter || hasActiveProjectFilter,
+      }),
+    [
+      collapsedProjectGroupKeys,
+      hasActiveHostFilter,
+      hasActiveProjectFilter,
+      projectGroups,
+      unpinnedProjects,
+    ],
+  );
+
+  // With groups, a drop only keeps the flat project order: group membership
+  // is owned by the contributing plugin and edited in its manager UI.
+  // Without groups every item is a project row, so the drop order is the list.
   const handleProjectDragEnd = useCallback(
-    (reorderedProjects: SidebarProjectEntry[]) => {
-      const reorderedProjectKeys = reorderedProjects.map((project) => project.viewKey);
+    (reorderedItems: SidebarProjectListItem<SidebarProjectEntry>[]) => {
+      const reorderedProjectKeys =
+        projectGroups.length === 0
+          ? reorderedItems.map((item) => item.key)
+          : (resolveSidebarProjectDrop({ previous: projectListItems, next: reorderedItems })
+              ?.order ?? []);
+      if (reorderedProjectKeys.length === 0) return;
       const currentProjectOrder = getProjectOrder();
       if (
         !hasVisibleOrderChanged({
@@ -2287,7 +2326,7 @@ function ProjectModeList({
         }),
       );
     },
-    [getProjectOrder, setProjectOrder],
+    [getProjectOrder, projectGroups.length, projectListItems, setProjectOrder],
   );
 
   const handleWorkspaceReorder = useCallback(
@@ -2404,9 +2443,40 @@ function ProjectModeList({
   );
 
   const renderProject = useCallback(
-    ({ item, drag, isActive, dragHandleProps }: DraggableRenderItemInfo<SidebarProjectEntry>) =>
-      renderProjectBlock(item, { drag, isDragging: isActive, dragHandleProps }),
-    [renderProjectBlock],
+    ({
+      item,
+      drag,
+      isActive,
+      dragHandleProps,
+    }: DraggableRenderItemInfo<SidebarProjectListItem<SidebarProjectEntry>>) => {
+      if (item.kind === "group") {
+        return (
+          <SidebarProjectGroupRow
+            group={item.group}
+            memberWorkspaces={item.members.flatMap((member) => member.workspaces)}
+            memberCount={item.members.length}
+            collapsed={item.collapsed}
+            onToggle={toggleProjectGroupCollapsed}
+          />
+        );
+      }
+      const block = renderProjectBlock(item.project, {
+        drag,
+        isDragging: isActive,
+        dragHandleProps,
+      });
+      if (item.groupKey === null) return block;
+      return (
+        <View
+          role="group"
+          style={styles.sidebarProjectGroupMember}
+          testID={`sidebar-project-group-rows-${item.groupKey}-${item.key}`}
+        >
+          {block}
+        </View>
+      );
+    },
+    [renderProjectBlock, toggleProjectGroupCollapsed],
   );
 
   const renderPinnedChatRow = useCallback(
@@ -2478,8 +2548,8 @@ function ProjectModeList({
     ) : (
       <DraggableList
         testID="sidebar-project-list"
-        data={unpinnedProjects}
-        keyExtractor={projectViewKeyExtractor}
+        data={projectListItems}
+        keyExtractor={projectListItemKeyExtractor}
         renderItem={renderProject}
         onDragEnd={handleProjectDragEnd}
         extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
@@ -2589,6 +2659,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   projectListContainer: {
     width: "100%",
+  },
+  sidebarProjectGroupMember: {
+    paddingLeft: theme.spacing[4],
   },
   pinnedSection: {
     marginBottom: theme.spacing[1],

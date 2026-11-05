@@ -91,6 +91,42 @@ export interface PluginSidebarItemContribution<Text extends PluginText = string>
 }
 
 /**
+ * One named project group a plugin contributes to the sidebar's project list.
+ *
+ * `projectIds` names daemon projects by id; a sidebar project joins the
+ * first group (in `order`, then name) that lists any of its host placements'
+ * project ids. Unknown ids match nothing, so a group whose projects are all
+ * gone renders as an empty header the user can still manage or collapse.
+ */
+export interface PluginSidebarProjectGroup {
+  /** Stable within the contributing plugin; shared with the collapse store key. */
+  id: string;
+  /** Header text, drawn verbatim. */
+  name: string;
+  /** Daemon project ids in member order. */
+  projectIds: readonly string[];
+  /** Headers render in ascending order; ties break on name. */
+  order: number;
+}
+
+export interface PluginSidebarProjectGroupsContribution {
+  /** Groups in any order; the host sorts by `order`, then name. */
+  groups: readonly PluginSidebarProjectGroup[];
+  /** Opens the plugin's group manager, e.g. its screen. Drawn as the header menu's manage item. */
+  onManage?: () => void;
+  /** Manage item label; defaults to "Manage project groups". */
+  manageLabel?: string;
+}
+
+/** One project-groups contribution per plugin; `update` replaces its groups in place. */
+export interface PluginSidebarProjectGroupsRegistration {
+  /** Supply a complete contribution to replace it. */
+  update(contribution: PluginSidebarProjectGroupsContribution): void;
+  /** Idempotent. Updates after removal do nothing. */
+  remove(): void;
+}
+
+/**
  * A Lucide icon name, inline SVG markup, or a component. Components receive the surface's size
  * and color; buttons widen the props with their host and target context.
  */
@@ -193,6 +229,10 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addComposerPill(
     contribution: PluginComposerPillContribution<PluginText>,
   ): PluginButtonRegistration<PluginText>;
+  /** Undefined on older hosts; check for it before calling. */
+  addSidebarProjectGroups?(
+    contribution: PluginSidebarProjectGroupsContribution,
+  ): PluginSidebarProjectGroupsRegistration;
   addAttachmentSource(contribution: PluginAttachmentSourceContribution<PluginText>): PluginCleanup;
   addTheme(contribution: PluginThemeContribution<PluginText>): PluginCleanup;
   addFilePanel(contribution: PluginFilePanelContribution<PluginText>): PluginCleanup;
