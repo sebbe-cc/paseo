@@ -59,6 +59,18 @@ function pruneNodePty(nodeModules, platform, arch) {
   }
 }
 
+// node-hid ships one N-API prebuild per platform/arch (plus the hidraw
+// variants on Linux). Keep the runtime's match and drop the rest.
+function pruneNodeHid(nodeModules, platform, arch) {
+  const prebuilds = path.join(nodeModules, "node-hid", "prebuilds");
+  if (!fs.existsSync(prebuilds)) return;
+  const keep = new Set();
+  for (const entry of fs.readdirSync(prebuilds)) {
+    if (entry.includes(`${platform}-${arch}`)) keep.add(entry);
+  }
+  pruneChildrenExcept(prebuilds, keep);
+}
+
 function pruneSharpLibvips(nodeModules, platform, arch) {
   const prefix = `sharp-libvips-${platform}-${arch}`;
   const imgDir = path.join(nodeModules, "@img");
@@ -88,6 +100,7 @@ function pruneNativeModules(appOutDir, platform, arch) {
 
   pruneClaudeAgentSdk(nodeModules, platform, arch);
   pruneNodePty(nodeModules, platform, arch);
+  pruneNodeHid(nodeModules, platform, arch);
   pruneSharpLibvips(nodeModules, platform, arch);
 
   const after = dirSizeSync(nodeModules);
