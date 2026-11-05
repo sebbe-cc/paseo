@@ -569,10 +569,9 @@ index 45f80ae..5e23c3d 100644
  import { COMPONENTS, componentSignature, type ComponentName } from "../shared/core/catalog";
  
 diff --git a/server/project.ts b/server/project.ts
-index 4789d93..07bb729 100644
+index 4789d93..870614c 100644
 --- a/server/project.ts
 +++ b/server/project.ts
-index 4789d93..07bb729 100644
 @@ -1,6 +1,9 @@
  import { execFile } from "node:child_process";
 +import { readFile } from "node:fs/promises";
@@ -593,7 +592,7 @@ index 4789d93..07bb729 100644
      });
      return { ok: true, stdout };
    } catch (cause) {
-@@ -56,16 +61,135 @@ async function runGit(
+@@ -56,16 +61,139 @@ async function runGit(
    }
  }
  
@@ -639,22 +638,26 @@ index 4789d93..07bb729 100644
 +  return { ref: v.ref, forkSha: v.forkSha, missing: v.missing === true };
 +}
 +
-+/** The stored base on a workspace entry, without depending on new SDK types. */
++/**
++ * The stored base on a workspace entry, without depending on new SDK types.
++ * The daemon reports it under gitRuntime.base; a top-level base wins when
++ * both are present so older shapes keep working.
++ */
 +function storedBaseOf(entry: unknown): StoredWorkspaceBase | null {
-+  return asStoredBase((entry as { base?: unknown } | null)?.base);
++  if (typeof entry !== "object" || entry === null) return null;
++  const record = entry as { base?: unknown; gitRuntime?: { base?: unknown } | null };
++  return asStoredBase(record.base) ?? asStoredBase(record.gitRuntime?.base);
 +}
 +
-+let workspaceListCache: { at: number; entries: unknown[] } | null = null;
-+const WORKSPACE_LIST_TTL_MS = 60_000;
-+
++/**
++ * The daemon's workspace listing, read fresh on every view: entries carry
++ * each workspace's stored base, and a shared cache would serve one agent's
++ * list (and one run's bases) to the next.
++ */
 +async function readWorkspaceEntries(paseo: PaseoApi): Promise<unknown[] | null> {
-+  if (workspaceListCache && Date.now() - workspaceListCache.at < WORKSPACE_LIST_TTL_MS) {
-+    return workspaceListCache.entries;
-+  }
 +  try {
 +    const res = (await paseo.workspaces.list()) as { entries?: unknown };
 +    if (!res || !Array.isArray(res.entries)) return null;
-+    workspaceListCache = { at: Date.now(), entries: res.entries };
 +    return res.entries;
 +  } catch {
 +    return null;
@@ -738,7 +741,7 @@ index 4789d93..07bb729 100644
    const inside = await runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
    if (!inside.ok || inside.stdout.trim() !== "true") {
      return failure("not-git", "This agent's workspace isn't a git checkout");
-@@ -76,13 +200,195 @@ async function detectGitBranches(cwd: string): Promise<
+@@ -76,13 +204,195 @@ async function detectGitBranches(cwd: string): Promise<
    const branch = sym.ok ? sym.stdout.trim() || null : null;
    const checkout = head === null ? "unborn" : branch !== null ? "branch" : "detached";
  
@@ -940,7 +943,7 @@ index 4789d93..07bb729 100644
  }
  
  function mapStatusChar(code: string): ChangeKind {
-@@ -419,7 +725,7 @@ export async function readProjectChanges(
+@@ -419,7 +729,7 @@ export async function readProjectChanges(
    const cwd = await resolveAgentCwd(paseo, agentId);
    if (!cwd) return demoChanges(target, filter);
  
@@ -949,7 +952,7 @@ index 4789d93..07bb729 100644
    if (!gitInfo.ok) return gitInfo;
  
    let diffArgs: string[];
-@@ -435,23 +741,41 @@ export async function readProjectChanges(
+@@ -435,23 +745,41 @@ export async function readProjectChanges(
      };
      diffArgs = ["show", "--format=", "--unified=3", target.sha];
      numstatArgs = ["show", "--format=", "--numstat", "--find-renames", target.sha];
@@ -995,7 +998,7 @@ index 4789d93..07bb729 100644
    }
  
    const [numstatRes, nameStatusRes, patchRes] = await Promise.all([
-@@ -496,10 +820,14 @@ export async function readProjectChanges(
+@@ -496,10 +824,14 @@ export async function readProjectChanges(
      });
    }
  
@@ -1012,7 +1015,7 @@ index 4789d93..07bb729 100644
      files.some((f) => f.path === p.path),
    );
  
-@@ -507,9 +835,9 @@ export async function readProjectChanges(
+@@ -507,9 +839,9 @@ export async function readProjectChanges(
      ok: true,
      scope,
      files,
@@ -1024,7 +1027,7 @@ index 4789d93..07bb729 100644
      patches,
      livePatches: true,
      takenAt: Date.now(),
-@@ -554,11 +882,11 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+@@ -554,11 +886,11 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
    const cwd = await resolveAgentCwd(paseo, agentId);
    if (!cwd) return demoCommits();
  
@@ -1039,7 +1042,7 @@ index 4789d93..07bb729 100644
    const logArgs = onBase
      ? ["log", `-n`, String(MAX_COMMITS), "--format=%H%x09%h%x09%s%x09%an%x09%at"]
      : ["log", range, "--format=%H%x09%h%x09%s%x09%an%x09%at"];
-@@ -579,7 +907,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+@@ -579,7 +911,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
    let ahead: number | null = null;
    let behind: number | null = null;
    if (!onBase) {
@@ -1048,7 +1051,7 @@ index 4789d93..07bb729 100644
      if (counts.ok) {
        const [bStr, aStr] = counts.stdout.trim().split(/\s+/);
        behind = Number(bStr) || 0;
-@@ -594,6 +922,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+@@ -594,6 +926,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
      head: gitInfo.head,
      base: gitInfo.base,
      onBase,
@@ -1056,7 +1059,7 @@ index 4789d93..07bb729 100644
      ahead,
      behind,
      commits: commits.slice(0, MAX_COMMITS),
-@@ -608,7 +937,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
+@@ -608,7 +941,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
    const cwd = await resolveAgentCwd(paseo, agentId);
    if (!cwd) return demoPullRequest();
  
@@ -1065,7 +1068,7 @@ index 4789d93..07bb729 100644
    if (!gitInfo.ok) return gitInfo;
  
    try {
-@@ -687,7 +1016,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
+@@ -687,7 +1020,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
          title: String(pr.title ?? ""),
          url: String(pr.url ?? ""),
          state,
@@ -1074,7 +1077,7 @@ index 4789d93..07bb729 100644
          headRef: String(pr.headRefName ?? gitInfo.branch ?? ""),
          checks: { state: checksState, passed, failed, pending, total },
          review: { state: reviewState, requests: reviewRequests },
-@@ -835,10 +1164,10 @@ export async function readProjectEnvironments(
+@@ -835,10 +1168,10 @@ export async function readProjectEnvironments(
          }));
          const live = threads.filter((t) => !t.archived);
          const dir = ws.workspaceDirectory;
@@ -1087,7 +1090,7 @@ index 4789d93..07bb729 100644
          return {
            id: ws.id,
            name: ws.title ?? ws.id,
-@@ -846,7 +1175,7 @@ export async function readProjectEnvironments(
+@@ -846,7 +1179,7 @@ export async function readProjectEnvironments(
            provider: ws.workspaceKind,
            path: dir,
            branch,
@@ -1096,7 +1099,7 @@ index 4789d93..07bb729 100644
            base,
            git: ws.projectKind === "git",
            life: ws.archivingAt ? "retiring" : "ready",
-@@ -877,8 +1206,10 @@ export async function readProjectEnvironments(
+@@ -877,8 +1210,10 @@ export async function readProjectEnvironments(
  }
  
  async function readWorkspaceDetail(
@@ -1107,7 +1110,7 @@ index 4789d93..07bb729 100644
  ): Promise<EnvironmentDetail> {
    if (!directory) {
      return {
-@@ -894,7 +1225,7 @@ async function readWorkspaceDetail(
+@@ -894,7 +1229,7 @@ async function readWorkspaceDetail(
        fetchedAt: Date.now(),
      };
    }
@@ -1116,7 +1119,7 @@ index 4789d93..07bb729 100644
    if (!gitInfo.ok) {
      return {
        ok: true,
-@@ -916,9 +1247,9 @@ async function readWorkspaceDetail(
+@@ -916,9 +1251,9 @@ async function readWorkspaceDetail(
        branch: gitInfo.branch,
        checkout: gitInfo.checkout,
        head: gitInfo.head,
@@ -1128,7 +1131,7 @@ index 4789d93..07bb729 100644
        ahead: null,
        behind: null,
        uncommitted: {
-@@ -948,7 +1279,7 @@ export async function readProjectEnvironment(
+@@ -948,7 +1283,7 @@ export async function readProjectEnvironment(
    const workspaces = await paseo.workspaces.list();
    const ws = workspaces.entries.find((w) => w.id === environmentId);
    if (!ws) return { ok: false, reason: "not-found", message: "Workspace not found" };
@@ -1163,7 +1166,6 @@ diff --git a/shared/core/project.ts b/shared/core/project.ts
 index 6a10470..bc2d68e 100644
 --- a/shared/core/project.ts
 +++ b/shared/core/project.ts
-index 6a10470..bc2d68e 100644
 @@ -144,6 +144,10 @@ export type ChangesScope =
        readonly head: string | null;
        readonly base: string;
