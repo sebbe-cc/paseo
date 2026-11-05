@@ -16,6 +16,7 @@ import type {
   PluginSidebarItemContribution as SDKPluginSidebarItemContribution,
   PluginScreenContribution as SDKPluginScreenContribution,
   PluginSettingsScreenContribution as SDKPluginSettingsScreenContribution,
+  PluginSidebarProjectGroup as SDKPluginSidebarProjectGroup,
   PluginTimelineRendererContribution,
   PluginTimelineTransformerContribution,
   PluginPanelLocation,
@@ -43,9 +44,21 @@ export type EvaluatedPluginWorkspacePanelContribution = PluginWorkspacePanelCont
   locations: readonly PluginPanelLocation[];
 };
 
+/**
+ * A plugin's project-groups contribution: the normalized groups it drew
+ * headers for, refreshed in place by `update`. The host merges every
+ * installation's entry in snapshot order when the project list renders.
+ */
+export interface EvaluatedPluginSidebarProjectGroups {
+  groups: SDKPluginSidebarProjectGroup[];
+  onManage?: () => void;
+  manageLabel?: string;
+}
+
 export interface EvaluatedPlugin {
   id: string;
   cleanup: PluginCleanup;
+  sidebarProjectGroups: EvaluatedPluginSidebarProjectGroups | null;
   surfaces: PluginScreenContribution[];
   settingsScreens: PluginSettingsScreenContribution[];
   sidebarItems: Record<PluginSidebarSection, PluginSidebarItemContribution[]>;

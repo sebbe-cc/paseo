@@ -17,6 +17,7 @@ import {
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
 import { buildSidebarProjection } from "./sidebar-projection";
+import { useSidebarProjectGroups } from "@/sidebar-project-groups/model";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
 import { filterWorkspacesByLabels, type SidebarWorkspaceGroup } from "./sidebar-labels";
 import { filterWorkspacesByProjects, resolveActiveProjectFilters } from "./sidebar-project-filter";
@@ -69,7 +70,11 @@ export function SidebarModelProvider({
   const collapsedWorkspaceGroupKeys = useSidebarCollapsedSectionsStore(
     (state) => state.collapsedWorkspaceGroupKeys,
   );
+  const collapsedProjectGroupKeys = useSidebarCollapsedSectionsStore(
+    (state) => state.collapsedSidebarProjectGroupKeys,
+  );
   const pinnedCollapsed = useSidebarCollapsedSectionsStore((state) => state.collapsedPinned);
+  const projectGroups = useSidebarProjectGroups();
   const pinnedWorkspaceOrder = useSidebarOrderStore((state) => state.pinnedWorkspaceOrder);
   const toggleProjectCollapsed = useSidebarCollapsedSectionsStore(
     (state) => state.toggleProjectCollapsed,
@@ -159,10 +164,15 @@ export function SidebarModelProvider({
       pinnedCollapsed,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
+      projectGroups: {
+        groups: projectGroups,
+        collapsedGroupKeys: collapsedProjectGroupKeys,
+      },
       t,
     }),
     [
       collapsedProjectKeys,
+      collapsedProjectGroupKeys,
       collapsedWorkspaceGroupKeys,
       groupMode,
       list.projectNamesByViewKey,
@@ -170,6 +180,7 @@ export function SidebarModelProvider({
       pinnedCollapsed,
       pinnedKeys,
       pinnedWorkspaceOrder,
+      projectGroups,
       filteredWorkspaceEntriesByKey,
       t,
     ],

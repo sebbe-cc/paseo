@@ -58,6 +58,7 @@ import { SIDEBAR_ROW_ITEMS, type SidebarRowItem } from "./row-items";
 import { useWorkspaceLabelProjection } from "@/workspace-labels";
 import { WorkspaceLabelDot } from "@/workspace-labels/swatch";
 import { WorkspaceLabelManagerModal } from "@/workspace-labels/manager-modal";
+import { useSidebarProjectGroups } from "@/sidebar-project-groups/model";
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -490,6 +491,36 @@ function LabelFilterPage({
       <MenuItem onSelect={onManage} testID="sidebar-label-manage">
         {t("workspaceLabels.manage.open")}
       </MenuItem>
+      <SidebarProjectGroupManageItems />
+    </>
+  );
+}
+
+/**
+ * One manage row per installed plugin that groups the sidebar's project list.
+ * The plugin opens its own manager through `onManage`; the host only offers
+ * the row, next to the label manager.
+ */
+function SidebarProjectGroupManageItems(): ReactElement | null {
+  const projectGroups = useSidebarProjectGroups();
+  const seen = new Set<string>();
+  const entries = projectGroups.filter((group) => {
+    if (!group.onManage || seen.has(group.pluginId)) return false;
+    seen.add(group.pluginId);
+    return true;
+  });
+  if (entries.length === 0) return null;
+  return (
+    <>
+      {entries.map((group) => (
+        <MenuItem
+          key={group.pluginId}
+          onSelect={group.onManage}
+          testID={`sidebar-project-group-manage-${group.pluginId}`}
+        >
+          {group.manageLabel ?? "Manage project groups"}
+        </MenuItem>
+      ))}
     </>
   );
 }
