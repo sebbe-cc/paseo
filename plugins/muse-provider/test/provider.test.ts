@@ -92,6 +92,7 @@ async function harness(
     mode = "onRequest",
     model: string | null = "meta/muse-spark-1.3",
     sessionEnv: Record<string, string> = {},
+    thinkingOption: string | null | undefined = "high",
   ) {
     await send({
       type: "session.open",
@@ -106,7 +107,8 @@ async function harness(
         persist: true,
         mode,
         model: model ?? undefined,
-        thinkingOption: "high",
+        // null exercises an unset composer value so persistence/catalog must supply the level.
+        thinkingOption: thinkingOption ?? undefined,
         systemPrompt: "Test instructions",
       },
       persistence,
@@ -893,6 +895,84 @@ test("session startup accepts described catalog efforts and publishes the comple
       thinkingOptions: model.variants.map((id) => ({ id, isDefault: id === "max" })),
     },
   });
+  await h.send({
+    type: "session.configure",
+    requestId: "choose-max",
+    sessionId: "paseo-session",
+    changes: { thinkingOption: "max" },
+  });
+  await h.wait((event) => event.type === "request.completed" && event.requestId === "choose-max");
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  expect(
+    (await h.recorded()).find((frame) => frame.method === "turn/start").params.reasoningEffort,
+  ).toBe("max");
+});
+test("fresh open mirrors the configured effort into the host session default", async () => {
+  const h = await harness();
+  expect(await h.open()).toEqual({
+    type: "session.ready",
+    requestId: "open",
+    sessionId: "paseo-session",
+  });
+  const frames = await h.recorded();
+  const startIndex = frames.findIndex((frame) => frame.method === "session/start");
+  const setIndex = frames.findIndex((frame) => frame.method === "session/setReasoningEffort");
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(setIndex).toBeGreaterThan(startIndex);
+  expect(frames[setIndex].params).toMatchObject({ reasoningEffort: "high" });
+});
+test("configure mirrors the chosen effort into the host session default", async () => {
+  const h = await harness();
+  await h.open();
+  await h.send({
+    type: "session.configure",
+    requestId: "choose-max",
+    sessionId: "paseo-session",
+    changes: { thinkingOption: "max" },
+  });
+  await h.wait((event) => event.type === "request.completed" && event.requestId === "choose-max");
+  const frames = await h.recorded();
+  const applied = frames.filter((frame) => frame.method === "session/setReasoningEffort");
+  expect(applied.length).toBeGreaterThanOrEqual(2);
+  expect(applied.at(-1).params).toMatchObject({ reasoningEffort: "max" });
+  // The per-turn override still rides along, so older hosts keep working.
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  expect(
+    (await h.recorded()).find((frame) => frame.method === "turn/start").params.reasoningEffort,
+  ).toBe("max");
+});
+test("resume re-applies the saved effort to the host session", async () => {
+  const h = await harness("resume-without-cursor");
+  expect(
+    await h.open(
+      {
+        version: 1,
+        data: { sessionId: "saved-session", model: "meta/muse-spark-1.3", thinkingOption: "max" },
+      },
+      "onRequest",
+      "meta/muse-spark-1.3",
+      {},
+      null,
+    ),
+  ).toEqual({
+    type: "session.ready",
+    requestId: "open",
+    sessionId: "paseo-session",
+  });
+  const frames = await h.recorded();
+  const resumeIndex = frames.findIndex((frame) => frame.method === "session/resume");
+  const setIndex = frames.findIndex((frame) => frame.method === "session/setReasoningEffort");
+  expect(resumeIndex).toBeGreaterThanOrEqual(0);
+  expect(setIndex).toBeGreaterThan(resumeIndex);
+  expect(frames[setIndex].params).toMatchObject({ reasoningEffort: "max" });
+  const config = await h.wait((event) => event.type === "session.config");
+  expect(config).toMatchObject({ config: { thinkingOption: "max" } });
+});
+test("open and configure survive a host without session/setReasoningEffort", async () => {
+  const h = await harness("text-reasoning", { MUSE_TEST_REJECT_EFFORT: "1" });
+  expect(await h.open()).toMatchObject({ type: "session.ready" });
   await h.send({
     type: "session.configure",
     requestId: "choose-max",
