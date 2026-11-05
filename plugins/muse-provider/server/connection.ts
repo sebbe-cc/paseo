@@ -163,12 +163,25 @@ export class MspConnection {
       delay(1000, undefined, { ref: false }).then(() => false),
     ]);
     if (drained) return;
-    await terminateProcess(this.child);
+    await terminateProcess(this.child).catch(() => {});
     const stopped = await Promise.race([
       this.exited.then(() => true),
       delay(5000, undefined, { ref: false }).then(() => false),
     ]);
-    if (!stopped) throw new MuseError("timeout", "Muse host did not close after termination");
+    if (stopped) return;
+    // A host that stays up (or whose pipe a child keeps open) must not take
+    // the daemon down with an unhandled rejection: log, kill again, and
+    // release the pipes instead of throwing.
+    process.stderr.write(
+      `Muse host did not close after termination (pid ${this.child.pid ?? "unknown"}); force-killing it\n`,
+    );
+    await terminateProcess(this.child).catch(() => {});
+    try {
+      this.child.kill("SIGKILL");
+    } catch {}
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
   }
   private write(frame: object): void {
     this.child.stdin.write(JSON.stringify(frame) + "\n");
