@@ -37,7 +37,7 @@ export function labelWorkspaceGroupKey(labelKey: string): string {
 }
 
 /**
- * One section per label in use, in catalog order, then Unlabelled.
+ * One section per label in use, then Unlabelled.
  *
  * A workspace with several labels is listed under each of them: a label is something you
  * attached, and hiding the workspace from one of its labels would make that label lie. Labels
@@ -45,11 +45,18 @@ export function labelWorkspaceGroupKey(labelKey: string): string {
  *
  * Sections come from the workspaces rather than the catalog so a name whose catalog has not
  * loaded yet still groups; it just has no color until the catalog arrives.
+ *
+ * Without a manual `labelGroupOrder` the sections follow the catalog, then names
+ * alphabetically. A stored order — the same drag-to-reorder interaction and persistence as
+ * the project headers — wins over the catalog: stored sections first in stored order, then
+ * every new label in the catalog fallback. Unlabelled always stays last.
  */
 export function labelWorkspaceGroups(input: {
   workspaces: readonly SidebarWorkspaceEntry[];
   catalog: readonly WorkspaceLabelDefinition[];
   unlabelledTitle: string;
+  /** Manual section order, as group keys. Saved the same way as the project order. */
+  labelGroupOrder?: readonly string[];
 }): SidebarWorkspaceGroup[] {
   const definitionByKey = new Map(
     input.catalog.map((definition) => [workspaceLabelKey(definition.name), definition]),
@@ -77,8 +84,19 @@ export function labelWorkspaceGroups(input: {
     }
   }
 
+  const manualOrder = new Map(
+    (input.labelGroupOrder ?? []).map((groupKey, index) => [groupKey, index]),
+  );
   const groups: SidebarWorkspaceGroup[] = [...sections.entries()]
     .sort(([leftKey, left], [rightKey, right]) => {
+      const leftManual = manualOrder.get(labelWorkspaceGroupKey(leftKey));
+      const rightManual = manualOrder.get(labelWorkspaceGroupKey(rightKey));
+      if (leftManual !== undefined || rightManual !== undefined) {
+        // A manually ordered section always beats an unordered one, so new labels land last.
+        if (leftManual === undefined) return 1;
+        if (rightManual === undefined) return -1;
+        if (leftManual !== rightManual) return leftManual - rightManual;
+      }
       const leftOrder = catalogOrder.get(leftKey) ?? Number.POSITIVE_INFINITY;
       const rightOrder = catalogOrder.get(rightKey) ?? Number.POSITIVE_INFINITY;
       if (leftOrder !== rightOrder) return leftOrder - rightOrder;
