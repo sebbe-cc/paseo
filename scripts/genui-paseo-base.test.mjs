@@ -1,9 +1,10 @@
 // pa-9av7.5: genui Changes()/Commits()/PullRequest() measure against the
-// workspace base Paseo reports, not a stale local default branch. The branch
-// diff carries uncommitted tracked changes and untracked files. A stored base
-// that no longer resolves falls back to the recorded fork point and says so.
-// A daemon that predates the stored base falls back to the fetched remote
-// default branch (the pa-kw2m stop-gap, restored here). Replaces pa-kw2m.
+// workspace base Paseo reports and nothing else. The branch diff carries
+// uncommitted tracked changes and untracked files. A stored base that no
+// longer resolves falls back to the recorded fork point and says so; a
+// ref:null base compares with its fork SHA. When Paseo reports no base, or
+// the lookup fails, the reader returns unavailable instead of guessing
+// another branch (no pa-kw2m-style fetch/default-branch resolver).
 //
 // Applies the repo's genui patch to the pinned paseo-plugin-genui@0.1.7
 // tarball in a temp dir and runs the server's project reader against real
@@ -11,7 +12,7 @@
 // behind, and worktrees with their own commits.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,16 +132,54 @@ const wsEntry = (id, workspaceDirectory, base) => ({
   ...(base === undefined ? {} : { base }),
 });
 
-// resolveAgentCwd caches per agent id; a fresh id per checkout.
+// resolveAgentWorkspace reads the agent once; a fresh id per checkout.
 let agentSeq = 0;
-const paseoAt = (cwd, entries = []) => ({
+const paseoAt = (cwd, entries = [], opts = {}) => ({
   agents: {
-    ref: () => ({ current: () => ({ cwd }), refresh: async () => null }),
+    ref: () => ({
+      current: () => ({ cwd, workspaceId: opts.workspaceId ?? null }),
+      refresh: async () => null,
+    }),
     list: async () => ({ entries: [] }),
   },
-  workspaces: { list: async () => ({ entries }) },
+  workspaces: {
+    ...(opts.get ? { get: opts.get } : {}),
+    list: opts.list ?? (async () => ({ entries })),
+  },
 });
 const agent = () => `agent-base-${++agentSeq}`;
+
+const getById = (entries) => async (id) => entries.find((e) => e.id === id) ?? null;
+
+// A two-page listing; records every call so tests can assert the
+// background-inclusive filter and cursor paging the reader must use.
+const twoPages =
+  (first, second, seen = []) =>
+  async (options = {}) => {
+    seen.push(options);
+    const cursor = options.page?.cursor;
+    if (cursor === undefined) {
+      return {
+        entries: first,
+        pageInfo: { nextCursor: "page-2", prevCursor: null, hasMore: true },
+      };
+    }
+    if (cursor === "page-2") {
+      return {
+        entries: second,
+        pageInfo: { nextCursor: null, prevCursor: "page-1", hasMore: false },
+      };
+    }
+    throw new Error(`unexpected cursor ${cursor}`);
+  };
+
+// A small local repo without remotes or upstream history.
+const localRepo = () => {
+  const dir = scratch("local");
+  git(dir, "init", "-q", "-b", "main");
+  commit(dir, "a.txt", "base");
+  return dir;
+};
 
 const storedBase = (ref, forkSha, missing = false) => ({ ref, forkSha, source: "stored", missing });
 
@@ -297,41 +336,241 @@ test("Changes() carries uncommitted tracked changes and untracked files", async 
   assert.ok(patch && patch.patch.includes("+note"), "the untracked file has a patch");
 });
 
-test("an old daemon without a stored base falls back to the fetched remote default", async () => {
+test("a workspace without a reported base is unavailable, not another branch", async () => {
   const { readProjectCommits } = await loadModules();
-  const { checkout, worktree } = setup();
-  assert.equal(
-    git(checkout, "rev-list", "--count", "main..wf/feature"),
-    "42",
-    "local main is stale",
-  );
+  const { worktree } = setup();
 
   const result = await readProjectCommits(paseoAt(worktree, [wsEntry("ws5", worktree)]), agent());
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.base, "origin/main", "the header names the fetched remote base");
-  assert.equal(result.onBase, false);
-  assert.equal(result.ahead, 3);
-  assert.equal(result.behind, 0);
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, "unavailable");
+  assert.match(result.message, /no base/i, "the message names the missing base");
 });
 
-test("the checkout on the default branch itself is on its base", async () => {
+test("a failed workspace lookup is unavailable, not another branch", async () => {
+  const { readProjectCommits } = await loadModules();
+  const { worktree, forkPoint } = setup();
+  const entries = [wsEntry("ws5b", worktree, storedBase("refs/remotes/origin/main", forkPoint))];
+  const list = async () => {
+    throw new Error("daemon unreachable");
+  };
+
+  const result = await readProjectCommits(paseoAt(worktree, entries, { list }), agent());
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, "unavailable");
+});
+
+test("a daemon-reported default base marks its own checkout on-base", async () => {
   const { readProjectCommits } = await loadModules();
   const { checkout } = setup();
-  const result = await readProjectCommits(paseoAt(checkout, [wsEntry("ws6", checkout)]), agent());
+  const base = {
+    ...storedBase("refs/remotes/origin/main", git(checkout, "rev-parse", "origin/main")),
+  };
+  const result = await readProjectCommits(
+    paseoAt(checkout, [wsEntry("ws6", checkout, base)]),
+    agent(),
+  );
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.base, "origin/main");
   assert.equal(result.onBase, true);
 });
 
-test("a repository without a remote falls back to its local main", async () => {
+test("a stored local base needs no remote", async () => {
   const { readProjectCommits } = await loadModules();
-  const dir = scratch("local");
-  git(dir, "init", "-q", "-b", "main");
-  commit(dir, "a.txt", "base");
+  const dir = localRepo();
   git(dir, "switch", "-q", "-c", "topic");
   commit(dir, "b.txt", "topic 1");
-  const result = await readProjectCommits(paseoAt(dir, []), agent());
+  const forkSha = git(dir, "rev-parse", "main");
+
+  const result = await readProjectCommits(
+    paseoAt(dir, [wsEntry("ws7", dir, storedBase("refs/heads/main", forkSha))]),
+    agent(),
+  );
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.base, "main");
   assert.equal(result.ahead, 1);
+});
+
+test("the owning workspace resolves by id through get", async () => {
+  const { readProjectCommits } = await loadModules();
+  const { worktree, forkPoint } = setup();
+  const entries = [wsEntry("ws-get", worktree, storedBase("refs/remotes/origin/main", forkPoint))];
+  // The listing is empty on purpose: the base must come from get(ws-get).
+  const get = getById(entries);
+  const list = async () => ({ entries: [] });
+
+  const result = await readProjectCommits(
+    paseoAt(worktree, entries, { workspaceId: "ws-get", get, list }),
+    agent(),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.base, "origin/main");
+  assert.equal(result.ahead, 3);
+  assert.deepEqual(
+    result.commits.map((c) => c.subject),
+    ["own 3", "own 2", "own 1"],
+  );
+});
+
+test("the owning workspace resolves beyond the first list page", async () => {
+  const { readProjectCommits } = await loadModules();
+  const dir = localRepo();
+  git(dir, "switch", "-q", "-c", "epic-x");
+  commit(dir, "epic.txt", "epic work");
+  const epicTip = git(dir, "rev-parse", "epic-x");
+  const item = join(dir, "item");
+  git(dir, "worktree", "add", "-q", "-b", "wf/item", item, "epic-x");
+  commit(item, "item-1.txt", "item 1");
+  const owning = wsEntry("ws-page2", item, storedBase("refs/heads/epic-x", epicTip));
+  const seen = [];
+  const list = twoPages([wsEntry("ws-other", join(dir, "elsewhere"))], [owning], seen);
+
+  const result = await readProjectCommits(paseoAt(item, [], { list }), agent());
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.base, "epic-x", "the page-two local base wins over origin");
+  assert.equal(result.ahead, 1);
+  assert.deepEqual(
+    result.commits.map((c) => c.subject),
+    ["item 1"],
+  );
+  assert.equal(seen.length, 2, "both pages are read");
+  assert.equal(seen[0].filter?.includeBackground, true, "the listing is background-inclusive");
+});
+
+test("a host rejecting the background filter still resolves plainly", async () => {
+  const { readProjectCommits } = await loadModules();
+  const { worktree, forkPoint } = setup();
+  const entries = [
+    wsEntry("ws-plain", worktree, storedBase("refs/remotes/origin/main", forkPoint)),
+  ];
+  const list = async (options = {}) => {
+    if (options.filter !== undefined) throw new Error("unknown filter");
+    return { entries };
+  };
+
+  const result = await readProjectCommits(paseoAt(worktree, entries, { list }), agent());
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.base, "origin/main");
+  assert.equal(result.ahead, 3);
+});
+
+test("a slash-containing local base keeps its namespace", async () => {
+  const { readProjectCommits } = await loadModules();
+  const dir = localRepo();
+  git(dir, "switch", "-q", "-c", "feature/epic");
+  commit(dir, "epic.txt", "epic work");
+  const epicTip = git(dir, "rev-parse", "feature/epic");
+  const item = join(dir, "item");
+  git(dir, "worktree", "add", "-q", "-b", "wf/item", item, "feature/epic");
+  commit(item, "item-1.txt", "item 1");
+  commit(item, "item-2.txt", "item 2");
+
+  const result = await readProjectCommits(
+    paseoAt(item, [wsEntry("ws-slash", item, storedBase("refs/heads/feature/epic", epicTip))]),
+    agent(),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.base, "feature/epic", "no namespace component is dropped");
+  assert.equal(result.onBase, false);
+  assert.equal(result.ahead, 2);
+  assert.deepEqual(
+    result.commits.map((c) => c.subject),
+    ["item 2", "item 1"],
+  );
+});
+
+test("a branch matching only the base suffix is not on-base", async () => {
+  const { readProjectChanges, readProjectCommits } = await loadModules();
+  const dir = localRepo();
+  git(dir, "switch", "-q", "-c", "feature/epic");
+  commit(dir, "epic.txt", "epic work");
+  const epicTip = git(dir, "rev-parse", "feature/epic");
+  git(dir, "switch", "-q", "-c", "epic", "main");
+  commit(dir, "own-a.txt", "own a");
+  commit(dir, "own-b.txt", "own b");
+  const entries = [wsEntry("ws-suffix", dir, storedBase("refs/heads/feature/epic", epicTip))];
+
+  const commits = await readProjectCommits(paseoAt(dir, entries), agent());
+  assert.equal(commits.ok, true, JSON.stringify(commits));
+  assert.equal(commits.base, "feature/epic");
+  assert.equal(commits.onBase, false, "epic is not feature/epic");
+  assert.deepEqual(
+    commits.commits.map((c) => c.subject),
+    ["own b", "own a"],
+  );
+
+  const changes = await readProjectChanges(paseoAt(dir, entries), agent(), null, null);
+  assert.equal(changes.ok, true, JSON.stringify(changes));
+  assert.equal(changes.scope.kind, "branch");
+  assert.equal(changes.scope.onBase, false, "committed work stays visible");
+  assert.deepEqual(
+    changes.files.map((f) => f.path).sort(),
+    // epic.txt lives on the sibling base branch, never in this worktree.
+    ["own-a.txt", "own-b.txt"],
+  );
+});
+
+test("a checkout on a slash-containing local base is on-base", async () => {
+  const { readProjectCommits } = await loadModules();
+  const dir = localRepo();
+  git(dir, "switch", "-q", "-c", "feature/epic");
+  commit(dir, "epic.txt", "epic work");
+  const epicTip = git(dir, "rev-parse", "feature/epic");
+
+  const result = await readProjectCommits(
+    paseoAt(dir, [wsEntry("ws-slash-on", dir, storedBase("refs/heads/feature/epic", epicTip))]),
+    agent(),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.base, "feature/epic");
+  assert.equal(result.onBase, true);
+});
+
+test("a ref:null base compares with its fork SHA", async () => {
+  const { readProjectChanges, readProjectCommits } = await loadModules();
+  const { worktree } = setup();
+  const forkSha = git(worktree, "rev-parse", "HEAD~1");
+  const entry = {
+    ...wsEntry("ws-raw", worktree),
+    gitRuntime: { base: { ref: null, forkSha, source: "stored", missing: false } },
+  };
+
+  const commits = await readProjectCommits(paseoAt(worktree, [entry]), agent());
+  assert.equal(commits.ok, true, JSON.stringify(commits));
+  assert.equal(commits.base, forkSha.slice(0, 7), "the header names the fork point");
+  assert.deepEqual(
+    commits.commits.map((c) => c.subject),
+    ["own 3"],
+  );
+
+  const changes = await readProjectChanges(paseoAt(worktree, [entry]), agent(), null, null);
+  assert.equal(changes.ok, true, JSON.stringify(changes));
+  assert.deepEqual(changes.files.map((f) => f.path).sort(), ["own-3.txt"]);
+});
+
+test("an untracked symlink renders its target path, not target contents", async () => {
+  const { readProjectChanges } = await loadModules();
+  const { dir, worktree, forkPoint } = setup();
+  const secret = join(dir, "secret-outside.txt");
+  writeFileSync(secret, "private outside contents\n");
+  const link = join(worktree, "leak-link");
+  symlinkSync(secret, link);
+
+  const result = await readProjectChanges(
+    paseoAt(worktree, [
+      wsEntry("ws-link", worktree, storedBase("refs/remotes/origin/main", forkPoint)),
+    ]),
+    agent(),
+    null,
+    null,
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const byPath = new Map(result.files.map((f) => [f.path, f]));
+  assert.equal(byPath.get("leak-link")?.untracked, true, "the link itself is listed");
+  const patch = result.patches.find((p) => p.path === "leak-link");
+  assert.ok(patch, "the link has a patch");
+  assert.ok(
+    !patch.patch.includes("private outside contents"),
+    "target contents never leak into the patch",
+  );
+  assert.ok(patch.patch.includes(secret), "the patch records the link target path");
 });

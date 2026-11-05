@@ -569,12 +569,12 @@ index 45f80ae..5e23c3d 100644
  import { COMPONENTS, componentSignature, type ComponentName } from "../shared/core/catalog";
  
 diff --git a/server/project.ts b/server/project.ts
-index 4789d93..870614c 100644
+index 4789d93..911399a 100644
 --- a/server/project.ts
 +++ b/server/project.ts
 @@ -1,6 +1,9 @@
  import { execFile } from "node:child_process";
-+import { readFile } from "node:fs/promises";
++import { lstat, readFile, readlink } from "node:fs/promises";
 +import path from "node:path";
  import { promisify } from "node:util";
 -import type { PaseoApi } from "@getpaseo/client";
@@ -583,7 +583,15 @@ index 4789d93..870614c 100644
  import type {
    EnvironmentDetail,
    EnvironmentDetailResult,
-@@ -49,6 +52,8 @@ async function runGit(
+@@ -32,7 +35,6 @@ import {
+   type ThreadsResult,
+ } from "../shared/core/project";
+ import { lastMessage } from "../shared/core/thread-activity";
+-import { resolveAgentCwd } from "./data-source";
+ 
+ const execFileAsync = promisify(execFile);
+ 
+@@ -49,6 +51,8 @@ async function runGit(
        cwd,
        maxBuffer: 8 * 1024 * 1024,
        timeout: 10_000,
@@ -592,7 +600,7 @@ index 4789d93..870614c 100644
      });
      return { ok: true, stdout };
    } catch (cause) {
-@@ -56,16 +61,139 @@ async function runGit(
+@@ -56,16 +60,231 @@ async function runGit(
    }
  }
  
@@ -603,29 +611,47 @@ index 4789d93..870614c 100644
 -      head: string | null;
 -      base: string;
 -      checkout: "branch" | "detached" | "unborn";
-+/** How long a fetched default branch counts as fresh, per checkout. */
-+const BASE_FETCH_TTL_MS = 60_000;
-+const baseFetches = new Map<string, { at: number; done: Promise<void> }>();
-+
-+/**
-+ * Brings the remote default branch up to date before it is compared with,
-+ * at most once a minute per checkout. A failed fetch (offline, no access)
-+ * leaves the last fetched ref in place. Only used when Paseo reports no
-+ * stored base (older daemons); a stored base needs no fetch.
-+ */
-+async function fetchBase(cwd: string, remote: string, branch: string): Promise<void> {
-+  const common = await runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-+  const key = `${common.ok ? common.stdout.trim() : cwd}\0${remote}/${branch}`;
-+  const last = baseFetches.get(key);
-+  if (last && Date.now() - last.at < BASE_FETCH_TTL_MS) return last.done;
-+  const done = runGit(cwd, ["fetch", "--quiet", "--no-tags", remote, branch]).then(() => undefined);
-+  baseFetches.set(key, { at: Date.now(), done });
-+  return done;
++/** The agent's checkout directory and owning workspace, tolerantly read. */
++interface AgentWorkspace {
++  cwd: string;
++  workspaceId: string | null;
 +}
 +
-+/** The workspace base Paseo stores (pa-9av7.1); absent on older daemons. */
++async function resolveAgentWorkspace(paseo: PaseoApi, agentId: string): Promise<AgentWorkspace | null> {
++  try {
++    const handle = paseo.agents.ref(agentId);
++    const current = handle.current() as { cwd?: unknown; workspaceId?: unknown } | null | undefined;
++    if (current && typeof current.cwd === "string" && current.cwd !== "") {
++      return {
++        cwd: current.cwd,
++        workspaceId: typeof current.workspaceId === "string" ? current.workspaceId : null,
++      };
++    }
++    const refreshed = (await handle.refresh()) as {
++      agent?: { cwd?: unknown; workspaceId?: unknown } | null;
++    } | null;
++    const agent = refreshed?.agent;
++    if (agent && typeof agent.cwd === "string" && agent.cwd !== "") {
++      return {
++        cwd: agent.cwd,
++        workspaceId: typeof agent.workspaceId === "string" ? agent.workspaceId : null,
++      };
+     }
+-  | ProjectFailure
+-> {
++    return null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * The workspace base Paseo reports (pa-9av7 model); absent on older daemons.
++ * ref is null for a workspace cut from a raw commit: the comparison then
++ * starts at forkSha itself.
++ */
 +interface StoredWorkspaceBase {
-+  ref: string;
++  ref: string | null;
 +  forkSha: string;
 +  missing: boolean;
 +}
@@ -633,8 +659,9 @@ index 4789d93..870614c 100644
 +function asStoredBase(value: unknown): StoredWorkspaceBase | null {
 +  if (typeof value !== "object" || value === null) return null;
 +  const v = value as { ref?: unknown; forkSha?: unknown; missing?: unknown };
-+  if (typeof v.ref !== "string" || v.ref === "") return null;
 +  if (typeof v.forkSha !== "string" || v.forkSha === "") return null;
++  if (v.ref === null) return { ref: null, forkSha: v.forkSha, missing: false };
++  if (typeof v.ref !== "string" || v.ref === "") return null;
 +  return { ref: v.ref, forkSha: v.forkSha, missing: v.missing === true };
 +}
 +
@@ -649,18 +676,87 @@ index 4789d93..870614c 100644
 +  return asStoredBase(record.base) ?? asStoredBase(record.gitRuntime?.base);
 +}
 +
++const NO_BASE_MESSAGE =
++  "Paseo reported no base for this checkout's workspace. Update the host so it reports workspace bases, then retry.";
++const WORKSPACES_FAILED_MESSAGE = "Could not read the workspace list from Paseo.";
++
++interface WorkspacePage {
++  entries: unknown[];
++  nextCursor: string | null;
++}
++
++async function listWorkspacePage(
++  paseo: PaseoApi,
++  withBackground: boolean,
++  cursor?: string,
++): Promise<WorkspacePage> {
++  const options: {
++    filter?: { includeBackground: boolean };
++    page: { limit: number; cursor?: string };
++  } = { page: { limit: 200 } };
++  if (cursor !== undefined) options.page.cursor = cursor;
++  if (withBackground) options.filter = { includeBackground: true };
++  const res = (await paseo.workspaces.list(
++    options as Parameters<PaseoApi["workspaces"]["list"]>[0],
++  )) as { entries?: unknown; pageInfo?: { nextCursor?: unknown } | null };
++  if (!res || !Array.isArray(res.entries)) throw new Error("workspaces.list returned no entries");
++  const next = res.pageInfo?.nextCursor;
++  return {
++    entries: res.entries,
++    nextCursor: typeof next === "string" && next !== "" && next !== cursor ? next : null,
++  };
++}
++
 +/**
-+ * The daemon's workspace listing, read fresh on every view: entries carry
-+ * each workspace's stored base, and a shared cache would serve one agent's
-+ * list (and one run's bases) to the next.
++ * Every workspace entry Paseo shows, across all pages. The first attempt
++ * includes background workspaces; when the host rejects that filter the
++ * plain listing is used instead. A throw means the lookup failed: callers
++ * report unavailable rather than comparing against another base.
 + */
-+async function readWorkspaceEntries(paseo: PaseoApi): Promise<unknown[] | null> {
++async function listAllWorkspaceEntries(paseo: PaseoApi): Promise<unknown[]> {
++  let background = true;
++  for (;;) {
++    try {
++      const all: unknown[] = [];
++      let cursor: string | undefined;
++      for (;;) {
++        const page = await listWorkspacePage(paseo, background, cursor);
++        all.push(...page.entries);
++        if (page.nextCursor === null) return all;
++        cursor = page.nextCursor;
++      }
++    } catch {
++      if (!background) throw new Error(WORKSPACES_FAILED_MESSAGE);
++      background = false;
++    }
++  }
++}
++
++/**
++ * The owning workspace's reported base: by workspace id through the generic
++ * get API when the host has it, else by directory over the paged,
++ * background-inclusive listing. ok:false means the lookup itself failed; a
++ * null base means Paseo knows the workspace but reports no base for it.
++ */
++async function findWorkspaceBase(
++  paseo: PaseoApi,
++  workspaceId: string | null,
++  cwd: string,
++): Promise<{ ok: true; base: StoredWorkspaceBase | null } | { ok: false }> {
++  if (workspaceId !== null && typeof paseo.workspaces.get === "function") {
++    try {
++      const entry = (await paseo.workspaces.get(workspaceId)) as unknown;
++      if (entry && typeof entry === "object") return { ok: true, base: storedBaseOf(entry) };
++    } catch {
++      return { ok: false };
++    }
++    return { ok: false };
++  }
 +  try {
-+    const res = (await paseo.workspaces.list()) as { entries?: unknown };
-+    if (!res || !Array.isArray(res.entries)) return null;
-+    return res.entries;
++    const entries = await listAllWorkspaceEntries(paseo);
++    return { ok: true, base: matchStoredBase(cwd, entries, undefined) };
 +  } catch {
-+    return null;
++    return { ok: false };
 +  }
 +}
 +
@@ -686,9 +782,7 @@ index 4789d93..870614c 100644
 +    if (norm === dir) return storedBaseOf(entry);
 +    if (norm.startsWith(dir + path.sep) && (!best || dir.length > best.dir.length)) {
 +      best = { dir, base: storedBaseOf(entry) };
-     }
--  | ProjectFailure
--> {
++    }
 +  }
 +  return best ? best.base : null;
 +}
@@ -698,11 +792,16 @@ index 4789d93..870614c 100644
 +  return ref.replace(/^refs\/remotes\//, "").replace(/^refs\/heads\//, "");
 +}
 +
-+/** Default branch name of a stored ref: refs/remotes/origin/main -> main. */
-+function branchNameOfRef(ref: string): string {
-+  const short = shortBaseRef(ref);
-+  const slash = short.indexOf("/");
-+  return slash === -1 ? short : short.slice(slash + 1);
++/**
++ * The branch a stored ref sits on, namespace kept: refs/heads/* keeps every
++ * slash, refs/remotes/<remote>/* drops only the remote name. Comparing a
++ * checkout branch against anything shorter marks same-suffix branches
++ * on-base and hides their committed work.
++ */
++function defaultBranchOfRef(ref: string): string {
++  if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length);
++  if (ref.startsWith("refs/remotes/")) return ref.replace(/^refs\/remotes\/[^/]+\//, "");
++  return ref;
 +}
 +
 +interface ResolvedBase {
@@ -727,32 +826,85 @@ index 4789d93..870614c 100644
 +}
 +
 +/**
-+ * The one base every view measures from. A workspace keeps the base Paseo
-+ * stored when it was created; a stored base that no longer resolves
-+ * (pruned, deleted) falls back to its recorded fork point. Only checkouts
-+ * Paseo knows no base for use the fetched remote default, and only
-+ * repositories without that remote use their local branch name.
++ * The one base every view measures from: the base Paseo reports for the
++ * workspace, or the recorded fork point when the stored ref is gone.
++ * Anything else is an explicit unavailable result, never another base.
 + */
-+async function resolveBase(
-+  paseo: PaseoApi,
-+  cwd: string,
-+  hint?: StoredWorkspaceBase | null,
-+): Promise<ResolvedBase | ProjectFailure> {
++interface GitState {
++  ok: true;
++  branch: string | null;
++  head: string | null;
++  checkout: "branch" | "detached" | "unborn";
++}
++
++async function readGitState(cwd: string): Promise<GitState | ProjectFailure> {
    const inside = await runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
    if (!inside.ok || inside.stdout.trim() !== "true") {
      return failure("not-git", "This agent's workspace isn't a git checkout");
-@@ -76,13 +204,195 @@ async function detectGitBranches(cwd: string): Promise<
+@@ -75,14 +294,241 @@ async function detectGitBranches(cwd: string): Promise<
+   const head = headRes.ok ? headRes.stdout.trim().slice(0, 7) : null;
    const branch = sym.ok ? sym.stdout.trim() || null : null;
    const checkout = head === null ? "unborn" : branch !== null ? "branch" : "detached";
++  return { ok: true, branch, head, checkout };
++}
++
++async function resolveBase(
++  paseo: PaseoApi,
++  cwd: string,
++  hint: StoredWorkspaceBase | null,
++): Promise<ResolvedBase | ProjectFailure> {
++  const git = await readGitState(cwd);
++  if (!git.ok) return git;
++  if (!hint) return failure("unavailable", NO_BASE_MESSAGE);
++  return finishStoredBase(cwd, git, hint);
++}
++
++async function resolveAgentBase(
++  paseo: PaseoApi,
++  identity: AgentWorkspace,
++): Promise<ResolvedBase | ProjectFailure> {
++  const git = await readGitState(identity.cwd);
++  if (!git.ok) return git;
++  const found = await findWorkspaceBase(paseo, identity.workspaceId, identity.cwd);
++  if (!found.ok) return failure("unavailable", WORKSPACES_FAILED_MESSAGE);
++  if (!found.base) return failure("unavailable", NO_BASE_MESSAGE);
++  return finishStoredBase(identity.cwd, git, found.base);
++}
  
 -  const originHead = await runGit(cwd, ["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
 -  let base = originHead.ok ? originHead.stdout.trim().replace(/^origin\//, "") : "";
 -  if (!base) {
 -    const mainExists = await runGit(cwd, ["rev-parse", "--verify", "-q", "main"]);
 -    base = mainExists.ok ? "main" : "master";
-+  const entries = hint === undefined ? await readWorkspaceEntries(paseo) : null;
-+  const stored = matchStoredBase(cwd, entries, hint);
-+  if (stored) {
++async function finishStoredBase(
++  cwd: string,
++  git: GitState,
++  stored: StoredWorkspaceBase,
++): Promise<ResolvedBase | ProjectFailure> {
++  const { branch, head, checkout } = git;
++  if (stored.ref === null) {
++    // A workspace cut from a raw commit compares with that commit itself.
++    const forkKnown = (
++      await runGit(cwd, ["rev-parse", "--verify", "-q", `${stored.forkSha}^{commit}`])
++    ).ok;
++    if (!forkKnown) {
++      return failure("unavailable", "Workspace base is a commit this checkout does not contain");
++    }
++    return {
++      ok: true,
++      branch,
++      head,
++      checkout,
++      baseRef: stored.forkSha,
++      base: stored.forkSha.slice(0, 7),
++      defaultBranch: "",
++      onBase: false,
++      baseMissing: false,
++      wantedBase: null,
++      forkSha: stored.forkSha,
++    };
++  }
++  {
 +    const short = shortBaseRef(stored.ref);
 +    const known = (await runGit(cwd, ["rev-parse", "--verify", "-q", `${stored.ref}^{commit}`])).ok;
 +    const missing = stored.missing || !known;
@@ -761,7 +913,7 @@ index 4789d93..870614c 100644
 +    if (missing && !forkKnown) {
 +      return failure("unavailable", `Workspace base ${short} is gone and its fork point is unknown`);
 +    }
-+    const defaultBranch = branchNameOfRef(stored.ref);
++    const defaultBranch = defaultBranchOfRef(stored.ref);
 +    const onBase = branch !== null && branch === defaultBranch;
 +    if (missing) {
 +      return {
@@ -792,68 +944,6 @@ index 4789d93..870614c 100644
 +      forkSha: stored.forkSha,
 +    };
 +  }
-+
-+  const remote = "origin";
-+  const originHead = await runGit(cwd, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
-+  const candidates =
-+    originHead.ok && originHead.stdout.trim() !== ""
-+      ? [originHead.stdout.trim().replace(new RegExp(`^${remote}/`), "")]
-+      : ["main", "master"];
-+  const hasRemote = (await runGit(cwd, ["remote", "get-url", remote])).ok;
-+  if (hasRemote) {
-+    for (const name of candidates) {
-+      await fetchBase(cwd, remote, name);
-+      if ((await runGit(cwd, ["rev-parse", "--verify", "-q", `refs/remotes/${remote}/${name}^{commit}`]))
-+        .ok
-+      ) {
-+        const base = `${remote}/${name}`;
-+        return {
-+          ok: true,
-+          branch,
-+          head,
-+          checkout,
-+          baseRef: base,
-+          base,
-+          defaultBranch: name,
-+          onBase: branch !== null && branch === name,
-+          baseMissing: false,
-+          wantedBase: null,
-+          forkSha: null,
-+        };
-+      }
-+    }
-+  }
-+  for (const name of candidates) {
-+    if ((await runGit(cwd, ["rev-parse", "--verify", "-q", `refs/heads/${name}^{commit}`])).ok) {
-+      return {
-+        ok: true,
-+        branch,
-+        head,
-+        checkout,
-+        baseRef: name,
-+        base: name,
-+        defaultBranch: name,
-+        onBase: branch !== null && branch === name,
-+        baseMissing: false,
-+        wantedBase: null,
-+        forkSha: null,
-+      };
-+    }
-+  }
-+  const fallback = candidates[0] ?? "main";
-+  return {
-+    ok: true,
-+    branch,
-+    head,
-+    checkout,
-+    baseRef: fallback,
-+    base: fallback,
-+    defaultBranch: fallback,
-+    onBase: branch !== null && branch === fallback,
-+    baseMissing: false,
-+    wantedBase: null,
-+    forkSha: null,
-+  };
 +}
 +
 +async function mergeBasePoint(cwd: string, ref: string): Promise<string | null> {
@@ -871,7 +961,9 @@ index 4789d93..870614c 100644
 +
 +/**
 + * Files git doesn't track, as ChangedFile + FilePatch entries. The branch
-+ * diff is committed and uncommitted work, so these belong in it.
++ * diff is committed and uncommitted work, so these belong in it. Symbolic
++ * links render their target path (what git records), never the target
++ * contents, so an external link cannot leak files outside the checkout.
 + */
 +async function readUntrackedFiles(
 +  cwd: string,
@@ -900,9 +992,63 @@ index 4789d93..870614c 100644
 +      });
 +      continue;
 +    }
++    const full = path.join(cwd, filePath);
++    let stat;
++    try {
++      stat = await lstat(full);
++    } catch {
++      continue;
++    }
++    if (stat.isSymbolicLink()) {
++      let target: string | null = null;
++      try {
++        target = await readlink(full);
++      } catch {
++        continue;
++      }
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 1,
++        deletions: 0,
++        untracked: true,
++        diff: "inline",
++      });
++      patches.push({
++        path: filePath,
++        patch: `@@ -0,0 +1 @@\n+${target}\n`,
++        truncated: false,
++      });
++      continue;
++    }
++    if (!stat.isFile()) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "binary",
++      });
++      continue;
++    }
++    if (stat.size > MAX_UNTRACKED_BYTES) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "binary",
++      });
++      continue;
++    }
 +    let bytes: Buffer | null = null;
 +    try {
-+      bytes = await readFile(path.join(cwd, filePath));
++      bytes = await readFile(full);
 +    } catch {
 +      continue;
 +    }
@@ -943,16 +1089,22 @@ index 4789d93..870614c 100644
  }
  
  function mapStatusChar(code: string): ChangeKind {
-@@ -419,7 +729,7 @@ export async function readProjectChanges(
-   const cwd = await resolveAgentCwd(paseo, agentId);
-   if (!cwd) return demoChanges(target, filter);
+@@ -416,10 +862,11 @@ export async function readProjectChanges(
+ 
+   if (isSyntheticGalleryAgent(agentId)) return demoChanges(target, filter);
+ 
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoChanges(target, filter);
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoChanges(target, filter);
++  const cwd = identity.cwd;
  
 -  const gitInfo = await detectGitBranches(cwd);
-+  const gitInfo = await resolveBase(paseo, cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
    if (!gitInfo.ok) return gitInfo;
  
    let diffArgs: string[];
-@@ -435,23 +745,41 @@ export async function readProjectChanges(
+@@ -435,23 +882,41 @@ export async function readProjectChanges(
      };
      diffArgs = ["show", "--format=", "--unified=3", target.sha];
      numstatArgs = ["show", "--format=", "--numstat", "--find-renames", target.sha];
@@ -998,7 +1150,7 @@ index 4789d93..870614c 100644
    }
  
    const [numstatRes, nameStatusRes, patchRes] = await Promise.all([
-@@ -496,10 +824,14 @@ export async function readProjectChanges(
+@@ -496,10 +961,14 @@ export async function readProjectChanges(
      });
    }
  
@@ -1015,7 +1167,7 @@ index 4789d93..870614c 100644
      files.some((f) => f.path === p.path),
    );
  
-@@ -507,9 +839,9 @@ export async function readProjectChanges(
+@@ -507,9 +976,9 @@ export async function readProjectChanges(
      ok: true,
      scope,
      files,
@@ -1027,12 +1179,18 @@ index 4789d93..870614c 100644
      patches,
      livePatches: true,
      takenAt: Date.now(),
-@@ -554,11 +886,11 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
-   const cwd = await resolveAgentCwd(paseo, agentId);
-   if (!cwd) return demoCommits();
+@@ -551,14 +1020,15 @@ export async function readProjectPatches(
+ 
+ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Promise<CommitsResult> {
+   if (isSyntheticGalleryAgent(agentId)) return demoCommits();
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoCommits();
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoCommits();
++  const cwd = identity.cwd;
  
 -  const gitInfo = await detectGitBranches(cwd);
-+  const gitInfo = await resolveBase(paseo, cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
    if (!gitInfo.ok) return gitInfo;
  
 -  const onBase = gitInfo.branch === gitInfo.base;
@@ -1042,7 +1200,7 @@ index 4789d93..870614c 100644
    const logArgs = onBase
      ? ["log", `-n`, String(MAX_COMMITS), "--format=%H%x09%h%x09%s%x09%an%x09%at"]
      : ["log", range, "--format=%H%x09%h%x09%s%x09%an%x09%at"];
-@@ -579,7 +911,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+@@ -579,7 +1049,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
    let ahead: number | null = null;
    let behind: number | null = null;
    if (!onBase) {
@@ -1051,7 +1209,7 @@ index 4789d93..870614c 100644
      if (counts.ok) {
        const [bStr, aStr] = counts.stdout.trim().split(/\s+/);
        behind = Number(bStr) || 0;
-@@ -594,6 +926,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+@@ -594,6 +1064,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
      head: gitInfo.head,
      base: gitInfo.base,
      onBase,
@@ -1059,25 +1217,31 @@ index 4789d93..870614c 100644
      ahead,
      behind,
      commits: commits.slice(0, MAX_COMMITS),
-@@ -608,7 +941,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
-   const cwd = await resolveAgentCwd(paseo, agentId);
-   if (!cwd) return demoPullRequest();
+@@ -605,10 +1076,11 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+ 
+ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string): Promise<PullRequestResult> {
+   if (isSyntheticGalleryAgent(agentId)) return demoPullRequest();
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoPullRequest();
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoPullRequest();
++  const cwd = identity.cwd;
  
 -  const gitInfo = await detectGitBranches(cwd);
-+  const gitInfo = await resolveBase(paseo, cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
    if (!gitInfo.ok) return gitInfo;
  
    try {
-@@ -687,7 +1020,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
+@@ -687,7 +1159,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
          title: String(pr.title ?? ""),
          url: String(pr.url ?? ""),
          state,
 -        baseRef: String(pr.baseRefName ?? gitInfo.base),
-+        baseRef: String(pr.baseRefName ?? gitInfo.defaultBranch),
++        baseRef: String(pr.baseRefName ?? (gitInfo.defaultBranch || gitInfo.base)),
          headRef: String(pr.headRefName ?? gitInfo.branch ?? ""),
          checks: { state: checksState, passed, failed, pending, total },
          review: { state: reviewState, requests: reviewRequests },
-@@ -835,10 +1168,10 @@ export async function readProjectEnvironments(
+@@ -835,10 +1307,10 @@ export async function readProjectEnvironments(
          }));
          const live = threads.filter((t) => !t.archived);
          const dir = ws.workspaceDirectory;
@@ -1090,7 +1254,7 @@ index 4789d93..870614c 100644
          return {
            id: ws.id,
            name: ws.title ?? ws.id,
-@@ -846,7 +1179,7 @@ export async function readProjectEnvironments(
+@@ -846,7 +1318,7 @@ export async function readProjectEnvironments(
            provider: ws.workspaceKind,
            path: dir,
            branch,
@@ -1099,7 +1263,7 @@ index 4789d93..870614c 100644
            base,
            git: ws.projectKind === "git",
            life: ws.archivingAt ? "retiring" : "ready",
-@@ -877,8 +1210,10 @@ export async function readProjectEnvironments(
+@@ -877,8 +1349,10 @@ export async function readProjectEnvironments(
  }
  
  async function readWorkspaceDetail(
@@ -1110,16 +1274,27 @@ index 4789d93..870614c 100644
  ): Promise<EnvironmentDetail> {
    if (!directory) {
      return {
-@@ -894,7 +1229,7 @@ async function readWorkspaceDetail(
+@@ -894,12 +1368,17 @@ async function readWorkspaceDetail(
        fetchedAt: Date.now(),
      };
    }
 -  const gitInfo = await detectGitBranches(directory);
-+  const gitInfo = await resolveBase(paseo, directory, baseHint);
++  const gitInfo = await resolveBase(paseo, directory, baseHint ?? null);
    if (!gitInfo.ok) {
      return {
        ok: true,
-@@ -916,9 +1251,9 @@ async function readWorkspaceDetail(
+       id: workspaceId,
+-      checkout: { ok: false, reason: "not-git", message: gitInfo.message, path: directory },
++      checkout: {
++        ok: false,
++        reason: gitInfo.reason === "unavailable" ? "unavailable" : "not-git",
++        message: gitInfo.message,
++        path: directory,
++      },
+       pull: null,
+       fetchedAt: Date.now(),
+     };
+@@ -916,9 +1395,9 @@ async function readWorkspaceDetail(
        branch: gitInfo.branch,
        checkout: gitInfo.checkout,
        head: gitInfo.head,
@@ -1131,7 +1306,7 @@ index 4789d93..870614c 100644
        ahead: null,
        behind: null,
        uncommitted: {
-@@ -948,7 +1283,7 @@ export async function readProjectEnvironment(
+@@ -948,7 +1427,7 @@ export async function readProjectEnvironment(
    const workspaces = await paseo.workspaces.list();
    const ws = workspaces.entries.find((w) => w.id === environmentId);
    if (!ws) return { ok: false, reason: "not-found", message: "Workspace not found" };
