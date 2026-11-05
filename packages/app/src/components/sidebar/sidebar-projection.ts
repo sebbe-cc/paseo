@@ -1,4 +1,5 @@
 import type { TFunction } from "i18next";
+import type { WorkspaceLabelDefinition } from "@getpaseo/protocol/workspace-labels";
 import { buildStatusGroups } from "@/hooks/sidebar-status-view-model";
 import {
   splitPinnedSidebarGroups,
@@ -19,7 +20,11 @@ import {
   type SidebarShortcutModel,
   type SidebarShortcutSection,
 } from "@/utils/sidebar-shortcuts";
-import { statusWorkspaceGroups, type SidebarWorkspaceGroup } from "./sidebar-labels";
+import {
+  labelWorkspaceGroups,
+  statusWorkspaceGroups,
+  type SidebarWorkspaceGroup,
+} from "./sidebar-labels";
 import type { MergedProjectContainer } from "@/project-containers";
 import { orderByProjectContainers } from "@/project-containers/layout";
 
@@ -45,6 +50,8 @@ export interface SidebarProjectionInput {
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
   projectNamesByViewKey: Map<string, string>;
   groupMode: SidebarGroupMode;
+  /** The merged label catalog, for the order and color of label sections. */
+  labelCatalog: readonly WorkspaceLabelDefinition[];
   pinnedCollapsed: boolean;
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
@@ -106,7 +113,7 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   };
 }
 
-/** Project mode keeps its project headers and groups nothing; status mode groups the rows. */
+/** Project mode keeps its project headers and groups nothing; the other modes group the rows. */
 function buildWorkspaceGroups(
   input: SidebarProjectionInput,
   unpinnedWorkspaces: SidebarWorkspaceEntry[],
@@ -118,5 +125,11 @@ function buildWorkspaceGroups(
       return statusWorkspaceGroups(
         buildStatusGroups(unpinnedWorkspaces, input.projectNamesByViewKey, input.t),
       );
+    case "label":
+      return labelWorkspaceGroups({
+        workspaces: unpinnedWorkspaces,
+        catalog: input.labelCatalog,
+        unlabelledTitle: input.t("workspaceLabels.unlabelled"),
+      });
   }
 }
