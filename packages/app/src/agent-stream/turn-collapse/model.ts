@@ -59,8 +59,14 @@ function hasWork(summary: TurnSummary): boolean {
   return Object.keys(paseoActions).length > 0 || Object.values(counts).some((count) => count > 0);
 }
 
+/**
+ * Text stays at turn level in both states: a turn-final reply is never the only
+ * visible text by accident of position. When same-turn rows follow a reply (no
+ * terminating turn boundary), that reply is mid-turn, and folding must not hide
+ * it — pa-2rx2y4 showed a whole answer disappear inside its "Thought" fold.
+ */
 function staysVisibleWhenCollapsed(item: StreamItem): boolean {
-  return isTurnTrigger(item) || item.kind === "compaction";
+  return isTurnTrigger(item) || item.kind === "compaction" || item.kind === "assistant_message";
 }
 
 function findLastAssistantIndex(tail: StreamItem[], start: number, end: number): number {
@@ -71,10 +77,12 @@ function findLastAssistantIndex(tail: StreamItem[], start: number, end: number):
 }
 
 /**
- * Folds each answered turn into its user message: everything the agent did before its last
+ * Folds each answered turn into its user message: the agent's work before its last
  * message collapses into one summary line, and that message stays in the chat. A turn folds
  * only once it is complete, its user message is loaded, and it sent messages or called tools
- * before its reply. Reasoning is revealed only when the turn opens.
+ * before its reply. Assistant text always stays at turn level — before, between, and
+ * after the folded work — so no reply is ever hidden inside a fold. Reasoning is
+ * revealed only when the turn opens.
  */
 export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
   const { tail } = input;
