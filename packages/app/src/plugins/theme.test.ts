@@ -69,6 +69,8 @@ function installed(serverId: string, themes: PluginThemeContribution[]): Install
     timelineTransformers: [],
     timelineRenderers: [],
     sidebarProjectGroups: null,
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
