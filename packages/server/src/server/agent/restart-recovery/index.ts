@@ -6,11 +6,25 @@ interface Dependencies {
   dispatch(agentId: string, prompt: string): Promise<unknown>;
   report(agentId: string, error: unknown): void;
 }
+/** Orbit run agents (label `paseo-workflows/op`, set by Orbit's startOrAttach)
+ *  resume themselves through Orbit's own recovery after a restart (pw-6f9h E2):
+ *  the daemon must never drive them too, so startup recovery skips them. */
+const ORBIT_RUN_LABEL = "paseo-workflows/op";
+
+/** True for an Orbit run agent, which the daemon's startup recovery must skip. */
+function isOrbitRunAgent(record: StoredAgentRecord): boolean {
+  return record.labels[ORBIT_RUN_LABEL] !== undefined;
+}
+
 export function createRestartRecovery(deps: Dependencies) {
   // Candidates are chosen at startup; each settles once its resume was sent or abandoned.
   const resuming = new Map<string, { promise: Promise<void>; resolve(): void }>();
   const eligible = async (record: StoredAgentRecord) =>
-    !record.archivedAt && !record.internal && !record.owner && (await deps.eligible(record));
+    !record.archivedAt &&
+    !record.internal &&
+    !record.owner &&
+    !isOrbitRunAgent(record) &&
+    (await deps.eligible(record));
   async function resume(agentId: string) {
     const record = await deps.storage.get(agentId);
     if (!record?.resumeOnStartup) return;

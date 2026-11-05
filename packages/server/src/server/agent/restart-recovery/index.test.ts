@@ -103,3 +103,57 @@ test("opt-out consumes pending recovery and excludes archived, private, owned an
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("startup recovery skips Orbit run agents while ordinary interrupted agents resume (pw-6f9h E2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "restart-recovery-"));
+  try {
+    const storage = new AgentStorage(root, createTestLogger());
+    const orbitLabels = { "paseo-workflows/op": "bd#1/implement/1" };
+    for (const extra of [
+      { id: "plain" },
+      { id: "orbit", labels: orbitLabels },
+      // Flagged before the exclusion existed: the persisted flag must still lose.
+      { id: "stale", labels: orbitLabels, resumeOnStartup: true },
+    ]) {
+      await storage.upsert(
+        parseStoredAgentRecord({
+          lastStatus: "running",
+          provider: "codex",
+          cwd: root,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          ...extra,
+        }),
+      );
+    }
+    const dispatched: string[] = [];
+    const recovery = createRestartRecovery({
+      storage,
+      settings: () => ({ enabled: true, prompt: "Resume working." }),
+      eligible: async () => true,
+      dispatch: async (id) => {
+        dispatched.push(id);
+      },
+      report: () => {},
+    });
+    // Capture marks only the ordinary running agent for resume.
+    await recovery.captureRunningAgents();
+    expect((await storage.get("plain"))?.resumeOnStartup).toBe(true);
+    expect((await storage.get("orbit"))?.resumeOnStartup).not.toBe(true);
+    // Selection rechecks the persisted flags: the stale Orbit flag is cleared.
+    await recovery.prepareStartup();
+    expect((await storage.get("plain"))?.resumeOnStartup).toBe(true);
+    expect((await storage.get("plain"))?.lastStatus).toBe("closed");
+    expect((await storage.get("orbit"))?.resumeOnStartup).not.toBe(true);
+    expect((await storage.get("stale"))?.resumeOnStartup).toBe(false);
+    recovery.resumePending();
+    const running = new AbortController().signal;
+    await recovery.waitForResume("plain", running);
+    await recovery.waitForResume("orbit", running);
+    await recovery.waitForResume("stale", running);
+    expect(dispatched).toEqual(["plain"]);
+    expect((await storage.list()).every((record) => !record.resumeOnStartup)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
