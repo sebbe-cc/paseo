@@ -11,6 +11,7 @@ export interface TerminalCreateOptions extends TerminalCommandOptions {
   workspace?: string;
   cwd?: string;
   name?: string;
+  persistent?: boolean;
 }
 
 export async function runCreateCommand(
@@ -26,6 +27,7 @@ export async function runCreateCommand(
       workspaceId,
       cwd,
       name: options.name,
+      ...(options.persistent === true ? { persistent: true } : {}),
     });
     const snapshot = terminal.current();
     if (!snapshot) throw new Error("The daemon did not create a terminal");
