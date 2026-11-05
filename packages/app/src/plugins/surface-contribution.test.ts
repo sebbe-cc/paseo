@@ -46,6 +46,7 @@ function installation(
     timelineSelectionActions: [],
     inlineDecorators: [],
     workspaceLabelPresenters: [],
+    sidebarProjectGroups: null,
   };
 }
 

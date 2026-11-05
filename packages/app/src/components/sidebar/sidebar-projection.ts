@@ -25,6 +25,8 @@ import {
   statusWorkspaceGroups,
   type SidebarWorkspaceGroup,
 } from "./sidebar-labels";
+import { orderSidebarProjectsByGroups } from "@/sidebar-project-groups/layout";
+import type { ResolvedSidebarProjectGroup } from "@/sidebar-project-groups/model";
 
 export interface SidebarProjection {
   pinnedGroups: PinnedSidebarGroups;
@@ -55,6 +57,11 @@ export interface SidebarProjectionInput {
   pinnedCollapsed: boolean;
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
+  /** Plugin-contributed project groups; regroup project mode so shortcuts follow the grouped order. */
+  projectGroups?: {
+    groups: readonly ResolvedSidebarProjectGroup[];
+    collapsedGroupKeys: ReadonlySet<string>;
+  };
   t: TFunction;
 }
 
@@ -78,10 +85,17 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
     sections.push({ workspaces: pinnedGroups.pinnedChats });
   }
   if (input.groupMode === "project") {
+    const grouped = orderSidebarProjectsByGroups({
+      projects: pinnedGroups.unpinnedProjects,
+      groups: input.projectGroups?.groups ?? [],
+      collapsedGroupKeys: input.projectGroups?.collapsedGroupKeys ?? NO_GROUP_KEYS,
+    });
     sections.push(
-      ...pinnedGroups.unpinnedProjects.map((project) => ({
+      ...grouped.projects.map((project) => ({
         workspaces: project.workspaces,
-        collapsed: input.collapsedProjectKeys.has(project.viewKey),
+        collapsed:
+          grouped.hiddenKeys.has(project.viewKey) ||
+          input.collapsedProjectKeys.has(project.viewKey),
       })),
     );
   } else {
@@ -100,6 +114,8 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
     shortcutModel: buildSidebarShortcutSections({ sections }),
   };
 }
+
+const NO_GROUP_KEYS: ReadonlySet<string> = new Set();
 
 /** Project mode keeps its project headers and groups nothing; the other modes group the rows. */
 function buildWorkspaceGroups(

@@ -40,6 +40,7 @@ function installed(): InstalledPlugin {
     timelineSelectionActions: [],
     inlineDecorators: [],
     workspaceLabelPresenters: [],
+    sidebarProjectGroups: null,
   };
 }
 

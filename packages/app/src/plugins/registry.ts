@@ -101,6 +101,7 @@ export class PluginRegistry {
           requirements: entry.requirements,
           queryClient: new QueryClient(),
           cleanup: () => undefined,
+          sidebarProjectGroups: null,
           surfaces: [],
           settingsScreens: [],
           sidebarItems: { header: [], footer: [] },

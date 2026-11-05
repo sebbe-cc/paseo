@@ -123,6 +123,7 @@ function plugin(onAgentSelect: AgentCommandItem["onSelect"]): InstalledPlugin {
     timelineSelectionActions: [],
     inlineDecorators: [],
     workspaceLabelPresenters: [],
+    sidebarProjectGroups: null,
   };
 }
 

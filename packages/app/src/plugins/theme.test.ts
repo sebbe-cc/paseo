@@ -71,6 +71,7 @@ function installed(serverId: string, themes: PluginThemeContribution[]): Install
     timelineSelectionActions: [],
     inlineDecorators: [],
     workspaceLabelPresenters: [],
+    sidebarProjectGroups: null,
   };
 }
 
