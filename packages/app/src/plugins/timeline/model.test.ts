@@ -41,6 +41,8 @@ function plugin(input: {
     ],
     timelineRenderers: [],
     sidebarProjectGroups: null,
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 

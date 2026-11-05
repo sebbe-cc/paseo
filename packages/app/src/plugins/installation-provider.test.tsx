@@ -44,6 +44,8 @@ function installation(invoked: string[]): InstalledPlugin {
     timelineTransformers: [],
     timelineRenderers: [],
     sidebarProjectGroups: null,
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 

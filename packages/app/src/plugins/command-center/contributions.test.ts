@@ -121,6 +121,8 @@ function plugin(onAgentSelect: AgentCommandItem["onSelect"]): InstalledPlugin {
     timelineTransformers: [],
     timelineRenderers: [],
     sidebarProjectGroups: null,
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
