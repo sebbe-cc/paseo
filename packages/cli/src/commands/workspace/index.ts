@@ -6,6 +6,7 @@ import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
 import { runSetupCommand } from "./setup.js";
+import { runShowCommand } from "./show.js";
 
 export function createWorkspaceCommand(): Command {
   const workspace = new Command("workspace").description("Manage workspaces");
@@ -45,6 +46,13 @@ export function createWorkspaceCommand(): Command {
       .description("List active workspaces")
       .option("--background", "Include background workspaces"),
   ).action(withOutput(runLsCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("show")
+      .description("Show one workspace including its resolved base")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runShowCommand));
 
   addJsonAndDaemonHostOptions(
     workspace
