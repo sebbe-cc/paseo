@@ -299,6 +299,48 @@ Browsers require user interaction before allowing sound; handle rejection and of
 play button. The function plays on the device running the plugin client, not on the daemon,
 and does not promise delivery while the app is suspended or closed.
 
+### Trusted app actions
+
+`client.clientActions` exposes the app's own actions to trusted hardware controls:
+hold-to-talk voice input, focused-panel scroll, and panel navigation for joystick input.
+It is present only on clients whose app implements it (packaged desktop); on older apps,
+browser, and mobile it is `undefined`, and the plugin must report "unsupported" and stay
+a no-op — never fail, never fall back to another transport.
+
+```ts
+const actions = client.clientActions;
+if (!actions) {
+  // Show the unsupported state; do not attempt hardware actions.
+}
+const caps = actions?.getCapabilities(); // { voiceInput, panelScroll }
+```
+
+Probe each part separately with `getCapabilities()`: voice and panel scroll go live
+independently. Joystick navigation is gated under `panelScroll` — there is no separate
+joystick flag. Voice hold-to-talk starts the app's existing dictation pipeline for the
+exact `{serverId, agentId}` target; releasing stops the pipeline and delivers the
+transcript to that agent. An empty transcript sends nothing. Starting a new session
+retires the previous one, and the app stops the microphone on dropped release, window
+change, and disconnect as the last guarantor.
+
+```ts
+await actions?.startVoiceInput({ serverId, agentId });
+// ... while the control is held ...
+await actions?.stopVoiceInput(); // delivers the transcript to the agent
+actions?.scrollFocusedPanel("down", "page"); // works without a mounted plugin panel
+actions?.navigatePanel("history"); // up/down: history/sidebar, left/right: back/forward
+```
+
+Agent interruption and provider mode controls are separate SDK calls on the agent
+handle (`cancel()`, `setMode()`, `setModel()`, `setFeature()`), not part of this
+capability — plugins probe them structurally and report "unsupported" where missing.
+
+| Platform | `client.clientActions`                          |
+| -------- | ----------------------------------------------- |
+| Electron | Present; per-part probing via `getCapabilities` |
+| Browser  | `undefined`; report "unsupported"               |
+| Mobile   | `undefined`; report "unsupported"               |
+
 ### External links and workspace browsers
 
 Use `ExternalLink` to open documentation outside Paseo:

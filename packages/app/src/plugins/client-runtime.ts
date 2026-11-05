@@ -12,6 +12,8 @@ import {
   createDomPanelResolver,
   createWebPanelNavigator,
 } from "./client-actions";
+import { createVoiceAudioSource, isVoiceCaptureAvailable } from "./voice-capture";
+import { createPluginVoiceInput, isPackagedDesktopVoiceHost } from "./voice-pipeline";
 import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
@@ -31,14 +33,19 @@ export function createPluginClientRuntime(
     ...capabilities,
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
-    // Task 2 app-side prob surface: panel scroll/navigation live on DOM
-    // hosts; voiceInput stays false until the mic pipeline
-    // (DictationStreamSender + audio source + daemon stream client) is
-    // glued in where those pieces exist — the session lifecycle and
-    // mic-safety above are implemented and tested, the production mic
-    // hookup is the remaining anchor.
+    // Panel scroll/navigation live on DOM hosts. Voice hold-to-talk is
+    // glued to the production dictation pipeline (mic capture +
+    // DictationStreamSender + daemon stream client, transcript delivered
+    // to the routed agent on release) where those pieces exist — packaged
+    // desktop only. Everywhere else voiceInput probes false and the plugin
+    // reports unsupported instead of crashing or faking a transcript.
     clientActions: createAppClientActionsCapability({
-      voice: null,
+      voice: createPluginVoiceInput({
+        isDesktopHost: isPackagedDesktopVoiceHost,
+        isCaptureAvailable: () => isVoiceCaptureAvailable(),
+        resolveClient: (serverId) => getHostRuntimeStore().getClient(serverId),
+        createAudioSource: (config) => createVoiceAudioSource(config),
+      }),
       panels: createDomPanelResolver(),
       navigator: createWebPanelNavigator(),
     }),
