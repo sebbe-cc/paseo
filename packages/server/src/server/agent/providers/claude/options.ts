@@ -118,3 +118,21 @@ export function applyClaudeToolPolicy(
   const grants = toolPolicy.preapproved.map((grant) => `mcp__${grant.server}__${grant.tool}`);
   return { ...options, allowedTools: [...new Set([...allowedTools, ...grants])] };
 }
+
+/**
+ * Gas City session skill scope (pa-uumx5v): the gascity plugin publishes
+ * the granted layer-skill names in
+ * `featureValues.gascity_granted_skills`. Returns the allowlist for the
+ * SDK `skills` option, or undefined when the session carries no usable
+ * contract (absent, wrong type, empty) so the session behaves exactly as
+ * before. Unknown names match nothing in the SDK filter; role skills
+ * (`gc skill` references) never resolve there.
+ */
+export function sessionGrantedSkills(
+  featureValues: Record<string, unknown> | undefined,
+): string[] | undefined {
+  const raw = featureValues?.gascity_granted_skills;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const names = raw.filter((name): name is string => typeof name === "string" && name.length > 0);
+  return names.length > 0 ? names : undefined;
+}
