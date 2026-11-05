@@ -42,6 +42,8 @@ function installed(
     timelineTransformers: [],
     timelineRenderers: [],
     sidebarProjectGroups: null,
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
