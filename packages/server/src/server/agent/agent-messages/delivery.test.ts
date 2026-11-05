@@ -170,6 +170,47 @@ test("explicit interrupt and conflicting session modes retain ordered dispatch b
   ]);
 });
 
+test("steer_only messages keep their behavior in a separate batch", async () => {
+  const sent: Array<{
+    activeTurnBehavior: string;
+    messageIds: readonly string[];
+  }> = [];
+  const delivery = createAgentMessageDelivery({
+    dispatch: async (request) => {
+      sent.push(request);
+      request.onDispatch("steered");
+      return "steered";
+    },
+    onError: (error) => {
+      throw error;
+    },
+  });
+  const source = { kind: "agent-message" as const, agentId: "worker" };
+  delivery.enqueue({
+    recipientId: "parent",
+    source,
+    prompt: "voice steer",
+    messageId: "voice",
+    activeTurnBehavior: "steer_only",
+  });
+  delivery.enqueue({
+    recipientId: "parent",
+    source,
+    prompt: "plain steer",
+    messageId: "plain",
+  });
+  await delivery.close();
+  expect(
+    sent.map(({ activeTurnBehavior, messageIds }) => ({
+      activeTurnBehavior,
+      messageIds,
+    })),
+  ).toEqual([
+    { activeTurnBehavior: "steer_only", messageIds: ["voice"] },
+    { activeTurnBehavior: "steer", messageIds: ["plain"] },
+  ]);
+});
+
 test("dispatch failures reject waits before and after flush and do not poison later messages", async () => {
   const clock = createClock();
   const failed = new Error("provider rejected");
