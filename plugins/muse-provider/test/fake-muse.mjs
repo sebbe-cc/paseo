@@ -80,6 +80,17 @@ function receiveFrame(line) {
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
 function controlResponse(frame) {
+  // A saturated shared daemon refuses admission; an own host process serves
+  // the same session instead. Refuse only joined hosts so the fallback host
+  // (spawned without --join) succeeds with the same environment.
+  if (
+    process.env.MUSE_TEST_REFUSE_JOIN &&
+    process.argv.slice(2).includes("--join") &&
+    (frame.method === "session/start" || frame.method === "session/resume")
+  ) {
+    rpcError(frame, -32031, process.env.MUSE_TEST_REFUSE_KIND || "backpressured", "daemon busy");
+    return true;
+  }
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;
