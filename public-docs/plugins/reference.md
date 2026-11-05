@@ -345,6 +345,58 @@ export async function openDocumentation() {
 
 Call the function directly from a user interaction so the browser permits a new tab.
 
+### Device (HID) broker
+
+`client.hid` exposes the desktop's local device broker to trusted plugins. It is present
+only on clients with a local broker (Electron desktop); on browser web, iOS, and Android
+it is `undefined`, and the plugin must report "unsupported" and stay a no-op — never fail.
+
+```ts
+const capability = client.hid;
+if (!capability) {
+  // Show the unsupported state; do not attempt hardware access.
+}
+const broker = capability?.getBroker() ?? null;
+```
+
+The broker carries `getState`/`subscribe` plus optional `enumerate`, `onRawReport`, `write`,
+`claim`, and `release`. Claims are explicit per device and never automatic: check the
+device's vendor usage pair before claiming, so the broker never opens keyboards or mice
+just by existing. Input reaches only the owning window; every other instance only watches.
+Raw decoding is vendor-specific and lives in the plugin — the generic broker only carries
+bytes. The plugin owns its subscription lifetime: subscribe in `contribute()` and release
+every claim and subscription in the entry cleanup.
+
+| Platform | `client.hid`                                     |
+| -------- | ------------------------------------------------ |
+| Electron | Present; devices enumerate over the local broker |
+| Browser  | `undefined`; report "unsupported"                |
+| Mobile   | `undefined`; report "unsupported"                |
+
+### Global client context
+
+`client.clientContext` exposes the app's global client context — window, server, workspace,
+panel, agent, and focus — with app lifetime. It works without a mounted plugin panel, so
+navigation and focus keep working from background contributions. The snapshot is `null`
+until the app has resolved its installation and window identities; subscribe for readiness
+instead of guessing.
+
+```ts
+const snapshot = client.clientContext?.getSnapshot();
+if (snapshot?.agentId) {
+  await client.clientContext.focusTarget({
+    serverId: snapshot.serverId!,
+    agentId: snapshot.agentId,
+  });
+}
+```
+
+Routing always uses the exact `{serverId, agentId}` pair plus the workspace id for UI —
+never a title, working directory, alias, or a bare agent id. A `null` agent means no agent
+is visible; fall back to a slot list or an unavailable state, never to a global daemon
+status. `focusTarget` brings the app forward and navigates to the target's agent;
+`openWorkspace` navigates to a workspace without requiring a mounted panel.
+
 | Platform      | External links                     | `navigation.openBrowser`                         |
 | ------------- | ---------------------------------- | ------------------------------------------------ |
 | Electron      | System browser                     | Available; creates a local workspace browser tab |
