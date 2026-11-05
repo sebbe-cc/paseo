@@ -1,5 +1,6 @@
 import { constants, promises as fs, type BigIntStats, type Stats } from "fs";
 import type { FileHandle } from "fs/promises";
+import { homedir, tmpdir } from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 import { expandUserPath, resolvePathFromBase } from "../path-utils.js";
@@ -112,6 +113,53 @@ export const MAX_EDITABLE_FILE_BYTES = 1024 * 1024;
 const READ_FILE_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
 const ACCESS_OUTSIDE_WORKSPACE_MESSAGE = "Access outside of workspace is not allowed";
+const WRITE_OUTSIDE_HOME_MESSAGE =
+  "Writing outside of the home and temp directories is not allowed";
+
+/**
+ * Files opened outside their workspace (assistant file links into sibling
+ * worktrees, fix/assistant-file-links-worktree) resolve with the filesystem
+ * root as cwd. Reads stay allowed, but writes through such a root are
+ * confined to the home and temp directories — the file opens read-only
+ * everywhere else. Workspace-scoped writes are unaffected.
+ */
+export async function assertFilesystemRootWriteAllowed(
+  root: string,
+  resolvedPath: string,
+  allowlist: string[] = [homedir(), tmpdir(), "/tmp"],
+): Promise<void> {
+  const expandedRoot = expandUserPath(root);
+  const isFilesystemRoot =
+    expandedRoot === path.parse(expandedRoot).root && expandedRoot.length <= 4;
+  if (!isFilesystemRoot) {
+    return;
+  }
+  let realTarget = resolvedPath;
+  try {
+    realTarget = await fs.realpath(resolvedPath);
+  } catch {
+    try {
+      realTarget = await fs.realpath(path.dirname(resolvedPath));
+    } catch {
+      realTarget = resolvedPath;
+    }
+  }
+  const allowed = new Set<string>();
+  for (const entry of allowlist) {
+    try {
+      allowed.add(await fs.realpath(entry));
+    } catch {
+      allowed.add(entry);
+    }
+  }
+  for (const base of allowed) {
+    const relative = path.relative(base, realTarget);
+    if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      return;
+    }
+  }
+  throw new Error(WRITE_OUTSIDE_HOME_MESSAGE);
+}
 
 function fileRevision(stats: BigIntStats): string {
   return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}`;
@@ -469,6 +517,7 @@ export async function writeExplorerFile({
   let currentMode = 0o600;
   try {
     filePath = await resolveScopedPath({ root, relativePath });
+    await assertFilesystemRootWriteAllowed(root, filePath.resolvedPath);
     const handle = await openFileForRead(filePath.resolvedPath);
     try {
       const stats = await handle.stat({ bigint: true });
@@ -628,6 +677,7 @@ export async function createExplorerEntry({
       return { status: "error", error: "Parent path is not a directory" };
     }
     const targetPath = path.join(parent.resolvedPath, trimmedName);
+    await assertFilesystemRootWriteAllowed(root, targetPath);
     if (kind === "directory") {
       await fs.mkdir(targetPath);
     } else {
@@ -659,6 +709,7 @@ export async function duplicateExplorerEntry({
     if (source.resolvedPath === realRoot) {
       return { status: "error", error: "Cannot duplicate the workspace root" };
     }
+    await assertFilesystemRootWriteAllowed(root, source.resolvedPath);
 
     const stats = await fs.lstat(source.requestedPath);
     const sourceName = path.basename(source.requestedPath);
@@ -716,6 +767,7 @@ export async function renameExplorerEntry({
     if (source.resolvedPath === realRoot) {
       return { status: "error", error: "Cannot rename the workspace root" };
     }
+    await assertFilesystemRootWriteAllowed(root, source.resolvedPath);
 
     const targetPath = path.join(path.dirname(source.requestedPath), trimmedName);
     const sourceStats = await fs.lstat(source.requestedPath);
@@ -775,6 +827,7 @@ export async function deleteExplorerEntry({
     if (scoped.resolvedPath === realRoot) {
       return { status: "error", error: "Cannot delete the workspace root" };
     }
+    await assertFilesystemRootWriteAllowed(root, scoped.resolvedPath);
     // Remove the requested path, not the realpath: deleting a symlink must
     // remove the link, never its target. lstat keeps the same guarantee.
     const stats = await fs.lstat(scoped.requestedPath);
