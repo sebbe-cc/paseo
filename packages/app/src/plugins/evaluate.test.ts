@@ -142,6 +142,95 @@ describe("evaluatePluginClientBundle", () => {
     Reflect.deleteProperty(globalThis, "__pluginRemovals");
   });
 
+  it("collects sidebar project groups and refreshes them in place", () => {
+    const plugin = evaluatePluginClientBundle(
+      "groups",
+      bundle(`
+        globalThis.__projectGroups = plugin.addSidebarProjectGroups({
+          groups: [
+            { id: "heads", name: " Heads ", projectIds: ["p-a", "p-a", ""], order: 1 },
+            { id: "fleet", name: "Fleet", projectIds: [], order: 0 },
+          ],
+          onManage() {},
+          manageLabel: "Hantera",
+        });
+      `),
+    );
+
+    expect(plugin.sidebarProjectGroups).toMatchObject({
+      groups: [
+        { id: "heads", name: "Heads", projectIds: ["p-a"], order: 1 },
+        { id: "fleet", name: "Fleet", projectIds: [], order: 0 },
+      ],
+      manageLabel: "Hantera",
+    });
+    expect(typeof plugin.sidebarProjectGroups?.onManage).toBe("function");
+
+    const registration = Reflect.get(globalThis, "__projectGroups") as {
+      update: (contribution: unknown) => void;
+      remove: () => void;
+    };
+    registration.update({ groups: [{ id: "solo", name: "Solo", projectIds: ["p-b"], order: 0 }] });
+    expect(plugin.sidebarProjectGroups?.groups).toEqual([
+      { id: "solo", name: "Solo", projectIds: ["p-b"], order: 0 },
+    ]);
+    expect(plugin.sidebarProjectGroups?.onManage).toBeUndefined();
+    registration.remove();
+    registration.remove();
+    // Removal empties the shared holder, so already-published snapshots lose the headers.
+    expect(plugin.sidebarProjectGroups).toMatchObject({ groups: [] });
+    expect(plugin.sidebarProjectGroups?.onManage).toBeUndefined();
+    registration.update({ groups: [] });
+    expect(plugin.sidebarProjectGroups).toMatchObject({ groups: [] });
+    Reflect.deleteProperty(globalThis, "__projectGroups");
+  });
+
+  it.each([
+    [
+      `plugin.addSidebarProjectGroups({ groups: [] }); plugin.addSidebarProjectGroups({ groups: [] });`,
+      "Duplicate sidebar project groups in plugin dup",
+    ],
+    [`plugin.addSidebarProjectGroups({});`, "Sidebar project groups need a groups array"],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [null] });`,
+      "Sidebar project group 0 is not an object",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "Bad id", name: "x", projectIds: [], order: 0 }] });`,
+      "Invalid sidebar project group 0 id: Bad id",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "a", name: "x", projectIds: [], order: 0 }, { id: "a", name: "y", projectIds: [], order: 1 }] });`,
+      "Duplicate sidebar project group: a",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "a", name: "  ", projectIds: [], order: 0 }] });`,
+      "Sidebar project group a has no name",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "a", name: "x", order: 0 }] });`,
+      "Sidebar project group a needs a projectIds array",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "a", name: "x", projectIds: [42], order: 0 }] });`,
+      "Sidebar project group a has a non-string project id",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [{ id: "a", name: "x", projectIds: [] }] });`,
+      "Sidebar project group a needs a finite order number",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [], onManage: "manage" });`,
+      "Sidebar project groups onManage is not a function",
+    ],
+    [
+      `plugin.addSidebarProjectGroups({ groups: [], manageLabel: "  " });`,
+      "Sidebar project groups manageLabel is empty",
+    ],
+  ])("rejects malformed sidebar project groups: %s", (call, message) => {
+    expect(() => evaluatePluginClientBundle("dup", bundle(call))).toThrow(message);
+  });
+
   it.each(["tool_call", "notification"])("collects %s transformers and renderers", (itemType) => {
     const plugin = evaluatePluginClientBundle(
       "reports",
