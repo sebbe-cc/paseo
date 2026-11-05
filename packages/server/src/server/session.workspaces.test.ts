@@ -57,6 +57,8 @@ import {
   type WorkspaceGitRuntimeSnapshot,
 } from "./workspace-git-service.js";
 import type { CheckoutSnapshotFacts, CheckoutStatusGit } from "../utils/checkout-git.js";
+import { resolveWorkspaceBase as resolveWorkspaceBaseReal } from "../utils/checkout-git.js";
+import type { RunGitCommand } from "../utils/run-git-command.js";
 import type pino from "pino";
 import type { GeneratedWorkspaceName } from "./worktree-branch-name-generator.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
@@ -7432,6 +7434,190 @@ test("fetch_workspaces with a cold cache serves null bases without awaiting git"
     base: null,
     baseError: "Base ref not found: refs/heads/gone",
   });
+});
+
+test("background workspace base resolutions stop when the session is cleaned up", async () => {
+  const WORKSPACE_COUNT = 10;
+  const emitted: SessionOutboundMessage[] = [];
+  const releaseResolvers: Array<() => void> = [];
+  let resolveCalls = 0;
+  const resolveWorkspaceBase = vi.fn(async () => {
+    resolveCalls += 1;
+    await new Promise<void>((release) => releaseResolvers.push(release));
+    return null;
+  });
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      workspaceGitService: createNoopWorkspaceGitService(),
+      resolveWorkspaceBase,
+    }),
+  );
+  const project = createPersistedProjectRecord({
+    projectId: "proj-base-cleanup",
+    rootPath: "/tmp/base-cleanup",
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = Array.from({ length: WORKSPACE_COUNT }, (_, index) =>
+    createPersistedWorkspaceRecord({
+      workspaceId: `ws-base-cleanup-${index}`,
+      projectId: project.projectId,
+      cwd: `/tmp/base-cleanup-${index}`,
+      kind: "local_checkout",
+      displayName: `ws-${index}`,
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    }),
+  );
+
+  session.emit = (message) => {
+    if (isSessionOutboundMessage(message)) emitted.push(message);
+  };
+  session.listAgentPayloads = async () => [];
+  session.projectRegistry.list = async () => [project];
+  session.workspaceRegistry.list = async () => workspaces;
+
+  await session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "req-base-cleanup",
+  });
+  expect(resolveCalls).toBeGreaterThan(0);
+  expect(resolveCalls).toBeLessThanOrEqual(4);
+
+  await session.cleanup();
+
+  // Release the running batch; the queued remainder must never start, so the
+  // total stays at the first batch even after everything settles.
+  for (let guard = 0; guard < 50; guard += 1) {
+    if (releaseResolvers.length === 0) break;
+    releaseResolvers.splice(0).forEach((release) => release());
+    await waitForImmediate();
+  }
+  expect(resolveCalls).toBeLessThanOrEqual(4);
+  expect(releaseResolvers).toHaveLength(0);
+});
+
+test("fetch_workspaces with a cold cache bounds real base git demand", async () => {
+  const WORKSPACE_COUNT = 250;
+  const PAGE_LIMIT = 200;
+  const emitted: SessionOutboundMessage[] = [];
+  // Counts every git invocation the real resolver makes, at the RunGitCommand
+  // adapter boundary, and holds execution pending so the test proves the
+  // listing does not wait on it. Everything fails as not-a-repo, so each
+  // cold workspace costs exactly one git demand.
+  const gitReleases: Array<() => void> = [];
+  let gitDemands = 0;
+  let gitInflight = 0;
+  let gitMaxInflight = 0;
+  const gitRunner: RunGitCommand = async (args, options) => {
+    gitDemands += 1;
+    gitInflight += 1;
+    gitMaxInflight = Math.max(gitMaxInflight, gitInflight);
+    try {
+      await new Promise<void>((release) => gitReleases.push(release));
+    } finally {
+      gitInflight -= 1;
+    }
+    throw new Error(`fatal: not a git repository: ${options.cwd} (git ${args.join(" ")})`);
+  };
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      workspaceGitService: createNoopWorkspaceGitService(),
+      resolveWorkspaceBase: (cwd: string) =>
+        resolveWorkspaceBaseReal(cwd, { runGitCommand: gitRunner }),
+    }),
+  );
+  const project = createPersistedProjectRecord({
+    projectId: "proj-base-demand",
+    rootPath: "/tmp/base-demand",
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = Array.from({ length: WORKSPACE_COUNT }, (_, index) =>
+    createPersistedWorkspaceRecord({
+      workspaceId: `ws-base-demand-${index}`,
+      projectId: project.projectId,
+      cwd: `/tmp/base-demand-${index}`,
+      kind: "local_checkout",
+      displayName: `ws-${index}`,
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    }),
+  );
+
+  session.emit = (message) => {
+    if (isSessionOutboundMessage(message)) emitted.push(message);
+  };
+  session.listAgentPayloads = async () => [];
+  session.projectRegistry.list = async () => [project];
+  session.workspaceRegistry.list = async () => workspaces;
+
+  interface FetchResponse {
+    type: "fetch_workspaces_response";
+    payload: {
+      entries: Array<{ id: string; base: unknown }>;
+      pageInfo: { nextCursor: string | null };
+    };
+  }
+  const fetchPage = async (requestId: string, cursor?: string): Promise<FetchResponse> => {
+    emitted.length = 0;
+    await session.handleMessage({
+      type: "fetch_workspaces_request",
+      requestId,
+      page: cursor ? { limit: PAGE_LIMIT, cursor } : { limit: PAGE_LIMIT },
+    });
+    const response = emitted.find((message) => message.type === "fetch_workspaces_response") as
+      | FetchResponse
+      | undefined;
+    expect(response).toBeDefined();
+    return response as FetchResponse;
+  };
+
+  const firstPage = await fetchPage("req-base-demand-1");
+  expect(firstPage.payload.entries).toHaveLength(PAGE_LIMIT);
+  for (const entry of firstPage.payload.entries) {
+    expect(entry.base).toBeNull();
+  }
+  expect(firstPage.payload.pageInfo.nextCursor).not.toBeNull();
+  // The real resolver runs, but the listing returns while every started git
+  // demand is still blocked: at most the bounded background concurrency ran.
+  expect(gitDemands).toBeGreaterThan(0);
+  expect(gitDemands).toBeLessThanOrEqual(4);
+  expect(gitInflight).toBe(gitDemands);
+
+  const secondPage = await fetchPage(
+    "req-base-demand-2",
+    firstPage.payload.pageInfo.nextCursor as string,
+  );
+  expect(secondPage.payload.entries).toHaveLength(WORKSPACE_COUNT - PAGE_LIMIT);
+  // The second listing re-described the same workspaces without new git demand.
+  expect(gitDemands).toBeLessThanOrEqual(4);
+
+  // Drain the held git queue in waves; each wave releases the currently
+  // blocked batch and the pump starts the next bounded batch.
+  for (let guard = 0; guard < 1000; guard += 1) {
+    if (gitDemands >= WORKSPACE_COUNT && gitReleases.length === 0) break;
+    gitReleases.splice(0).forEach((release) => release());
+    await waitForImmediate();
+  }
+  expect(gitDemands).toBe(WORKSPACE_COUNT);
+  expect(gitMaxInflight).toBeLessThanOrEqual(4);
+  expect(gitReleases).toHaveLength(0);
+
+  // Later listings serve the cached nulls without any new git demand.
+  const cachedFirst = await fetchPage("req-base-demand-3");
+  const cachedSecond = await fetchPage(
+    "req-base-demand-4",
+    cachedFirst.payload.pageInfo.nextCursor as string,
+  );
+  expect(gitDemands).toBe(WORKSPACE_COUNT);
+  for (const entry of [...cachedFirst.payload.entries, ...cachedSecond.payload.entries]) {
+    expect(entry.base).toBeNull();
+  }
 });
 
 test("workspace_update includes updated runtime fields", async () => {

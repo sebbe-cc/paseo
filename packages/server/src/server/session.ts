@@ -5779,6 +5779,7 @@ export class Session {
   }
 
   private enqueueWorkspaceBaseResolution(cwd: string): void {
+    if (this.isCleanedUp) return;
     const key = resolve(cwd);
     if (this.workspaceBaseCache.has(key) || this.workspaceBaseInflight.has(key)) return;
     if (this.workspaceBaseQueue.some((entry) => entry.key === key)) return;
@@ -5787,6 +5788,7 @@ export class Session {
   }
 
   private pumpWorkspaceBaseQueue(): void {
+    if (this.isCleanedUp) return;
     while (
       this.workspaceBaseActiveCount < WORKSPACE_BASE_BACKGROUND_CONCURRENCY &&
       this.workspaceBaseQueue.length > 0
@@ -8895,6 +8897,10 @@ export class Session {
   public async cleanup(): Promise<void> {
     this.sessionLogger.trace({}, "agent.session.lifecycle.cleanup");
     this.isCleanedUp = true;
+    // Drop queued base warmups: they belong to this connection, and a
+    // reconnect creates a fresh session with its own queue. Running jobs
+    // finish without starting another batch (pump is gated above).
+    this.workspaceBaseQueue.length = 0;
     this.unsubscribeSetupObservation();
     await this.delivery.close();
 
