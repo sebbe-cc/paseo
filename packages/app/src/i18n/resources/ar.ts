@@ -1157,6 +1157,7 @@ export const ar: TranslationResources = {
       description: "تحقق من اتصالك وحاول مرة أخرى.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     statusGroupAccessibility: "مجموعة {{label}}",
     statusBucket: {
@@ -2442,6 +2443,8 @@ export const ar: TranslationResources = {
     diagnostics: {
       title: "التشخيص",
       testAudio: "اختبار الصوت",
+      thinkingTone: "نغمة الانتظار في وضع الصوت",
+      thinkingToneHint: "إصدار صفير أثناء تحضير الوكيل لرد صوتي",
       playTest: "لعب الاختبار",
       playing: "جارٍ اللعب...",
       playbackFailed: "فشل التشغيل:{{message}}",
@@ -2624,6 +2627,7 @@ export const ar: TranslationResources = {
         cycleTheme: "موضوع الدورة",
         focusMessageInput: "التركيز على إدخال الرسالة",
         cycleAgentMode: "تبديل وضع الوكيل",
+        toggleGlobalVoice: "تبديل الصوت العام",
         toggleVoiceMode: "تبديل الوضع الصوتي",
         startStopDictation: "بدء إملاء /stop",
         interruptAgent: "عامل المقاطعة",

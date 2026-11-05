@@ -1,5 +1,111 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createPlaybackQueue } from "./playback";
+
+test("schedules streamed PCM contiguously ahead of completion and acknowledges consumed audio", async () => {
+  const { playPcmStream } = await import("./pcm-stream");
+  const played = vi.fn();
+  const starts: number[] = [];
+  const finish: (() => void)[] = [];
+  const audio = {
+    type: "audio/pcm;rate=24000;bits=16",
+    size: 4800,
+    arrayBuffer: async () => new ArrayBuffer(4800),
+  };
+  const result = playPcmStream(
+    async function* () {
+      yield { audio, onPlayed: () => played(0) };
+      yield { audio, onPlayed: () => played(1) };
+    },
+    {
+      now: () => 10,
+      schedule: async (_audio, at) => {
+        starts.push(at);
+        await new Promise<void>((resolve) => finish.push(resolve));
+      },
+    },
+    new AbortController().signal,
+  );
+  await vi.waitFor(() => expect(starts).toHaveLength(2));
+  expect(starts[0]).toBeCloseTo(10.15);
+  expect(starts[1]).toBeCloseTo(10.25);
+  expect(played).not.toHaveBeenCalled();
+  finish[0]();
+  await vi.waitFor(() => expect(played).toHaveBeenCalledWith(0));
+  expect(played).not.toHaveBeenCalledWith(1);
+  finish[1]();
+  await expect(result).resolves.toBeCloseTo(0.2);
+  expect(played).toHaveBeenCalledWith(1);
+});
+
+test("an empty terminal PCM packet waits for the audible tail", async () => {
+  const { playPcmStream } = await import("./pcm-stream");
+  const played = vi.fn();
+  let finish!: () => void;
+  const audio = {
+    type: "audio/pcm;rate=24000;bits=16",
+    size: 4800,
+    arrayBuffer: async () => new ArrayBuffer(4800),
+  };
+  const result = playPcmStream(
+    async function* () {
+      yield { audio, onPlayed: () => played("audio") };
+      yield { audio: { ...audio, size: 0 }, onPlayed: () => played("terminal") };
+    },
+    {
+      now: () => 0,
+      schedule: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    },
+    new AbortController().signal,
+  );
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  expect(played).not.toHaveBeenCalled();
+  finish();
+  await expect(result).resolves.toBe(0.1);
+  expect(played.mock.calls).toEqual([["audio"], ["terminal"]]);
+});
+
+test("cancelling a PCM stream cancels scheduled audio and suppresses playback acknowledgements", async () => {
+  const { playPcmStream } = await import("./pcm-stream");
+  const owner = new AbortController();
+  const played = vi.fn();
+  const cancelled = vi.fn();
+  const audio = {
+    type: "audio/pcm;rate=24000;bits=16",
+    size: 4800,
+    arrayBuffer: async () => new ArrayBuffer(4800),
+  };
+  let scheduled = false;
+  const result = playPcmStream(
+    async function* () {
+      yield { audio, onPlayed: played };
+    },
+    {
+      now: () => 0,
+      schedule: (_audio, _at, signal) =>
+        new Promise<void>((_resolve, reject) => {
+          scheduled = true;
+          signal.addEventListener(
+            "abort",
+            () => {
+              cancelled();
+              reject(new Error("Playback stopped"));
+            },
+            { once: true },
+          );
+        }),
+    },
+    owner.signal,
+  );
+  const rejected = expect(result).rejects.toThrow("Playback stopped");
+  await vi.waitFor(() => expect(scheduled).toBe(true));
+  owner.abort();
+  await rejected;
+  expect(cancelled).toHaveBeenCalledTimes(1);
+  expect(played).not.toHaveBeenCalled();
+});
 
 function harness() {
   const started: string[] = [];
