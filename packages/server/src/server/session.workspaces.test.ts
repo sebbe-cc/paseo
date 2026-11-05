@@ -582,6 +582,7 @@ function createSessionForWorkspaceTests(
       cwd: string,
       newName: string,
     ) => Promise<{ previousBranch: string | null; currentBranch: string | null }>;
+    resolveWorkspaceBase?: SessionOptions["resolveWorkspaceBase"];
     generateWorkspaceName?: () => Promise<GeneratedWorkspaceName | null>;
   } = {},
 ): TestSession {
@@ -752,6 +753,7 @@ function createSessionForWorkspaceTests(
         generateWorkspaceName: options.generateWorkspaceName,
       }),
       renameCurrentBranch: options.renameCurrentBranch,
+      resolveWorkspaceBase: options.resolveWorkspaceBase,
       daemonConfigStore: asDaemonConfigStore({
         get: () => ({ mcp: { injectIntoAgents: false }, providers: {} }),
         onChange: () => () => {},
@@ -7281,6 +7283,155 @@ test("fetch_workspaces_response emits before cold registration-triggered git wor
 
   expect(emitted.find((message) => message.type === "fetch_workspaces_response")).toBeDefined();
   expect(events[0]).toBe("response");
+});
+
+test("fetch_workspaces with a cold cache serves null bases without awaiting git", async () => {
+  const WORKSPACE_COUNT = 250;
+  const PAGE_LIMIT = 200;
+  const emitted: SessionOutboundMessage[] = [];
+  const releaseResolvers: Array<() => void> = [];
+  let resolveCalls = 0;
+  let inflight = 0;
+  let maxInflight = 0;
+  const resolveWorkspaceBase = vi.fn(async (cwd: string) => {
+    resolveCalls += 1;
+    inflight += 1;
+    maxInflight = Math.max(maxInflight, inflight);
+    try {
+      // Stays pending until the test releases it: any inline await of git
+      // work would hang the listings below.
+      await new Promise<void>((release) => releaseResolvers.push(release));
+    } finally {
+      inflight -= 1;
+    }
+    if (cwd.endsWith("-missing")) return null;
+    if (cwd.endsWith("-broken")) throw new Error("Base ref not found: refs/heads/gone");
+    return {
+      ref: "refs/remotes/origin/main",
+      forkSha: null,
+      source: "stored" as const,
+      missing: false,
+    };
+  });
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      workspaceGitService: createNoopWorkspaceGitService(),
+      resolveWorkspaceBase,
+    }),
+  );
+  const project = createPersistedProjectRecord({
+    projectId: "proj-base-cold",
+    rootPath: "/tmp/base-cold",
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = Array.from({ length: WORKSPACE_COUNT }, (_, index) => {
+    let suffix = "";
+    if (index % 10 === 8) suffix = "-missing";
+    else if (index % 10 === 9) suffix = "-broken";
+    return createPersistedWorkspaceRecord({
+      workspaceId: `ws-base-cold-${index}`,
+      projectId: project.projectId,
+      cwd: `/tmp/base-cold-${index}${suffix}`,
+      kind: "local_checkout",
+      displayName: `ws-${index}`,
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    });
+  });
+
+  session.emit = (message) => {
+    if (isSessionOutboundMessage(message)) emitted.push(message);
+  };
+  session.listAgentPayloads = async () => [];
+  session.projectRegistry.list = async () => [project];
+  session.workspaceRegistry.list = async () => workspaces;
+
+  interface FetchResponse {
+    type: "fetch_workspaces_response";
+    payload: {
+      entries: Array<{ id: string; base: unknown; baseError?: unknown }>;
+      pageInfo: { nextCursor: string | null };
+    };
+  }
+  const fetchPage = async (requestId: string, cursor?: string): Promise<FetchResponse> => {
+    emitted.length = 0;
+    await session.handleMessage({
+      type: "fetch_workspaces_request",
+      requestId,
+      page: cursor ? { limit: PAGE_LIMIT, cursor } : { limit: PAGE_LIMIT },
+    });
+    const response = emitted.find((message) => message.type === "fetch_workspaces_response") as
+      | FetchResponse
+      | undefined;
+    expect(response).toBeDefined();
+    return response as FetchResponse;
+  };
+
+  const firstPage = await fetchPage("req-base-cold-1");
+  expect(firstPage.payload.entries).toHaveLength(PAGE_LIMIT);
+  for (const entry of firstPage.payload.entries) {
+    expect(entry.base).toBeNull();
+    expect(entry.baseError).toBeUndefined();
+  }
+  expect(firstPage.payload.pageInfo.nextCursor).not.toBeNull();
+  // The listing returned while every started resolution was still blocked: at
+  // most the bounded background concurrency ran, and the response waited for
+  // none of it.
+  expect(resolveCalls).toBeGreaterThan(0);
+  expect(resolveCalls).toBeLessThanOrEqual(4);
+  expect(inflight).toBe(resolveCalls);
+
+  const secondPage = await fetchPage(
+    "req-base-cold-2",
+    firstPage.payload.pageInfo.nextCursor as string,
+  );
+  expect(secondPage.payload.entries).toHaveLength(WORKSPACE_COUNT - PAGE_LIMIT);
+  for (const entry of secondPage.payload.entries) {
+    expect(entry.base).toBeNull();
+    expect(entry.baseError).toBeUndefined();
+  }
+  // The second listing re-described the same workspaces without starting new
+  // resolutions for any of them.
+  expect(resolveCalls).toBeLessThanOrEqual(4);
+
+  // Drain the background queue in waves; each wave releases the currently
+  // blocked batch and the pump starts the next bounded batch.
+  for (let guard = 0; guard < 500; guard += 1) {
+    if (resolveCalls >= WORKSPACE_COUNT && releaseResolvers.length === 0) break;
+    releaseResolvers.splice(0).forEach((release) => release());
+    await waitForImmediate();
+  }
+  expect(resolveCalls).toBe(WORKSPACE_COUNT);
+  expect(maxInflight).toBeLessThanOrEqual(4);
+  expect(releaseResolvers).toHaveLength(0);
+
+  // Every outcome — base, "no base" null, and failure — is cached: fresh
+  // listings serve them without touching git again.
+  const cachedFirst = await fetchPage("req-base-cold-3");
+  const cachedSecond = await fetchPage(
+    "req-base-cold-4",
+    cachedFirst.payload.pageInfo.nextCursor as string,
+  );
+  expect(resolveCalls).toBe(WORKSPACE_COUNT);
+  const byId = new Map(
+    [...cachedFirst.payload.entries, ...cachedSecond.payload.entries].map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  );
+  expect(byId.size).toBe(WORKSPACE_COUNT);
+  expect(byId.get("ws-base-cold-0")).toMatchObject({
+    base: { ref: "refs/remotes/origin/main", source: "stored", missing: false },
+  });
+  expect(byId.get("ws-base-cold-8")).toMatchObject({ base: null });
+  expect(byId.get("ws-base-cold-8")?.baseError).toBeUndefined();
+  expect(byId.get("ws-base-cold-9")).toMatchObject({
+    base: null,
+    baseError: "Base ref not found: refs/heads/gone",
+  });
 });
 
 test("workspace_update includes updated runtime fields", async () => {
