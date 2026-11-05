@@ -953,6 +953,7 @@ export const ptBR: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "A base {{ref}} não existe mais. Comparando com o ponto de bifurcação salvo.",
         openChangesTab: "Abrir a aba Alterações",
         openDiffTab: "Abrir a aba Diff",
         closeChangesTab: "Fechar a aba Alterações",

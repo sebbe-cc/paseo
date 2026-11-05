@@ -1,3 +1,4 @@
+import type { WorkspaceBase } from "@getpaseo/protocol/messages";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -159,6 +160,7 @@ export interface WorkspaceGitRuntimeSnapshot {
     isPaseoOwnedWorktree: boolean;
     isDirty: boolean | null;
     baseRef: string | null;
+    base?: WorkspaceBase | null;
     aheadBehind: { ahead: number; behind: number } | null;
     upstreamRef: string | null;
     aheadOfOrigin: number | null;
@@ -3304,9 +3306,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         runGitCommand: runRefreshGitCommand,
       },
     );
-    target.latestFacts = { ...facts, upstreamStatus: derived.upstreamStatus };
+    const comparisonBaseRef = derived.base?.missing ? derived.base.forkSha : derived.base?.ref;
+    target.latestFacts = {
+      ...facts,
+      base: derived.base,
+      comparisonBaseRef: comparisonBaseRef ?? facts.comparisonBaseRef,
+      upstreamStatus: derived.upstreamStatus,
+    };
     target.latestGit = {
       ...latestGit,
+      base: derived.base,
       aheadBehind: derived.aheadBehind,
       diffStat: derived.diffStat,
       upstreamRef: derived.upstreamStatus?.ref ?? null,
@@ -3393,6 +3402,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         ? checkoutStatus.isDirty
         : (target.latestGit?.isDirty ?? checkoutStatus.isDirty),
       baseRef: checkoutStatus.baseRef,
+      base: checkoutStatus.base,
       aheadBehind: checkoutStatus.aheadBehind,
       upstreamRef: checkoutStatus.upstreamRef,
       aheadOfOrigin: checkoutStatus.aheadOfOrigin,

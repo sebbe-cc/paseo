@@ -212,6 +212,7 @@ export interface PaseoWorkspaceActions {
     }
   >;
   list(options?: PaseoWorkspaceListOptions): Promise<PaseoWorkspaceListResult>;
+  get(workspaceId: string, requestId?: string): Promise<PaseoWorkspace | null>;
   ref(workspace: string | PaseoWorkspace): PaseoWorkspaceHandle;
   open(
     input: string | PaseoWorkspaceOpenOptions,
@@ -741,6 +742,7 @@ export function createPaseoApi(
     },
     workspaces: {
       list: listWorkspaces,
+      get: (workspaceId, requestId) => createWorkspaceHandle(workspaceId).refresh({ requestId }),
       ref: (workspace) => createWorkspaceHandle(workspace),
       open: (input, requestId) =>
         openWorkspace(daemonClient, createWorkspaceHandle, input, requestId),
