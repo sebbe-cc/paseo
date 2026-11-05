@@ -2058,6 +2058,90 @@ test("reload leaves a closed durable snapshot when shutdown starts during the sw
   }
 });
 
+test("turn failing after shutdown begins stays running so restart recovery keeps it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-shutdown-turn-failed-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  // A turn that stays open until the test fails it, like a provider process
+  // (pi) exiting on its own in the middle of daemon shutdown.
+  class ShutdownFailSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      return { turnId: "turn-shutdown-fail-1" };
+    }
+  }
+
+  class ShutdownFailClient extends TestAgentClient {
+    readonly sessions: ShutdownFailSession[] = [];
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      const session = new ShutdownFailSession(config);
+      this.sessions.push(session);
+      return session;
+    }
+  }
+
+  const client = new ShutdownFailClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent(
+      {
+        provider: "codex",
+        cwd: workdir,
+      },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    const dispatch = await startAgentRun(manager, agent.id, "work", logger);
+    expect(dispatch.disposition).toBe("turn_started");
+    const session = client.sessions[0];
+    expect(session).toBeDefined();
+    session?.pushEvent({ type: "turn_started", provider: "codex", turnId: "turn-shutdown-fail-1" });
+    await manager.flush();
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("running");
+
+    // What restartRecovery.captureRunningAgents() records while the turn
+    // still looks running.
+    const captured = await storage.get(agent.id);
+    expect(captured?.lastStatus).toBe("running");
+    await storage.upsert({ ...captured!, resumeOnStartup: true });
+
+    manager.prepareForShutdown();
+    session?.pushEvent({
+      type: "turn_failed",
+      provider: "codex",
+      turnId: "turn-shutdown-fail-1",
+      error: "provider process exited",
+    });
+    await manager.flush();
+    await storage.flush();
+
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("running");
+    expect(await storage.get(agent.id)).toMatchObject({
+      lastStatus: "running",
+      resumeOnStartup: true,
+    });
+
+    await manager.closeAgent(agent.id);
+    await manager.flush();
+    await storage.flush();
+    expect(await storage.get(agent.id)).toMatchObject({
+      lastStatus: "closed",
+      resumeOnStartup: true,
+    });
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("reload does not create a replacement when the closed snapshot cannot be persisted", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-persist-failure-test-"));
   const storagePath = join(workdir, "agents");

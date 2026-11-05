@@ -1967,6 +1967,12 @@ export async function createPaseoDaemon(
   const stop = async (options?: { keepTerminals?: boolean }) => {
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
+    // Snapshot restart-resume candidates before anything tears down: stopping
+    // providers can fail in-flight turns (a pi RPC process exits on its own
+    // ~20 ms after the shutdown request), and a failed turn no longer looks
+    // running. AgentManager additionally keeps turns that fail during shutdown
+    // as running, so the intent recorded here survives until close.
+    await restartRecovery.captureRunningAgents();
     localCredential = null;
     await deleteLocalCredential(config.paseoHome);
     // Stop tracking plugin provider registrations before anything tears plugins
@@ -1985,7 +1991,6 @@ export async function createPaseoDaemon(
     await finishSubscriptions.close();
     await wsServer?.agentMessages.close();
     agentManager.prepareForShutdown();
-    await restartRecovery.captureRunningAgents();
     await closeAllAgents(logger, agentManager);
     await withTimeout({
       promise: pluginRuntime.drainEvents(),

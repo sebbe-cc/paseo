@@ -796,6 +796,10 @@ export class AgentManager {
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  // Set once daemon shutdown begins. A turn that fails from here on (e.g. a
+  // provider process exiting on its own during stop) is still unfinished work:
+  // keep it running so restart recovery can resume it after the restart.
+  private shutdownInitiated = false;
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
@@ -894,6 +898,7 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    this.shutdownInitiated = true;
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -2928,8 +2933,12 @@ export class AgentManager {
     let nextLifecycle: "running" | "error" | "idle";
     if (shouldHoldBusyForReplacement) {
       nextLifecycle = "running";
-    } else if (terminalError) {
+    } else if (terminalError && !this.shutdownInitiated) {
       nextLifecycle = "error";
+    } else if (terminalError) {
+      // Shutdown underway: a failed foreground turn is still unfinished work,
+      // keep it running for restart recovery (see onStreamTurnFailed).
+      nextLifecycle = "running";
     } else {
       nextLifecycle = "idle";
     }
@@ -4868,7 +4877,10 @@ export class AgentManager {
       "handleStreamEvent: turn_failed",
     );
     if (terminalDisposition === "stale") return;
-    if (!isForegroundEvent && !agent.activeForegroundTurnId) {
+    // During shutdown a failed turn is unfinished, not broken: keep it running
+    // so the persisted snapshot still looks running and restart recovery can
+    // resume it. The error itself is still recorded below.
+    if (!isForegroundEvent && !agent.activeForegroundTurnId && !this.shutdownInitiated) {
       agent.lifecycle = "error";
     }
     agent.lastError = event.error;
