@@ -128,6 +128,9 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
 export interface BaseRefCheckoutStatus {
   currentBranch: string | null;
   upstreamRef?: string | null;
+  // The daemon-resolved workspace base: the stored base for a Paseo-owned source, the
+  // repo default otherwise. Absent on daemons that predate it.
+  base?: { ref: string; missing?: boolean | null } | null;
 }
 
 // Display only. The exact ref is what every request carries; this is just how a ref reads in
@@ -157,24 +160,20 @@ function refQualifier(refName: string): string | null {
 // row, the trigger label, and the created ref all read this; computing it twice is how the
 // picker once showed local main while branching off something else.
 //
-// The upstream wins when the branch has one, because branching off the local ref silently
-// carries unpushed commits into the new workspace. The daemon sends the resolved ref rather
-// than a remote name, so a fork tracking upstream/main branches from upstream/main.
+// The daemon owns the default: without an explicit pick the creation falls back to the
+// server's repo default, so the picker never substitutes the current branch or its
+// upstream — that silently based new workspaces on the branch you happened to be on.
 export function defaultBasePickerItem(status: BaseRefCheckoutStatus): PickerItem | null {
-  const currentBranch = status.currentBranch;
-  if (!currentBranch) return null;
-  // COMPAT(checkoutUpstreamRef): added in v0.2.6, remove after 2027-02-01 once the daemon
-  // floor sends upstreamRef. Daemons that predate it omit the field, which lands on the
-  // local ref — the base those daemons always used.
-  const refName = status.upstreamRef ?? `refs/heads/${currentBranch}`;
-  // The upstream branch can be named differently from the local one, so the row reads the
-  // ref rather than the branch the user happens to be on.
-  const name = branchNameFromRef(refName);
+  const baseRef = status.base?.ref?.trim();
+  // A missing base (pruned or deleted) has no ref to branch from; the creation then
+  // falls back to the server default like a daemon that sends no base at all.
+  if (!baseRef || status.base?.missing === true) return null;
+  const name = branchNameFromRef(baseRef);
   return {
     kind: "branch",
     name,
-    refName,
-    accessibilityLabel: status.upstreamRef ? `${name}, upstream branch` : `${name}, local branch`,
+    refName: baseRef,
+    accessibilityLabel: `${name}, base branch`,
   };
 }
 

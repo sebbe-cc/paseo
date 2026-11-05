@@ -255,8 +255,8 @@ const mainRow: BranchPickerDetail = {
 describe("buildPickerOptionData", () => {
   it("marks origin and keeps an ahead local main explicit", () => {
     const baseItem = defaultBasePickerItem({
-      currentBranch: "main",
-      upstreamRef: "refs/remotes/origin/main",
+      currentBranch: "feature/work",
+      base: { ref: "refs/remotes/origin/main" },
     });
     const data = buildPickerOptionData({ branchDetails: [mainRow], prItems: [], baseItem });
 
@@ -264,10 +264,10 @@ describe("buildPickerOptionData", () => {
     expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/remotes/origin/main"));
   });
 
-  it("adds and disambiguates a fork upstream absent from branch suggestions", () => {
+  it("adds and disambiguates a fork base absent from branch suggestions", () => {
     const baseItem = defaultBasePickerItem({
       currentBranch: "main",
-      upstreamRef: "refs/remotes/upstream/main",
+      base: { ref: "refs/remotes/upstream/main" },
     });
     const data = buildPickerOptionData({
       branchDetails: [{ ...mainRow, localAhead: 0, localBehind: 0 }],
@@ -279,16 +279,20 @@ describe("buildPickerOptionData", () => {
     expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/remotes/upstream/main"));
   });
 
-  it("marks a visible row on an old daemon when local and origin are in sync", () => {
-    const baseItem = defaultBasePickerItem({ currentBranch: "main" });
+  it("selects nothing on an old daemon that sends no base", () => {
+    const baseItem = defaultBasePickerItem({
+      currentBranch: "main",
+      upstreamRef: "refs/remotes/origin/main",
+    });
     const data = buildPickerOptionData({
       branchDetails: [{ ...mainRow, localAhead: 0, localBehind: 0 }],
       prItems: [],
       baseItem,
     });
 
-    expect(data.options.map((option) => option.label)).toEqual(["main (local)", "main"]);
-    expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/heads/main"));
+    expect(baseItem).toBeNull();
+    expect(data.options.map((option) => option.label)).toEqual(["main"]);
+    expect(data.selectedOptionId).toBe("");
   });
 
   it("keeps an explicit local selection marked", () => {
@@ -312,29 +316,51 @@ describe("buildPickerOptionData", () => {
 });
 
 describe("defaultBasePickerItem", () => {
-  it("uses origin when the current branch tracks origin", () => {
+  it("uses the daemon-resolved repo default even when the branch tracks its own upstream", () => {
     expect(
       defaultBasePickerItem({
-        currentBranch: "main",
-        upstreamRef: "refs/remotes/origin/main",
+        currentBranch: "feature/work",
+        upstreamRef: "refs/remotes/origin/feature/work",
+        base: { ref: "refs/remotes/origin/main" },
       }),
     ).toMatchObject({ refName: "refs/remotes/origin/main", name: "main" });
   });
 
-  it("uses the exact non-origin upstream", () => {
+  it("uses the exact non-origin base", () => {
     expect(
       defaultBasePickerItem({
         currentBranch: "main",
-        upstreamRef: "refs/remotes/upstream/main",
+        base: { ref: "refs/remotes/upstream/main" },
       }),
     ).toMatchObject({ refName: "refs/remotes/upstream/main", name: "main" });
   });
 
-  it("keeps old-daemon behavior local", () => {
-    expect(defaultBasePickerItem({ currentBranch: "main" })).toMatchObject({
-      refName: "refs/heads/main",
-      name: "main",
-    });
+  it("uses a local base for local-only branches", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "item/work",
+        base: { ref: "refs/heads/epic-branch" },
+      }),
+    ).toMatchObject({ refName: "refs/heads/epic-branch", name: "epic-branch" });
+  });
+
+  it("has no default without a daemon base, so the server resolves the repo default", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "feature/work",
+        upstreamRef: "refs/remotes/origin/feature/work",
+      }),
+    ).toBeNull();
+    expect(defaultBasePickerItem({ currentBranch: "main" })).toBeNull();
+  });
+
+  it("has no default for a missing base", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "feature/work",
+        base: { ref: "refs/remotes/origin/main", missing: true },
+      }),
+    ).toBeNull();
   });
 
   it("has no default for detached HEAD", () => {
