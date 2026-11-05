@@ -43,6 +43,7 @@ function plugin(input: {
     sidebarProjectGroups: null,
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 

@@ -46,6 +46,7 @@ function installation(invoked: string[]): InstalledPlugin {
     sidebarProjectGroups: null,
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 
