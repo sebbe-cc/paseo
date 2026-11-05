@@ -69,11 +69,16 @@ committed on `desvio` by hand).
   - `packages/app/.../replica-cache/index.test.ts` (`--project unit`): pass
     (ledger `5bf0a3460e53ad20e6155a83`)
 - Heavy builds/smokes run in Gradient only per the rollout rule. No
-  `paseo-fork` evaluation exists yet for `55697e4` (latest: fleet main
+  `paseo-fork` evaluation exists for `55697e4` (latest: fleet main
   `cb1afbc` Completed; previous origin/desvio `75d19dd6` Failed with
-  errors=1 — superseded). A manual `start_evaluation` was rejected
-  ("Commit not found in repository", mirror lag); the fleet lane re-checks
-  for the automatic evaluation before pinning.
+  errors=1 — superseded). Three manual `start_evaluation` attempts over
+  ~1h were all rejected with "Commit not found in repository: Git
+  command failed: unexpected packet type" — Gradient's mirror/fetch is
+  broken (the commit fetches fine from GitHub directly, and the fleet
+  `nix flake check` evaluated the new input with no hash mismatch, so
+  the fork tree builds as the fleet package modulo pre-existing
+  formatting). Flagged for Seb: Gradient needs a look before it can
+  gate this desvio.
 
 ## Publish
 
@@ -90,15 +95,29 @@ but server state shows no merge commit on `origin/desvio` (still
 `55697e4`, tree identical to the desvio build). Delivery path is the
 manifest as ordered; no action taken beyond reporting this.
 
-## Fleet side (sibling lane, for the record)
+## Fleet side (single MR !534, this lane)
 
-- MR: https://gitlab.sebbe.cc/fleet/paseo/-/merge_requests/533
-  ("pa-0ymw.10: drop the muse-join wrapper and command override", opened,
-  no conflicts) — covers the wrapper/deletion + test/doc rework. The fork
-  pin bump to `55697e4` and the manifest commit ride with the sibling's
-  `wf/pa-9aql-1` branch (uncommitted at handoff).
+- MR: https://gitlab.sebbe.cc/fleet/paseo/-/merge_requests/534
+  ("pa-9aql: fork rollout (7 topics) — bump pin, drop muse-join
+  wrapper", opened, no conflicts, branch `wf/pa-9aql-1` commit
+  `ed23659`). Carries the 7-line manifest update, the fork pin bump,
+  and the wrapper removal in one MR as ordered.
+- Pin bump via `nix run .#update-paseo`: `paseo` input `75d19dd6` →
+  `55697e426`; `llm` moves along as usual (harmless). No npmDepsHash
+  repair was needed — the new desvio input evaluated without a hash
+  mismatch. `nix flake check` passes except the pre-existing
+  `checks.formatting` failure in untouched
+  `scripts/show-and-point.test.mjs` (also red on main; my files are
+  format-clean per the check output).
+- Pilot test `scripts/muse-daemon-pilot.test.mjs`: 4/4 green via test
+  ledger (ledger `76f50fba27fac88081daeffb`), including the live
+  join/restart/resume proof against a real daemon.
+- Earlier MR !533 (wrapper removal only) was commented and closed as
+  superseded by !534.
 - Deploy note for the mayor: deploy regenerates `~/.paseo/config.json`
   from `configFilter`, which no longer sets
-  `agents.providers.muse.command`. Keep
-  `agents.providers.muse.additionalModels` (contributor effort levels).
-  The `paseo-muse-daemon` systemd unit stays.
+  `agents.providers.muse.command`. Verify the key is gone from the live
+  config after deploy; if a stale override survives, delete it manually
+  (keep `agents.providers.muse.additionalModels`, the contributor
+  effort levels) and restart the daemon. The `paseo-muse-daemon`
+  systemd unit stays. The mayor merges with the deploy check.
