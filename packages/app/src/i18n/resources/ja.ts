@@ -943,6 +943,7 @@ export const ja: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "ベース {{ref}} は存在しません。保存された分岐点と比較しています。",
         openChangesTab: "変更タブを開く",
         openDiffTab: "差分タブを開く",
         closeChangesTab: "変更タブを閉じる",
