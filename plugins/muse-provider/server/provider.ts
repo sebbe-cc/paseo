@@ -68,7 +68,9 @@ async function status(launch: ProviderLaunch): Promise<ProviderStatus> {
       [...launch.args, "--version"],
       {
         env: launch.env,
-        timeout: 3000,
+        // Daemon starts under load can stall process spawn; the version probe
+        // must not time out before the host had a chance to answer.
+        timeout: 15000,
         maxBuffer: 8192,
       },
     );
@@ -79,7 +81,9 @@ async function status(launch: ProviderLaunch): Promise<ProviderStatus> {
     if (major < 1 || (major === 1 && minor < 3))
       return { available: false, diagnostic: `Update Muse Code: found ${match[0]}, need ≥1.3.0` };
     // Leave room for the version probe, account read and cleanup within the status RPC deadline.
-    host = new MspConnection({ launch, timeoutMs: 3000, startupTimeoutMs: 20000 });
+    // Raised so a daemon start under load does not report the provider as
+    // unavailable (pa-4ua43): spawn and first responses can stall for seconds.
+    host = new MspConnection({ launch, timeoutMs: 10000, startupTimeoutMs: 60000 });
     await host.initialize();
     const account = await host.request("account/read", {}, accountSchema);
     if (account.state === "loggedOut")
@@ -135,6 +139,7 @@ function connect(
           input.sessionId,
           { ...launch, env: { ...launch.env, ...input.config.env } },
           () => session.readUsage(),
+          () => session.awake,
         );
       } catch (error) {
         sessions.delete(input.sessionId);
