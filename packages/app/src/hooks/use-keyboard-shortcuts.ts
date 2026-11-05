@@ -41,6 +41,8 @@ import {
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { dispatchTopWebOverlayKeyDown, keyBelongsToDomPopover } from "@/lib/overlay-root";
+import { pluginKeyboardShortcuts } from "@/plugins/keyboard-shortcuts";
+import { setPluginActiveWorkspace } from "@/plugins/recent-navigation";
 
 export function useKeyboardShortcuts({
   enabled,
@@ -65,7 +67,10 @@ export function useKeyboardShortcuts({
   const resetModifiers = useKeyboardShortcutsStore((s) => s.resetModifiers);
   const { overrides } = useKeyboardShortcutOverrides();
   const bindings = useMemo(() => buildEffectiveBindings(overrides), [overrides]);
-  const shortcutsAvailable = keyboardShortcutsAvailable({ isNative, isCompact: isMobile });
+  const shortcutsAvailable = keyboardShortcutsAvailable({
+    isNative,
+    isCompact: isMobile,
+  });
   const isDesktopApp = getIsElectronRuntime();
   const isMac = getShortcutOs() === "mac";
   const chordStateRef = useRef<ChordState>({
@@ -88,15 +93,21 @@ export function useKeyboardShortcuts({
               isDesktop: isDesktopApp,
             })
           : { menuPrefixes: [], prefixes: [] };
+      if (enabled && shortcutsAvailable) {
+        const pluginPrefixes = pluginKeyboardShortcuts.browserPrefixes(isMac, overrides);
+        policy.prefixes.push(...pluginPrefixes);
+        policy.menuPrefixes.push(...pluginPrefixes);
+      }
       void getDesktopHost()?.browser?.setShortcutPolicy?.(policy);
     },
-    [bindings, enabled, isDesktopApp, isMac, shortcutsAvailable],
+    [bindings, enabled, isDesktopApp, isMac, overrides, shortcutsAvailable],
   );
 
   useEffect(() => {
     if (activeWorkspaceSelection) {
       keyboardWorkspaceSelectionRef.current = activeWorkspaceSelection;
     }
+    setPluginActiveWorkspace(activeWorkspaceSelection);
   }, [activeWorkspaceSelection]);
 
   useEffect(() => {
@@ -105,6 +116,7 @@ export function useKeyboardShortcuts({
     }
 
     publishBrowserShortcutPolicy();
+    return pluginKeyboardShortcuts.subscribe(publishBrowserShortcutPolicy);
   }, [isDesktopApp, publishBrowserShortcutPolicy]);
 
   // Only the modifier that actually performs the workspace-index jump on this
@@ -172,7 +184,10 @@ export function useKeyboardShortcuts({
           serverId: action.serverId,
           workspaceId: action.workspaceId,
         };
-        navigateToWorkspace({ serverId: action.serverId, workspaceId: action.workspaceId });
+        navigateToWorkspace({
+          serverId: action.serverId,
+          workspaceId: action.workspaceId,
+        });
         return true;
       case "navigate-last-workspace":
         if (navigateToLastWorkspace()) {
@@ -359,6 +374,11 @@ export function useKeyboardShortcuts({
       target: event.target,
       commandCenterOpen: store.commandCenterOpen,
     });
+    if (pluginKeyboardShortcuts.dispatch(event, isMac, overrides)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     resolveAndPerformShortcut({
       event,
       focusScope,
@@ -368,6 +388,7 @@ export function useKeyboardShortcuts({
 
   const handleKeyUp = useStableEvent((event: KeyboardEvent) => {
     const key = event.key ?? "";
+    pluginKeyboardShortcuts.release(key, isMac, overrides);
     if (key === badgeModifierKey) {
       setBadgeModifierDown(false);
     }
@@ -378,6 +399,11 @@ export function useKeyboardShortcuts({
     if (!input) {
       return;
     }
+    if (input.type === "keyUp") {
+      pluginKeyboardShortcuts.release(input.key, isMac, overrides);
+      return;
+    }
+    if (pluginKeyboardShortcuts.dispatch(input, isMac, overrides)) return;
     resolveAndPerformShortcut({
       event: input,
       focusScope: "browser",
@@ -391,6 +417,7 @@ export function useKeyboardShortcuts({
     if (!shortcutsAvailable) return;
 
     const handleBlurOrHide = () => {
+      pluginKeyboardShortcuts.release(null, isMac, overrides);
       resetModifiers();
     };
 
@@ -426,6 +453,8 @@ export function useKeyboardShortcuts({
     handleBrowserShortcutInput,
     handleKeyDown,
     handleKeyUp,
+    isMac,
+    overrides,
     resetModifiers,
     shortcutsAvailable,
   ]);
