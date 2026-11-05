@@ -28,7 +28,7 @@ async function run(task: CompilerTask): Promise<void> {
     let value: unknown;
     switch (task.kind) {
       case "entries":
-        value = await compilePlugin(task.entries);
+        value = await compilePlugin(task.entries, task.runtimeExternals);
         break;
       case "directory":
         value = await compileDirectoryPlugin(task.directory, task.version, task.builtinId);
