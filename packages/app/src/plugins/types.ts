@@ -21,6 +21,7 @@ import type {
   PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
   PluginPanelLocation,
+  PluginWorkspaceLabelPresenterContribution as SDKPluginWorkspaceLabelPresenterContribution,
   PluginWorkspacePanelContribution as SDKPluginWorkspacePanelContribution,
 } from "@getpaseo/plugin/client";
 import type { InlineDecorator } from "./inline-decorators/model";
@@ -41,6 +42,8 @@ type PluginWorkspacePanelContribution =
   | Extract<WorkspacePanelInput, { context: "agent" }>;
 
 export type PluginSidebarSection = "header" | "footer";
+
+type PluginWorkspaceLabelPresenterContribution = SDKPluginWorkspaceLabelPresenterContribution;
 
 export type EvaluatedPluginWorkspacePanelContribution = PluginWorkspacePanelContribution & {
   locations: readonly PluginPanelLocation[];
@@ -77,6 +80,7 @@ export interface EvaluatedPlugin {
   timelineRenderers: PluginTimelineRendererContribution[];
   timelineSelectionActions: PluginTimelineSelectionActionContribution[];
   inlineDecorators: InlineDecorator[];
+  workspaceLabelPresenters: PluginWorkspaceLabelPresenterContribution[];
 }
 
 export interface InstalledPlugin extends EvaluatedPlugin {
@@ -108,5 +112,6 @@ export type {
   PluginTimelineRendererContribution,
   PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
+  PluginWorkspaceLabelPresenterContribution,
   PluginWorkspacePanelContribution,
 };
