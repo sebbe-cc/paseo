@@ -122,6 +122,14 @@ export interface ProviderSnapshotManagerOptions {
   refreshTimeoutMs?: number;
   diagnosticTimeoutMs?: number;
   openCodeBridge?: OpenCodeBridge;
+  /**
+   * Backoff for re-probing a provider whose snapshot published as
+   * `unavailable` (pa-4ua43). Entry N waits `unavailableRetryDelaysMs[N]`; later retries
+   * wait `unavailableRetryIntervalMs`. An unavailable result must never
+   * stick: retries continue until the probe succeeds or the manager stops.
+   */
+  unavailableRetryDelaysMs?: number[];
+  unavailableRetryIntervalMs?: number;
 }
 
 interface ProviderSnapshotRefreshOptions {
@@ -212,6 +220,11 @@ interface ProviderCatalog {
   load?: Promise<void>;
 }
 
+interface UnavailableRetryState {
+  timer: ReturnType<typeof setTimeout> | undefined;
+  nextAttempt: number;
+}
+
 interface RegistryGeneration {
   definitions: Record<AgentProvider, ProviderDefinition>;
   order: readonly AgentProvider[];
@@ -254,6 +267,9 @@ export class ProviderSnapshotManager {
   private readonly ownedClients = new Set<AgentClient>();
   private readonly pluginProviders: PluginAgentClientRegistry;
   private pluginProvidersSettled = false;
+  private readonly unavailableRetryDelays: number[];
+  private readonly unavailableRetryIntervalMs: number;
+  private readonly unavailableRetries = new Map<string, UnavailableRetryState>();
 
   constructor(options: ProviderSnapshotManagerOptions) {
     this.logger = options.logger;
@@ -273,6 +289,15 @@ export class ProviderSnapshotManager {
       options.diagnosticTimeoutMs,
       this.refreshTimeoutMs,
     );
+    this.unavailableRetryDelays = (
+      options.unavailableRetryDelaysMs ?? [5_000, 15_000, 30_000]
+    ).filter((delay) => Number.isFinite(delay) && delay >= 0);
+    this.unavailableRetryIntervalMs =
+      typeof options.unavailableRetryIntervalMs === "number" &&
+      Number.isFinite(options.unavailableRetryIntervalMs) &&
+      options.unavailableRetryIntervalMs >= 0
+        ? options.unavailableRetryIntervalMs
+        : 60_000;
     this.generation = this.createGeneration(
       this.buildRegistry(this.runtimeSettings, this.providerOverrides),
       this.providerOverrides,
@@ -688,6 +713,7 @@ export class ProviderSnapshotManager {
 
   async shutdown(): Promise<void> {
     this.destroyed = true;
+    this.clearUnavailableRetries();
     for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
     // Materialize a client per enabled provider so provider-owned resources
     // (background processes, sockets, etc.) get a chance to release even when
@@ -698,6 +724,7 @@ export class ProviderSnapshotManager {
 
   destroy(): void {
     this.destroyed = true;
+    this.clearUnavailableRetries();
     for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
     this.catalogs.clear();
     this.targets.clear();
@@ -983,6 +1010,13 @@ export class ProviderSnapshotManager {
           publish: (entry) => {
             if (!isCurrent()) return false;
             current.result = identifyEntry(structuredClone(entry));
+            if (current.result.entry.status === "unavailable") {
+              // An unavailable probe (e.g. daemon start under load) must
+              // never stick: retry with backoff until the probe succeeds.
+              this.scheduleUnavailableRetry(provider, key);
+            } else {
+              this.clearUnavailableRetry(provider, key);
+            }
             const boundTargets = [...this.targets].flatMap(([cwd, target]) =>
               target.bindings.get(provider)?.key === key ? [cwd] : [],
             );
@@ -1069,6 +1103,70 @@ export class ProviderSnapshotManager {
         );
       }
     }
+  }
+
+  private unavailableRetryKey(provider: AgentProvider, key: string): string {
+    return `${key}\n${provider}`;
+  }
+
+  private unavailableRetryDelayMs(attempt: number): number {
+    return attempt < this.unavailableRetryDelays.length
+      ? this.unavailableRetryDelays[attempt]!
+      : this.unavailableRetryIntervalMs;
+  }
+
+  private scheduleUnavailableRetry(provider: AgentProvider, key: string): void {
+    if (this.destroyed) return;
+    const retryKey = this.unavailableRetryKey(provider, key);
+    let state = this.unavailableRetries.get(retryKey);
+    if (!state) {
+      state = { timer: undefined, nextAttempt: 0 };
+      this.unavailableRetries.set(retryKey, state);
+    }
+    if (state.timer !== undefined) return;
+    const attempt = state.nextAttempt;
+    const delayMs = this.unavailableRetryDelayMs(attempt);
+    state.timer = setTimeout(() => {
+      state!.timer = undefined;
+      if (this.destroyed) return;
+      const catalog = this.catalogs.get(key)?.get(provider);
+      if (catalog?.result?.entry.status !== "unavailable") {
+        if (this.unavailableRetries.get(retryKey) === state) {
+          this.unavailableRetries.delete(retryKey);
+        }
+        return;
+      }
+      const cwds = [...this.targets]
+        .filter(([, target]) => target.bindings.get(provider)?.key === key)
+        .map(([cwd]) => cwd);
+      if (cwds.length === 0 || !this.generation.definitions[provider]) {
+        this.unavailableRetries.delete(retryKey);
+        return;
+      }
+      state!.nextAttempt = attempt + 1;
+      for (const cwd of cwds) {
+        const target = isGlobalProviderSnapshotKey(cwd)
+          ? createGlobalSnapshotTarget()
+          : createWorkspaceSnapshotTarget(cwd);
+        void this.refreshProviders(target, [provider]);
+      }
+    }, delayMs);
+    if (typeof state.timer.unref === "function") state.timer.unref();
+  }
+
+  private clearUnavailableRetry(provider: AgentProvider, key: string): void {
+    const retryKey = this.unavailableRetryKey(provider, key);
+    const state = this.unavailableRetries.get(retryKey);
+    if (!state) return;
+    if (state.timer !== undefined) clearTimeout(state.timer);
+    this.unavailableRetries.delete(retryKey);
+  }
+
+  private clearUnavailableRetries(): void {
+    for (const state of this.unavailableRetries.values()) {
+      if (state.timer !== undefined) clearTimeout(state.timer);
+    }
+    this.unavailableRetries.clear();
   }
 
   private publishTargets(cwds: Iterable<string>): void {
