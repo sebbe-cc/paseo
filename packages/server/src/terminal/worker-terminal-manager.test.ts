@@ -2658,3 +2658,53 @@ it.each([false, true])(
   },
   45000,
 );
+
+it("withholds an old worker's exit until controller process-group cleanup is confirmed", async () => {
+  const worker = new FakeTerminalWorker();
+  let finish = () => {};
+  const stopped = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  manager = createWorkerTerminalManager({
+    worker,
+    requestTimeoutMs: 1000,
+    stopProgram: () => stopped,
+  });
+  worker.emitWorkerMessage({
+    type: "terminalCreated",
+    terminal: {
+      id: "guarded-terminal",
+      name: "service",
+      cwd: "/tmp",
+      workspaceId: "guarded-workspace",
+      activity: null,
+    },
+    state: createTerminalState(),
+  });
+  const terminal = manager.getTerminal("guarded-terminal")!;
+  const exits: unknown[] = [];
+  terminal.onExit((info) => exits.push(info));
+  const closing = manager.killTerminalAndWait(terminal.id);
+  worker.emitWorkerMessage({
+    type: "terminalExit",
+    terminalId: terminal.id,
+    info: { exitCode: 0, signal: null, lastOutputLines: [] },
+  });
+  expect(exits).toEqual([]);
+  expect(manager.getTerminal(terminal.id)).toBe(terminal);
+  finish();
+  await waitForCondition(
+    () => worker.sentMessages.some((message) => message.type === "killTerminalAndWait"),
+    1000,
+  );
+  const request = worker.sentMessages.find((message) => message.type === "killTerminalAndWait")!;
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: undefined,
+  });
+  await closing;
+  expect(exits).toHaveLength(1);
+  expect(manager.getTerminal(terminal.id)).toBeUndefined();
+});
