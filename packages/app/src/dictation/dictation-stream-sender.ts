@@ -15,7 +15,7 @@ interface DrainWaitResult {
 
 export interface DictationStreamClient {
   readonly isConnected: boolean;
-  startDictationStream(dictationId: string, format: string): Promise<void>;
+  startDictationStream(dictationId: string, format: string, agentId?: string): Promise<void>;
   sendDictationStreamChunk(dictationId: string, seq: number, audio: string, format: string): void;
   finishDictationStream(
     dictationId: string,
@@ -29,6 +29,8 @@ export interface DictationStreamSenderParams {
   client: DictationStreamClient | null;
   format: string;
   createDictationId?: () => string;
+  /** The chat being dictated into, for a plugin provider's vocabulary. */
+  getAgentId?: () => string | undefined;
 }
 
 interface DictationFinishResult {
@@ -52,6 +54,7 @@ export class DictationStreamSender {
   private client: DictationStreamClient | null = null;
   private readonly format: string;
   private readonly createDictationId: () => string;
+  private readonly getAgentId: () => string | undefined;
 
   private dictationId: string | null = null;
   private sendSeq = 0;
@@ -68,6 +71,7 @@ export class DictationStreamSender {
   constructor(params: DictationStreamSenderParams) {
     this.format = params.format;
     this.createDictationId = params.createDictationId ?? generateMessageId;
+    this.getAgentId = params.getAgentId ?? (() => undefined);
     this.setClient(params.client);
   }
 
@@ -199,7 +203,7 @@ export class DictationStreamSender {
     this.streamReady = false;
 
     const start = (async () => {
-      await client.startDictationStream(dictationId, this.format);
+      await client.startDictationStream(dictationId, this.format, this.getAgentId());
       if (this.startGeneration !== generation) {
         return;
       }
