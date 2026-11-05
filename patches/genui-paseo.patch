@@ -1,0 +1,1532 @@
+diff --git a/client/components/content.tsx b/client/components/content.tsx
+index be7eead..b8b83a4 100644
+--- a/client/components/content.tsx
++++ b/client/components/content.tsx
+@@ -1,4 +1,5 @@
+-import { Icon as PaseoIcon, Modal } from "@getpaseo/plugin/client/react-native";
++import { DecoratedText } from "../decorated-text";
++import { Icon as PaseoIcon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
+ import { ImageLightbox } from "./image-lightbox";
+ import { ExternalLink } from "@getpaseo/plugin/client/ui";
+ import React, { useContext, useEffect, useState } from "react";
+@@ -152,18 +153,18 @@ export function KeyValue({ props }: { props: Props }) {
+             borderTopColor: theme.colors.border,
+           }}
+         >
+-          <RNText style={{ color: theme.colors.foregroundMuted, fontSize: 12.5, flexShrink: 0 }}>
++          <DecoratedText style={{ color: theme.colors.foregroundMuted, fontSize: 12.5, flexShrink: 0 }}>
+             {k}
+-          </RNText>
++          </DecoratedText>
+           {isNode(v) ? (
+             <RenderNode node={v} />
+           ) : (
+-            <RNText
++            <DecoratedText
+               selectable
+               style={{ color: theme.colors.foreground, fontSize: 12.5, flex: 1, textAlign: "right" }}
+             >
+               {text(v)}
+-            </RNText>
++            </DecoratedText>
+           )}
+         </View>
+       ))}
+@@ -271,17 +272,44 @@ export function Image({ props }: { props: Props }) {
+ 
+ export function File({ props }: { props: Props }) {
+   const { theme, openFile } = useUiRuntime();
++  const toast = useToast();
+   const filePath = text(props.path);
+   const line = finiteNumber(props.line);
+   const label = line !== null ? `${filePath}:${Math.round(line)}` : filePath;
+ 
+   const onWeb = Platform.OS === "web";
++  // Only an absolute path can become a Paseo file tab (openWorkspaceFile
++  // refuses anything else). Anything less — a relative agent-cwd path, an
++  // empty path, or a native host with no opener — must never navigate the
++  // app or throw: it shows a clear error instead.
++  const canOpen = onWeb && openFile !== null && filePath.startsWith("/");
++  const open = () => {
++    if (!canOpen || !openFile) {
++      toast.error(`Cannot open file: ${filePath || "(empty path)"}`);
++      return;
++    }
++    try {
++      const result = openFile(filePath, line ?? undefined);
++      if (result === false) {
++        toast.error(`Cannot open file: ${filePath}`);
++      } else if (typeof (result as Promise<boolean> | null)?.then === "function") {
++        (result as Promise<boolean>).then(
++          (opened) => {
++            if (!opened) toast.error(`Cannot open file: ${filePath}`);
++          },
++          (cause: unknown) => {
++            toast.error(cause instanceof Error ? cause.message : String(cause));
++          },
++        );
++      }
++    } catch (cause) {
++      toast.error(cause instanceof Error ? cause.message : String(cause));
++    }
++  };
+   const chip = (
+     <Pressable
+       accessibilityRole="button"
+-      onPress={() => {
+-        if (!onWeb && openFile) void openFile(filePath, line ?? undefined);
+-      }}
++      onPress={open}
+       style={{
+         alignSelf: "flex-start",
+         flexDirection: "row",
+@@ -301,11 +329,13 @@ export function File({ props }: { props: Props }) {
+       </RNText>
+     </Pressable>
+   );
+-  if (!onWeb) return chip;
++  if (!canOpen) return chip;
+ 
+   // Paseo renders chat file links as `<a style="display: contents">`. Plugins such as
+   // wiki-viewer catch clicks on those and replay the click when they decline, so the
+-  // anchor's own handler is the fallback that opens a Paseo file tab.
++  // anchor's own handler is the fallback that opens a Paseo file tab. The anchor
++  // only exists for paths that can actually open: a dead href would navigate the
++  // app away (which is what crashed it) instead of opening anything.
+   return React.createElement(
+     "a",
+     {
+@@ -313,7 +343,7 @@ export function File({ props }: { props: Props }) {
+       style: { display: "contents" },
+       onClick: (event: { preventDefault(): void }) => {
+         event.preventDefault();
+-        if (openFile) void openFile(filePath, line ?? undefined);
++        open();
+       },
+     },
+     chip,
+@@ -468,13 +498,13 @@ export function List({ props }: { props: Props }) {
+                 <PaseoIcon name={iconName} size={15} color={toneColor(theme, t)} />
+               ) : null}
+               <View style={{ flex: 1, gap: 2 }}>
+-                <RNText style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "500" }}>
++                <DecoratedText style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "500" }}>
+                   {item.title}
+-                </RNText>
++                </DecoratedText>
+                 {item.detail ? (
+-                  <RNText style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
++                  <DecoratedText style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                     {item.detail}
+-                  </RNText>
++                  </DecoratedText>
+                 ) : null}
+               </View>
+             </View>
+@@ -482,9 +512,9 @@ export function List({ props }: { props: Props }) {
+               isNode(item.value) ? (
+                 <RenderNode node={item.value} />
+               ) : (
+-                <RNText style={{ color: toneColor(theme, t), fontSize: 12.5, fontWeight: "500" }}>
++                <DecoratedText style={{ color: toneColor(theme, t), fontSize: 12.5, fontWeight: "500" }}>
+                   {text(item.value)}
+-                </RNText>
++                </DecoratedText>
+               )
+             ) : null}
+           </View>
+diff --git a/client/components/data.tsx b/client/components/data.tsx
+index e701d7a..dbfd395 100644
+--- a/client/components/data.tsx
++++ b/client/components/data.tsx
+@@ -1,3 +1,4 @@
++import { DecoratedText } from "../decorated-text";
+ import { Icon, copyText, useToast } from "@getpaseo/plugin/client/react-native";
+ import React, { useMemo, useState } from "react";
+ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+@@ -27,6 +28,7 @@ import {
+   type Props,
+   type Tone,
+ } from "../../shared/logic/values";
++import { tableColumnWidths } from "../../shared/logic/table-layout";
+ import { ErrorLine, RenderNode } from "../node-renderer";
+ import { InTableContext, propsKey, toneColor, usePersistedState, useUiRuntime } from "../runtime";
+ 
+@@ -36,47 +38,57 @@ export function Table({ props }: { props: Props }) {
+     const rec = asRecord(col);
+     return rec ? text(rec.label ?? rec.key) : text(col);
+   });
+-  const rows = list(props.rows);
++  const cellRows = list(props.rows).map((row) => {
++    const rec = asRecord(row);
++    return Array.isArray(row) ? row : rec ? columns.map((c) => rec[c] ?? null) : [row];
++  });
++  const [availableWidth, setAvailableWidth] = useState(0);
++  const minimums = tableColumnWidths(columns, cellRows);
++  const minimumTotal = minimums.reduce((sum, width) => sum + width, 0);
++  // Fit every column into the measured width when their minimums allow it;
++  // only a table whose minimums genuinely overflow scrolls horizontally.
++  const scale =
++    availableWidth > 0 && minimumTotal > 0 && minimumTotal <= availableWidth
++      ? availableWidth / minimumTotal
++      : 1;
++  const widths = minimums.map((width) => Math.round(width * scale));
+ 
+   return (
+     <InTableContext.Provider value={true}>
+-      <ScrollView horizontal showsHorizontalScrollIndicator={!compact}>
+-        <View
+-          style={{
+-            borderRadius: 8,
+-            borderWidth: StyleSheet.hairlineWidth,
+-            borderColor: theme.colors.border,
+-            overflow: "hidden",
+-            minWidth: "100%",
+-          }}
+-        >
++      <View
++        onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}
++        style={{ width: "100%" }}
++      >
++        <ScrollView horizontal showsHorizontalScrollIndicator={!compact}>
+           <View
+             style={{
+-              flexDirection: "row",
+-              backgroundColor: theme.colors.surface2,
+-              borderBottomWidth: StyleSheet.hairlineWidth,
+-              borderBottomColor: theme.colors.border,
++              borderRadius: 8,
++              borderWidth: StyleSheet.hairlineWidth,
++              borderColor: theme.colors.border,
++              overflow: "hidden",
++              width: Math.max(availableWidth, minimumTotal),
+             }}
+           >
+-            {columns.map((col, idx) => (
+-              <View
+-                key={`${col}:${idx}`}
+-                style={{ flex: 1, minWidth: 110, paddingHorizontal: 10, paddingVertical: 8 }}
+-              >
+-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>
+-                  {col}
+-                </Text>
+-              </View>
+-            ))}
+-          </View>
+-          {rows.map((row, rIdx) => {
+-            const rec = asRecord(row);
+-            const cells = Array.isArray(row)
+-              ? row
+-              : rec
+-                ? columns.map((c) => rec[c] ?? null)
+-                : [row];
+-            return (
++            <View
++              style={{
++                flexDirection: "row",
++                backgroundColor: theme.colors.surface2,
++                borderBottomWidth: StyleSheet.hairlineWidth,
++                borderBottomColor: theme.colors.border,
++              }}
++            >
++              {columns.map((col, idx) => (
++                <View
++                  key={`${col}:${idx}`}
++                  style={{ width: widths[idx], paddingHorizontal: 10, paddingVertical: 8 }}
++                >
++                  <DecoratedText style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>
++                    {col}
++                  </DecoratedText>
++                </View>
++              ))}
++            </View>
++            {cellRows.map((cells, rIdx) => (
+               <View
+                 key={rIdx}
+                 style={{
+@@ -91,23 +103,23 @@ export function Table({ props }: { props: Props }) {
+                   return (
+                     <View
+                       key={cIdx}
+-                      style={{ flex: 1, minWidth: 110, paddingHorizontal: 10, paddingVertical: 8 }}
++                      style={{ width: widths[cIdx], paddingHorizontal: 10, paddingVertical: 8 }}
+                     >
+                       {isNode(cell) ? (
+                         <RenderNode node={cell} />
+                       ) : (
+-                        <Text selectable style={{ color: theme.colors.foreground, fontSize: 12.5 }}>
++                        <DecoratedText selectable style={{ color: theme.colors.foreground, fontSize: 12.5 }}>
+                           {text(cell)}
+-                        </Text>
++                        </DecoratedText>
+                       )}
+                     </View>
+                   );
+                 })}
+               </View>
+-            );
+-          })}
+-        </View>
+-      </ScrollView>
++            ))}
++          </View>
++        </ScrollView>
++      </View>
+     </InTableContext.Provider>
+   );
+ }
+@@ -520,13 +532,13 @@ export function Steps({ props }: { props: Props }) {
+               <Text style={{ color, fontSize: 11, fontWeight: "700" }}>{idx + 1}</Text>
+             </View>
+             <View style={{ flex: 1, gap: 2 }}>
+-              <Text selectable style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
++              <DecoratedText selectable style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
+                 {title}
+-              </Text>
++              </DecoratedText>
+               {detail ? (
+-                <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
++                <DecoratedText selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                   {detail}
+-                </Text>
++                </DecoratedText>
+               ) : null}
+             </View>
+           </View>
+diff --git a/client/components/inputs.tsx b/client/components/inputs.tsx
+index e6c0251..fa9f175 100644
+--- a/client/components/inputs.tsx
++++ b/client/components/inputs.tsx
+@@ -17,6 +17,7 @@ import {
+ } from "../../shared/logic/choose-logic";
+ import {
+   addItem,
++  choiceOptions,
+   itemText,
+   radioOptions,
+   stepBy,
+@@ -29,8 +30,6 @@ import {
+   formatNumber,
+   isAction,
+   isBinding,
+-  isScalar,
+-  list,
+   nodes,
+   optionalText,
+   text,
+@@ -269,7 +268,7 @@ export function Choice({ props }: { props: Props }) {
+   const { theme, setValue } = useUiRuntime();
+   const binding = isBinding(props.value) ? props.value : null;
+   if (!binding) return <ErrorLine message="Choice expects a $state binding" />;
+-  const options = list(props.options).filter(isScalar);
++  const options = choiceOptions(props.options);
+   const label = optionalText(props.label);
+ 
+   return (
+@@ -286,12 +285,12 @@ export function Choice({ props }: { props: Props }) {
+         }}
+       >
+         {options.map((opt, idx) => {
+-          const active = binding.value === opt;
++          const active = binding.value === opt.value;
+           return (
+             <Pressable
+               key={idx}
+               accessibilityRole="button"
+-              onPress={() => setValue(binding.name, opt)}
++              onPress={() => setValue(binding.name, opt.value)}
+               style={{
+                 flex: 1,
+                 minWidth: 72,
+@@ -309,7 +308,7 @@ export function Choice({ props }: { props: Props }) {
+                   fontWeight: active ? "600" : "400",
+                 }}
+               >
+-                {itemText(opt)}
++                {opt.label}
+               </Text>
+             </Pressable>
+           );
+@@ -398,7 +397,8 @@ export function Checklist({ props }: { props: Props }) {
+   const binding = isBinding(props.value) ? props.value : null;
+   if (!binding) return <ErrorLine message="Checklist expects a $state binding" />;
+   const picked = Array.isArray(binding.value) ? binding.value : [];
+-  const options = list(props.options).filter(isScalar);
++  const options = choiceOptions(props.options);
++  const values = options.map((option) => option.value);
+   const label = optionalText(props.label);
+ 
+   return (
+@@ -406,12 +406,12 @@ export function Checklist({ props }: { props: Props }) {
+       <FieldLabel label={label} />
+       <View style={{ gap: 6 }}>
+         {options.map((opt, idx) => {
+-          const checked = picked.includes(opt);
++          const checked = picked.includes(opt.value);
+           return (
+             <Pressable
+               key={idx}
+               accessibilityRole="checkbox"
+-              onPress={() => setValue(binding.name, togglePick(picked, opt, options))}
++              onPress={() => setValue(binding.name, togglePick(picked, opt.value, values))}
+               style={{
+                 flexDirection: "row",
+                 alignItems: "center",
+@@ -438,7 +438,12 @@ export function Checklist({ props }: { props: Props }) {
+               >
+                 {checked ? <Icon name="Check" size={11} color={theme.colors.accentForeground} /> : null}
+               </View>
+-              <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>{itemText(opt)}</Text>
++              <View style={{ flex: 1, gap: 2 }}>
++                <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>{opt.label}</Text>
++                {opt.detail ? (
++                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{opt.detail}</Text>
++                ) : null}
++              </View>
+             </Pressable>
+           );
+         })}
+diff --git a/client/components/widgets.tsx b/client/components/widgets.tsx
+index 12bb1a0..6e9bdcf 100644
+--- a/client/components/widgets.tsx
++++ b/client/components/widgets.tsx
+@@ -11,6 +11,7 @@ import {
+   initialChecks,
+   nudgeWeight,
+   planMessage,
++  planSelectedCount,
+   planTotal,
+   rankOptions,
+   readDecision,
+@@ -48,7 +49,7 @@ import {
+ } from "../../shared/logic/widget-logic";
+ import { MarkdownText } from "../markdown";
+ import { ErrorLine } from "../node-renderer";
+-import { propsKey, usePersistedState, useUiRuntime } from "../runtime";
++import { propsKey, toneColor, usePersistedState, useUiRuntime } from "../runtime";
+ 
+ export function Timer({ props }: { props: Props }) {
+   const { theme } = useUiRuntime();
+@@ -378,6 +379,20 @@ export function Plan({ props }: { props: Props }) {
+                 <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                   {idx + 1}. {step.title}
+                 </Text>
++                {step.risk ? (
++                  <Text
++                    style={{
++                      color: toneColor(
++                        theme,
++                        step.risk === "high" ? "bad" : step.risk === "medium" ? "warn" : "good",
++                      ),
++                      fontSize: 11.5,
++                      fontWeight: "600",
++                    }}
++                  >
++                    {step.risk} risk
++                  </Text>
++                ) : null}
+                 {step.estimate ? (
+                   <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}>
+                     {step.estimate}
+@@ -405,7 +420,7 @@ export function Plan({ props }: { props: Props }) {
+       })}
+       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+-          {total.total ? `Estimated total: ${formatQuantity(total.total)}` : `${checked.filter(Boolean).length} steps selected`}
++          {total.total ? `Estimated total: ${formatQuantity(total.total)}` : `${planSelectedCount(steps, checked)} steps selected`}
+         </Text>
+         {answer ? (
+           <Text style={{ color: theme.colors.statusSuccess, fontSize: 12 }}>Approved</Text>
+diff --git a/client/decorated-text.tsx b/client/decorated-text.tsx
+new file mode 100644
+index 0000000..c4a8b4d
+--- /dev/null
++++ b/client/decorated-text.tsx
+@@ -0,0 +1,8 @@
++import * as PaseoUi from "@getpaseo/plugin/client/ui";
++import type { ComponentType } from "react";
++import { Text, type TextProps } from "react-native";
++
++// The desvio API is optional while older clients are still connected.
++export const DecoratedText = (PaseoUi as typeof PaseoUi & {
++  DecoratedText?: ComponentType<Omit<TextProps, "children"> & { children: string; inlineCode?: boolean }>;
++}).DecoratedText ?? Text;
+diff --git a/client/markdown.tsx b/client/markdown.tsx
+index fc25ca3..1567497 100644
+--- a/client/markdown.tsx
++++ b/client/markdown.tsx
+@@ -1,3 +1,4 @@
++import { DecoratedText } from "./decorated-text";
+ import type { PluginTheme } from "@getpaseo/plugin";
+ import React, { useMemo } from "react";
+ import { StyleSheet, Text, View } from "react-native";
+@@ -138,21 +139,22 @@ function Spans({ content, theme }: { content: Inline[]; theme: PluginTheme }) {
+       {content.map((span, index) => {
+         if (span.kind === "bold") {
+           return (
+-            <Text key={index} style={{ fontWeight: "700" }}>
++            <DecoratedText key={index} style={{ fontWeight: "700" }}>
+               {span.text}
+-            </Text>
++            </DecoratedText>
+           );
+         }
+         if (span.kind === "italic") {
+           return (
+-            <Text key={index} style={{ fontStyle: "italic" }}>
++            <DecoratedText key={index} style={{ fontStyle: "italic" }}>
+               {span.text}
+-            </Text>
++            </DecoratedText>
+           );
+         }
+         if (span.kind === "code") {
+           return (
+-            <Text
++            <DecoratedText
++              inlineCode
+               key={index}
+               style={{
+                 fontFamily: "monospace",
+@@ -162,10 +164,10 @@ function Spans({ content, theme }: { content: Inline[]; theme: PluginTheme }) {
+               }}
+             >
+               {span.text}
+-            </Text>
++            </DecoratedText>
+           );
+         }
+-        return <Text key={index}>{span.text}</Text>;
++        return <DecoratedText key={index}>{span.text}</DecoratedText>;
+       })}
+     </>
+   );
+diff --git a/gallery/Checklist-objects.ui b/gallery/Checklist-objects.ui
+new file mode 100644
+index 0000000..b4f917d
+--- /dev/null
++++ b/gallery/Checklist-objects.ui
+@@ -0,0 +1,8 @@
++$selected = []
++Card("Välj workflows att bygga", [
++  Checklist($selected, [
++    {value: "neutral", label: "neutral", detail: "Rekommenderas. Bygg flödenas form utan att läsa vilka granskarroller som superpowers görs senare."},
++    {value: "gstack", label: "gstack", detail: "Bind gstack-rollerna tills vidare."},
++    {value: "superpowers", label: "superpowers", detail: "Bind superpowers-rollerna."}
++  ], label: "Granskarroller i flödena")
++])
+diff --git a/gallery/Plan-no-estimates.ui b/gallery/Plan-no-estimates.ui
+new file mode 100644
+index 0000000..66ba251
+--- /dev/null
++++ b/gallery/Plan-no-estimates.ui
+@@ -0,0 +1,5 @@
++Plan([
++  {title: "Konfig och prompt för King", detail: "Skillen och ett eget fragment i sprint-city.", files: ["sprint-city/agents/king/agent.toml"], risk: "low"},
++  {title: "Mail-väckning för King", detail: "En order som motsvarar mayor-mail-wake.", files: ["sprint-city/orders/king-mail-wake.toml"], risk: "medium"},
++  {title: "Sprint byter till pluginets runtime", detail: "Prov på en session först, mellan två arbetspass.", files: ["sprint-city/runtimes/paseo/"], risk: "high"}
++], submit: "Kör 1–2 nu, runtimebytet mellan arbetspass")
+diff --git a/gallery/Table-short-badges.ui b/gallery/Table-short-badges.ui
+new file mode 100644
+index 0000000..58202e2
+--- /dev/null
++++ b/gallery/Table-short-badges.ui
+@@ -0,0 +1,7 @@
++Card("Vad som saknas", [
++  Table(["#", "Saknas", "Hos mayor", "Risk"], [
++    ["1", "Pluginets runtime: primen ligger i första meddelandet", "gc-runtime-fleet-town lägger primen i systemprompten", Badge("hög", tone: "bad")],
++    ["2", "Skillen gc.mayor laddas inte", "GC_PASEO_SKILLS sätts för mayor", Badge("låg", tone: "good")],
++    ["3", "Reglerna för handoff saknas", "Kings sprintavsnitt behålls som de är", Badge("medel", tone: "warn")]
++  ])
++])
+diff --git a/index.server.ts b/index.server.ts
+index 1a9052f..cdff6a8 100644
+--- a/index.server.ts
++++ b/index.server.ts
+@@ -91,6 +91,10 @@ export default function contribute(server: PluginServerContext) {
+   server.before("agent.create", async ({ request }) => {
+     const current = await settings.read();
+     if (current.status === "ready" && !current.values.autoInstructions) return;
++    // Gas City workers never talk to the user; only gc agents with GC_PASEO_GENUI=1 get the reference.
++    const env = request.env ?? {};
++    const gcAgent = ["GC_SESSION_ID", "GC_CITY", "GC_SESSION_NAME", "GC_AGENT"].some((key) => env[key]);
++    if (gcAgent && env.GC_PASEO_GENUI !== "1") return;
+     const webOn = current.status === "ready" ? current.values.webLookups : true;
+     const existing = request.config.systemPrompt ?? "";
+     if (existing.includes(GENUI_MARKER)) return;
+diff --git a/server/data-source.ts b/server/data-source.ts
+index 45f80ae..5e23c3d 100644
+--- a/server/data-source.ts
++++ b/server/data-source.ts
+@@ -3,7 +3,8 @@ import { mkdir, open, readdir, readFile, realpath } from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { fileURLToPath } from "node:url";
+-import type { PaseoApi } from "@getpaseo/client";
++import type { PluginHookContext } from "@getpaseo/plugin/server";
++type PaseoApi = PluginHookContext["paseo"];
+ import { collectLoads, compile, parseDataFile, type LoadedData } from "../shared/core";
+ import { COMPONENTS, componentSignature, type ComponentName } from "../shared/core/catalog";
+ 
+diff --git a/server/project.ts b/server/project.ts
+index 4789d93..fd62623 100644
+--- a/server/project.ts
++++ b/server/project.ts
+@@ -1,6 +1,9 @@
+ import { execFile } from "node:child_process";
++import { lstat, readFile, readlink } from "node:fs/promises";
++import path from "node:path";
+ import { promisify } from "node:util";
+-import type { PaseoApi } from "@getpaseo/client";
++import type { PluginHookContext } from "@getpaseo/plugin/server";
++type PaseoApi = PluginHookContext["paseo"];
+ import type {
+   EnvironmentDetail,
+   EnvironmentDetailResult,
+@@ -32,7 +35,6 @@ import {
+   type ThreadsResult,
+ } from "../shared/core/project";
+ import { lastMessage } from "../shared/core/thread-activity";
+-import { resolveAgentCwd } from "./data-source";
+ 
+ const execFileAsync = promisify(execFile);
+ 
+@@ -49,6 +51,8 @@ async function runGit(
+       cwd,
+       maxBuffer: 8 * 1024 * 1024,
+       timeout: 10_000,
++      // A fetch must never wait on a credential prompt the daemon can't answer.
++      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+     });
+     return { ok: true, stdout };
+   } catch (cause) {
+@@ -56,16 +60,231 @@ async function runGit(
+   }
+ }
+ 
+-async function detectGitBranches(cwd: string): Promise<
+-  | {
+-      ok: true;
+-      branch: string | null;
+-      head: string | null;
+-      base: string;
+-      checkout: "branch" | "detached" | "unborn";
++/** The agent's checkout directory and owning workspace, tolerantly read. */
++interface AgentWorkspace {
++  cwd: string;
++  workspaceId: string | null;
++}
++
++async function resolveAgentWorkspace(paseo: PaseoApi, agentId: string): Promise<AgentWorkspace | null> {
++  try {
++    const handle = paseo.agents.ref(agentId);
++    const current = handle.current() as { cwd?: unknown; workspaceId?: unknown } | null | undefined;
++    if (current && typeof current.cwd === "string" && current.cwd !== "") {
++      return {
++        cwd: current.cwd,
++        workspaceId: typeof current.workspaceId === "string" ? current.workspaceId : null,
++      };
++    }
++    const refreshed = (await handle.refresh()) as {
++      agent?: { cwd?: unknown; workspaceId?: unknown } | null;
++    } | null;
++    const agent = refreshed?.agent;
++    if (agent && typeof agent.cwd === "string" && agent.cwd !== "") {
++      return {
++        cwd: agent.cwd,
++        workspaceId: typeof agent.workspaceId === "string" ? agent.workspaceId : null,
++      };
+     }
+-  | ProjectFailure
+-> {
++    return null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * The workspace base Paseo reports (pa-9av7 model); absent on older daemons.
++ * ref is null for a workspace cut from a raw commit: the comparison then
++ * starts at forkSha itself.
++ */
++interface StoredWorkspaceBase {
++  ref: string | null;
++  forkSha: string;
++  missing: boolean;
++}
++
++function asStoredBase(value: unknown): StoredWorkspaceBase | null {
++  if (typeof value !== "object" || value === null) return null;
++  const v = value as { ref?: unknown; forkSha?: unknown; missing?: unknown };
++  if (typeof v.forkSha !== "string" || v.forkSha === "") return null;
++  if (v.ref === null) return { ref: null, forkSha: v.forkSha, missing: false };
++  if (typeof v.ref !== "string" || v.ref === "") return null;
++  return { ref: v.ref, forkSha: v.forkSha, missing: v.missing === true };
++}
++
++/**
++ * The stored base on a workspace entry, without depending on new SDK types.
++ * The daemon reports it under gitRuntime.base; a top-level base wins when
++ * both are present so older shapes keep working.
++ */
++function storedBaseOf(entry: unknown): StoredWorkspaceBase | null {
++  if (typeof entry !== "object" || entry === null) return null;
++  const record = entry as { base?: unknown; gitRuntime?: { base?: unknown } | null };
++  return asStoredBase(record.base) ?? asStoredBase(record.gitRuntime?.base);
++}
++
++const NO_BASE_MESSAGE =
++  "Paseo reported no base for this checkout's workspace. Update the host so it reports workspace bases, then retry.";
++const WORKSPACES_FAILED_MESSAGE = "Could not read the workspace list from Paseo.";
++
++interface WorkspacePage {
++  entries: unknown[];
++  nextCursor: string | null;
++}
++
++async function listWorkspacePage(
++  paseo: PaseoApi,
++  withBackground: boolean,
++  cursor?: string,
++): Promise<WorkspacePage> {
++  const options: {
++    filter?: { includeBackground: boolean };
++    page: { limit: number; cursor?: string };
++  } = { page: { limit: 200 } };
++  if (cursor !== undefined) options.page.cursor = cursor;
++  if (withBackground) options.filter = { includeBackground: true };
++  const res = (await paseo.workspaces.list(
++    options as Parameters<PaseoApi["workspaces"]["list"]>[0],
++  )) as { entries?: unknown; pageInfo?: { nextCursor?: unknown } | null };
++  if (!res || !Array.isArray(res.entries)) throw new Error("workspaces.list returned no entries");
++  const next = res.pageInfo?.nextCursor;
++  return {
++    entries: res.entries,
++    nextCursor: typeof next === "string" && next !== "" && next !== cursor ? next : null,
++  };
++}
++
++/**
++ * Every workspace entry Paseo shows, across all pages. The first attempt
++ * includes background workspaces; when the host rejects that filter the
++ * plain listing is used instead. A throw means the lookup failed: callers
++ * report unavailable rather than comparing against another base.
++ */
++async function listAllWorkspaceEntries(paseo: PaseoApi): Promise<unknown[]> {
++  let background = true;
++  for (;;) {
++    try {
++      const all: unknown[] = [];
++      let cursor: string | undefined;
++      for (;;) {
++        const page = await listWorkspacePage(paseo, background, cursor);
++        all.push(...page.entries);
++        if (page.nextCursor === null) return all;
++        cursor = page.nextCursor;
++      }
++    } catch {
++      if (!background) throw new Error(WORKSPACES_FAILED_MESSAGE);
++      background = false;
++    }
++  }
++}
++
++/**
++ * The owning workspace's reported base: by workspace id through the generic
++ * get API when the host has it, else by directory over the paged,
++ * background-inclusive listing. ok:false means the lookup itself failed; a
++ * null base means Paseo knows the workspace but reports no base for it.
++ */
++async function findWorkspaceBase(
++  paseo: PaseoApi,
++  workspaceId: string | null,
++  cwd: string,
++): Promise<{ ok: true; base: StoredWorkspaceBase | null } | { ok: false }> {
++  if (workspaceId !== null && typeof paseo.workspaces.get === "function") {
++    try {
++      const entry = (await paseo.workspaces.get(workspaceId)) as unknown;
++      if (entry && typeof entry === "object") return { ok: true, base: storedBaseOf(entry) };
++    } catch {
++      return { ok: false };
++    }
++    return { ok: false };
++  }
++  try {
++    const entries = await listAllWorkspaceEntries(paseo);
++    return { ok: true, base: matchStoredBase(cwd, entries, undefined) };
++  } catch {
++    return { ok: false };
++  }
++}
++
++/**
++ * The stored base for the workspace owning cwd, or null when Paseo knows
++ * no base for it (older daemon, directory workspace, unknown checkout).
++ * A hint the caller already holds wins over another list call.
++ */
++function matchStoredBase(
++  cwd: string,
++  entries: unknown[] | null,
++  hint: StoredWorkspaceBase | null | undefined,
++): StoredWorkspaceBase | null {
++  if (hint !== undefined) return hint;
++  if (!entries) return null;
++  const norm = path.resolve(cwd);
++  let best: { dir: string; base: StoredWorkspaceBase | null } | null = null;
++  for (const entry of entries) {
++    if (typeof entry !== "object" || entry === null) continue;
++    const dirValue = (entry as { workspaceDirectory?: unknown }).workspaceDirectory;
++    if (typeof dirValue !== "string" || dirValue === "") continue;
++    const dir = path.resolve(dirValue);
++    if (norm === dir) return storedBaseOf(entry);
++    if (norm.startsWith(dir + path.sep) && (!best || dir.length > best.dir.length)) {
++      best = { dir, base: storedBaseOf(entry) };
++    }
++  }
++  return best ? best.base : null;
++}
++
++/** Short header form of a stored ref: refs/remotes/origin/main -> origin/main. */
++function shortBaseRef(ref: string): string {
++  return ref.replace(/^refs\/remotes\//, "").replace(/^refs\/heads\//, "");
++}
++
++/**
++ * The branch a stored ref sits on, namespace kept: refs/heads/* keeps every
++ * slash, refs/remotes/<remote>/* drops only the remote name. Comparing a
++ * checkout branch against anything shorter marks same-suffix branches
++ * on-base and hides their committed work.
++ */
++function defaultBranchOfRef(ref: string): string {
++  if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length);
++  if (ref.startsWith("refs/remotes/")) return ref.replace(/^refs\/remotes\/[^/]+\//, "");
++  return ref;
++}
++
++interface ResolvedBase {
++  ok: true;
++  branch: string | null;
++  head: string | null;
++  checkout: "branch" | "detached" | "unborn";
++  /** What git ranges measure from: the stored full ref, or the fork sha when it is gone. */
++  baseRef: string;
++  /** Short header form: origin/main, main, or a short sha. */
++  base: string;
++  /** Default branch name, for onBase and the PullRequest fallback. */
++  defaultBranch: string;
++  /** The checkout sits on the base itself. */
++  onBase: boolean;
++  /** The stored base no longer resolves; base names the fork point instead. */
++  baseMissing: boolean;
++  /** Short form of the stored base that is gone; null unless baseMissing. */
++  wantedBase: string | null;
++  /** The recorded fork point; null unless Paseo knows it. */
++  forkSha: string | null;
++}
++
++/**
++ * The one base every view measures from: the base Paseo reports for the
++ * workspace, or the recorded fork point when the stored ref is gone.
++ * Anything else is an explicit unavailable result, never another base.
++ */
++interface GitState {
++  ok: true;
++  branch: string | null;
++  head: string | null;
++  checkout: "branch" | "detached" | "unborn";
++}
++
++async function readGitState(cwd: string): Promise<GitState | ProjectFailure> {
+   const inside = await runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
+   if (!inside.ok || inside.stdout.trim() !== "true") {
+     return failure("not-git", "This agent's workspace isn't a git checkout");
+@@ -75,14 +294,242 @@ async function detectGitBranches(cwd: string): Promise<
+   const head = headRes.ok ? headRes.stdout.trim().slice(0, 7) : null;
+   const branch = sym.ok ? sym.stdout.trim() || null : null;
+   const checkout = head === null ? "unborn" : branch !== null ? "branch" : "detached";
++  return { ok: true, branch, head, checkout };
++}
++
++async function resolveBase(
++  paseo: PaseoApi,
++  cwd: string,
++  hint: StoredWorkspaceBase | null,
++): Promise<ResolvedBase | ProjectFailure> {
++  const git = await readGitState(cwd);
++  if (!git.ok) return git;
++  if (!hint) return failure("unavailable", NO_BASE_MESSAGE);
++  return finishStoredBase(cwd, git, hint);
++}
++
++async function resolveAgentBase(
++  paseo: PaseoApi,
++  identity: AgentWorkspace,
++): Promise<ResolvedBase | ProjectFailure> {
++  const git = await readGitState(identity.cwd);
++  if (!git.ok) return git;
++  const found = await findWorkspaceBase(paseo, identity.workspaceId, identity.cwd);
++  if (!found.ok) return failure("unavailable", WORKSPACES_FAILED_MESSAGE);
++  if (!found.base) return failure("unavailable", NO_BASE_MESSAGE);
++  return finishStoredBase(identity.cwd, git, found.base);
++}
+ 
+-  const originHead = await runGit(cwd, ["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
+-  let base = originHead.ok ? originHead.stdout.trim().replace(/^origin\//, "") : "";
+-  if (!base) {
+-    const mainExists = await runGit(cwd, ["rev-parse", "--verify", "-q", "main"]);
+-    base = mainExists.ok ? "main" : "master";
++async function finishStoredBase(
++  cwd: string,
++  git: GitState,
++  stored: StoredWorkspaceBase,
++): Promise<ResolvedBase | ProjectFailure> {
++  const { branch, head, checkout } = git;
++  if (stored.ref === null) {
++    // A workspace cut from a raw commit compares with that commit itself.
++    const forkKnown = (
++      await runGit(cwd, ["rev-parse", "--verify", "-q", `${stored.forkSha}^{commit}`])
++    ).ok;
++    if (!forkKnown) {
++      return failure("unavailable", "Workspace base is a commit this checkout does not contain");
++    }
++    return {
++      ok: true,
++      branch,
++      head,
++      checkout,
++      baseRef: stored.forkSha,
++      base: stored.forkSha.slice(0, 7),
++      defaultBranch: "",
++      onBase: false,
++      baseMissing: false,
++      wantedBase: null,
++      forkSha: stored.forkSha,
++    };
++  }
++  {
++    const short = shortBaseRef(stored.ref);
++    const known = (await runGit(cwd, ["rev-parse", "--verify", "-q", `${stored.ref}^{commit}`])).ok;
++    const missing = stored.missing || !known;
++    const forkKnown = (await runGit(cwd, ["rev-parse", "--verify", "-q", `${stored.forkSha}^{commit}`]))
++      .ok;
++    if (missing && !forkKnown) {
++      return failure("unavailable", `Workspace base ${short} is gone and its fork point is unknown`);
++    }
++    const defaultBranch = defaultBranchOfRef(stored.ref);
++    const onBase = branch !== null && branch === defaultBranch;
++    if (missing) {
++      return {
++        ok: true,
++        branch,
++        head,
++        checkout,
++        baseRef: stored.forkSha,
++        base: stored.forkSha.slice(0, 7),
++        defaultBranch,
++        // A missing ref is never on-base: both readers must measure from
++        // forkSha, even when the branch name matches the lost base.
++        onBase: false,
++        baseMissing: true,
++        wantedBase: short,
++        forkSha: stored.forkSha,
++      };
++    }
++    return {
++      ok: true,
++      branch,
++      head,
++      checkout,
++      baseRef: stored.ref,
++      base: short,
++      defaultBranch,
++      onBase,
++      baseMissing: false,
++      wantedBase: null,
++      forkSha: stored.forkSha,
++    };
++  }
++}
++
++async function mergeBasePoint(cwd: string, ref: string): Promise<string | null> {
++  const res = await runGit(cwd, ["merge-base", ref, "HEAD"]);
++  return res.ok ? res.stdout.trim() || null : null;
++}
++
++const MAX_UNTRACKED_FILES = 100;
++const MAX_UNTRACKED_PATCHES = 50;
++const MAX_UNTRACKED_BYTES = 256 * 1024;
++
++function isBinaryBuffer(bytes: Buffer): boolean {
++  return bytes.includes(0);
++}
++
++/**
++ * Files git doesn't track, as ChangedFile + FilePatch entries. The branch
++ * diff is committed and uncommitted work, so these belong in it. Symbolic
++ * links render their target path (what git records), never the target
++ * contents, so an external link cannot leak files outside the checkout.
++ */
++async function readUntrackedFiles(
++  cwd: string,
++  filter: readonly string[] | null,
++): Promise<{ files: ChangedFile[]; patches: FilePatch[]; truncated: boolean }> {
++  const files: ChangedFile[] = [];
++  const patches: FilePatch[] = [];
++  const listed = await runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
++  if (!listed.ok) return { files, patches, truncated: false };
++  // NUL-delimited paths are exact: never trim, only drop the trailing
++  // empty token. Git filenames may start or end with whitespace.
++  const paths = listed.stdout.split("\0").filter((p) => p !== "");
++  const truncated = paths.length > MAX_UNTRACKED_FILES;
++  for (const filePath of paths.slice(0, MAX_UNTRACKED_FILES)) {
++    if (!matchesPathFilter(filePath, filter)) continue;
++    if (patches.length >= MAX_UNTRACKED_PATCHES) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "too-large",
++      });
++      continue;
++    }
++    const full = path.join(cwd, filePath);
++    let stat;
++    try {
++      stat = await lstat(full);
++    } catch {
++      continue;
++    }
++    if (stat.isSymbolicLink()) {
++      let target: string | null = null;
++      try {
++        target = await readlink(full);
++      } catch {
++        continue;
++      }
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 1,
++        deletions: 0,
++        untracked: true,
++        diff: "inline",
++      });
++      patches.push({
++        path: filePath,
++        patch: `@@ -0,0 +1 @@\n+${target}\n`,
++        truncated: false,
++      });
++      continue;
++    }
++    if (!stat.isFile()) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "binary",
++      });
++      continue;
++    }
++    if (stat.size > MAX_UNTRACKED_BYTES) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "binary",
++      });
++      continue;
++    }
++    let bytes: Buffer | null = null;
++    try {
++      bytes = await readFile(full);
++    } catch {
++      continue;
++    }
++    if (bytes.length > MAX_UNTRACKED_BYTES || isBinaryBuffer(bytes)) {
++      files.push({
++        path: filePath,
++        previousPath: null,
++        kind: "added",
++        additions: 0,
++        deletions: 0,
++        untracked: true,
++        diff: "binary",
++      });
++      continue;
++    }
++    const text = bytes.toString("utf8");
++    const lines = text === "" ? [] : text.split("\n");
++    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
++    files.push({
++      path: filePath,
++      previousPath: null,
++      kind: "added",
++      additions: lines.length,
++      deletions: 0,
++      untracked: true,
++      diff: "inline",
++    });
++    const range = lines.length === 0 ? "0,0" : lines.length === 1 ? "1" : `1,${lines.length}`;
++    const body = lines.map((line) => `+${line}`).join("\n");
++    patches.push({
++      path: filePath,
++      patch: `@@ -0,0 +${range} @@\n${body}${body === "" ? "" : "\n"}`,
++      truncated: false,
++    });
+   }
+-  return { ok: true, branch, head, base, checkout };
++  return { files, patches, truncated };
+ }
+ 
+ function mapStatusChar(code: string): ChangeKind {
+@@ -416,10 +863,11 @@ export async function readProjectChanges(
+ 
+   if (isSyntheticGalleryAgent(agentId)) return demoChanges(target, filter);
+ 
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoChanges(target, filter);
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoChanges(target, filter);
++  const cwd = identity.cwd;
+ 
+-  const gitInfo = await detectGitBranches(cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
+   if (!gitInfo.ok) return gitInfo;
+ 
+   let diffArgs: string[];
+@@ -435,23 +883,41 @@ export async function readProjectChanges(
+     };
+     diffArgs = ["show", "--format=", "--unified=3", target.sha];
+     numstatArgs = ["show", "--format=", "--numstat", "--find-renames", target.sha];
+-  } else if (target.kind === "uncommitted" || gitInfo.checkout === "unborn" || gitInfo.branch === gitInfo.base) {
++  } else if (target.kind === "uncommitted" || gitInfo.checkout === "unborn" || gitInfo.onBase) {
+     scope =
+       target.kind === "uncommitted" || gitInfo.checkout === "unborn"
+         ? { kind: "uncommitted", branch: gitInfo.branch, unborn: gitInfo.checkout === "unborn" }
+-        : { kind: "branch", branch: gitInfo.branch, head: gitInfo.head, base: gitInfo.base, onBase: true };
++        : {
++            kind: "branch",
++            branch: gitInfo.branch,
++            head: gitInfo.head,
++            base: gitInfo.base,
++            onBase: true,
++            ...(gitInfo.baseMissing ? { baseMissing: true as const, wantedBase: gitInfo.wantedBase } : {}),
++          };
+     diffArgs = ["diff", "HEAD", "--unified=3"];
+     numstatArgs = ["diff", "HEAD", "--numstat", "--find-renames"];
+   } else {
++    // Committed work since the fork point plus the uncommitted worktree, so
++    // the diff shows what "vs base, incl. uncommitted" promises.
++    const forkPoint =
++      gitInfo.baseMissing && gitInfo.forkSha ? gitInfo.forkSha : await mergeBasePoint(cwd, gitInfo.baseRef);
++    if (!forkPoint) {
++      return failure(
++        "unavailable",
++        `Cannot find where ${gitInfo.branch ?? "HEAD"} branched from ${gitInfo.base}`,
++      );
++    }
+     scope = {
+       kind: "branch",
+       branch: gitInfo.branch,
+       head: gitInfo.head,
+       base: gitInfo.base,
+       onBase: false,
++      ...(gitInfo.baseMissing ? { baseMissing: true as const, wantedBase: gitInfo.wantedBase } : {}),
+     };
+-    diffArgs = ["diff", `${gitInfo.base}...HEAD`, "--unified=3"];
+-    numstatArgs = ["diff", `${gitInfo.base}...HEAD`, "--numstat", "--find-renames"];
++    diffArgs = ["diff", forkPoint, "--unified=3"];
++    numstatArgs = ["diff", forkPoint, "--numstat", "--find-renames"];
+   }
+ 
+   const [numstatRes, nameStatusRes, patchRes] = await Promise.all([
+@@ -496,10 +962,14 @@ export async function readProjectChanges(
+     });
+   }
+ 
+-  const files = allFiles.filter(
++  const trackedFiles = allFiles.filter(
+     (f) => matchesPathFilter(f.path, filter) || (f.previousPath !== null && matchesPathFilter(f.previousPath, filter)),
+   );
+-  const patches = parseUnifiedPatches(patchRes.ok ? patchRes.stdout : "").filter((p) =>
++  const trackedPatches = parseUnifiedPatches(patchRes.ok ? patchRes.stdout : "");
++  const untracked =
++    target.kind === "commit" ? { files: [], patches: [], truncated: false } : await readUntrackedFiles(cwd, filter);
++  const files = [...trackedFiles, ...untracked.files];
++  const patches = [...trackedPatches, ...untracked.patches].filter((p) =>
+     files.some((f) => f.path === p.path),
+   );
+ 
+@@ -507,9 +977,9 @@ export async function readProjectChanges(
+     ok: true,
+     scope,
+     files,
+-    totalFiles: allFiles.length,
++    totalFiles: allFiles.length + untracked.files.length,
+     filter,
+-    listTruncated: false,
++    listTruncated: untracked.truncated,
+     patches,
+     livePatches: true,
+     takenAt: Date.now(),
+@@ -551,14 +1021,15 @@ export async function readProjectPatches(
+ 
+ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Promise<CommitsResult> {
+   if (isSyntheticGalleryAgent(agentId)) return demoCommits();
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoCommits();
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoCommits();
++  const cwd = identity.cwd;
+ 
+-  const gitInfo = await detectGitBranches(cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
+   if (!gitInfo.ok) return gitInfo;
+ 
+-  const onBase = gitInfo.branch === gitInfo.base;
+-  const range = onBase ? `-n ${MAX_COMMITS}` : `${gitInfo.base}..HEAD`;
++  const onBase = gitInfo.onBase;
++  const range = onBase ? `-n ${MAX_COMMITS}` : `${gitInfo.baseRef}..HEAD`;
+   const logArgs = onBase
+     ? ["log", `-n`, String(MAX_COMMITS), "--format=%H%x09%h%x09%s%x09%an%x09%at"]
+     : ["log", range, "--format=%H%x09%h%x09%s%x09%an%x09%at"];
+@@ -579,7 +1050,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+   let ahead: number | null = null;
+   let behind: number | null = null;
+   if (!onBase) {
+-    const counts = await runGit(cwd, ["rev-list", "--left-right", "--count", `${gitInfo.base}...HEAD`]);
++    const counts = await runGit(cwd, ["rev-list", "--left-right", "--count", `${gitInfo.baseRef}...HEAD`]);
+     if (counts.ok) {
+       const [bStr, aStr] = counts.stdout.trim().split(/\s+/);
+       behind = Number(bStr) || 0;
+@@ -594,6 +1065,7 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+     head: gitInfo.head,
+     base: gitInfo.base,
+     onBase,
++    ...(gitInfo.baseMissing ? { baseMissing: true as const, wantedBase: gitInfo.wantedBase } : {}),
+     ahead,
+     behind,
+     commits: commits.slice(0, MAX_COMMITS),
+@@ -605,10 +1077,11 @@ export async function readProjectCommits(paseo: PaseoApi, agentId: string): Prom
+ 
+ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string): Promise<PullRequestResult> {
+   if (isSyntheticGalleryAgent(agentId)) return demoPullRequest();
+-  const cwd = await resolveAgentCwd(paseo, agentId);
+-  if (!cwd) return demoPullRequest();
++  const identity = await resolveAgentWorkspace(paseo, agentId);
++  if (!identity) return demoPullRequest();
++  const cwd = identity.cwd;
+ 
+-  const gitInfo = await detectGitBranches(cwd);
++  const gitInfo = await resolveAgentBase(paseo, identity);
+   if (!gitInfo.ok) return gitInfo;
+ 
+   try {
+@@ -687,7 +1160,7 @@ export async function readProjectPullRequest(paseo: PaseoApi, agentId: string):
+         title: String(pr.title ?? ""),
+         url: String(pr.url ?? ""),
+         state,
+-        baseRef: String(pr.baseRefName ?? gitInfo.base),
++        baseRef: String(pr.baseRefName ?? (gitInfo.defaultBranch || gitInfo.base)),
+         headRef: String(pr.headRefName ?? gitInfo.branch ?? ""),
+         checks: { state: checksState, passed, failed, pending, total },
+         review: { state: reviewState, requests: reviewRequests },
+@@ -835,10 +1308,10 @@ export async function readProjectEnvironments(
+         }));
+         const live = threads.filter((t) => !t.archived);
+         const dir = ws.workspaceDirectory;
+-        const gitInfo = dir ? await detectGitBranches(dir) : null;
++        const gitInfo = dir ? await resolveBase(paseo, dir, storedBaseOf(ws)) : null;
+         const branch = gitInfo && gitInfo.ok ? gitInfo.branch : null;
+         const base = gitInfo && gitInfo.ok ? gitInfo.base : "main";
+-        const detail = withDetails ? await readWorkspaceDetail(ws.id, dir) : null;
++        const detail = withDetails ? await readWorkspaceDetail(paseo, ws.id, dir, storedBaseOf(ws)) : null;
+         return {
+           id: ws.id,
+           name: ws.title ?? ws.id,
+@@ -846,7 +1319,7 @@ export async function readProjectEnvironments(
+           provider: ws.workspaceKind,
+           path: dir,
+           branch,
+-          defaultBranch: base,
++          defaultBranch: gitInfo && gitInfo.ok ? gitInfo.defaultBranch : base,
+           base,
+           git: ws.projectKind === "git",
+           life: ws.archivingAt ? "retiring" : "ready",
+@@ -877,8 +1350,10 @@ export async function readProjectEnvironments(
+ }
+ 
+ async function readWorkspaceDetail(
++  paseo: PaseoApi,
+   workspaceId: string,
+   directory: string | null,
++  baseHint?: StoredWorkspaceBase | null,
+ ): Promise<EnvironmentDetail> {
+   if (!directory) {
+     return {
+@@ -894,12 +1369,17 @@ async function readWorkspaceDetail(
+       fetchedAt: Date.now(),
+     };
+   }
+-  const gitInfo = await detectGitBranches(directory);
++  const gitInfo = await resolveBase(paseo, directory, baseHint ?? null);
+   if (!gitInfo.ok) {
+     return {
+       ok: true,
+       id: workspaceId,
+-      checkout: { ok: false, reason: "not-git", message: gitInfo.message, path: directory },
++      checkout: {
++        ok: false,
++        reason: gitInfo.reason === "unavailable" ? "unavailable" : "not-git",
++        message: gitInfo.message,
++        path: directory,
++      },
+       pull: null,
+       fetchedAt: Date.now(),
+     };
+@@ -916,9 +1396,9 @@ async function readWorkspaceDetail(
+       branch: gitInfo.branch,
+       checkout: gitInfo.checkout,
+       head: gitInfo.head,
+-      defaultBranch: gitInfo.base,
++      defaultBranch: gitInfo.defaultBranch,
+       base: gitInfo.base,
+-      onBase: gitInfo.branch === gitInfo.base,
++      onBase: gitInfo.onBase,
+       ahead: null,
+       behind: null,
+       uncommitted: {
+@@ -948,7 +1428,7 @@ export async function readProjectEnvironment(
+   const workspaces = await paseo.workspaces.list();
+   const ws = workspaces.entries.find((w) => w.id === environmentId);
+   if (!ws) return { ok: false, reason: "not-found", message: "Workspace not found" };
+-  return readWorkspaceDetail(ws.id, ws.workspaceDirectory);
++  return readWorkspaceDetail(paseo, ws.id, ws.workspaceDirectory, storedBaseOf(ws));
+ }
+ 
+ export function createProjectReader(
+diff --git a/shared/core/decisions.ts b/shared/core/decisions.ts
+index 93792b5..3cfdc3c 100644
+--- a/shared/core/decisions.ts
++++ b/shared/core/decisions.ts
+@@ -178,6 +178,17 @@ export function initialChecks(steps: readonly PlanStep[]): boolean[] {
+   return steps.map((step) => !step.optional);
+ }
+ 
++/**
++ * How many steps are selected, with the same semantics the checkboxes and
++ * planMessage use: a step is selected unless explicitly unchecked
++ * (`checked[i] !== false`). A short or stale persisted array (e.g. captured
++ * while the plan was still streaming in empty) therefore counts every step,
++ * never zero selected under a row of ticked boxes.
++ */
++export function planSelectedCount(steps: readonly PlanStep[], checked: readonly boolean[]): number {
++  return steps.filter((_, index) => checked[index] !== false).length;
++}
++
+ export interface EstimateTotal {
+   /** The sum, or null when the estimates can't be added (mixed points and time) or none is a number. */
+   readonly total: Quantity | null;
+diff --git a/shared/core/project.ts b/shared/core/project.ts
+index 6a10470..bc2d68e 100644
+--- a/shared/core/project.ts
++++ b/shared/core/project.ts
+@@ -144,6 +144,10 @@ export type ChangesScope =
+       readonly head: string | null;
+       readonly base: string;
+       readonly onBase: boolean;
++      /** The stored base is gone; base names the fork point it fell back to. */
++      readonly baseMissing?: boolean;
++      /** Short form of the stored base that is gone. */
++      readonly wantedBase?: string | null;
+     }
+   | { readonly kind: "uncommitted"; readonly branch: string | null; readonly unborn: boolean }
+   | { readonly kind: "commit"; readonly sha: string; readonly subject: string | null };
+@@ -186,6 +190,10 @@ export interface CommitsView {
+   readonly base: string;
+   /** The checkout is on the default branch itself. */
+   readonly onBase: boolean;
++  /** The stored base is gone; base names the fork point it fell back to. */
++  readonly baseMissing?: boolean;
++  /** Short form of the stored base that is gone. */
++  readonly wantedBase?: string | null;
+   /** Null when BB couldn't find a merge base. */
+   readonly ahead: number | null;
+   readonly behind: number | null;
+@@ -311,6 +319,9 @@ export function scopeLabel(scope: ChangesScope): string {
+   switch (scope.kind) {
+     case "branch": {
+       const name = scope.branch ?? (scope.head === null ? "HEAD" : `detached ${scope.head}`);
++      if (scope.baseMissing === true && scope.wantedBase) {
++        return `${name} vs ${scope.wantedBase} (base gone - from fork point)`;
++      }
+       return scope.onBase ? `${name}, uncommitted` : `${name} vs ${scope.base}, incl. uncommitted`;
+     }
+     case "uncommitted":
+diff --git a/shared/logic/fieldLogic.ts b/shared/logic/fieldLogic.ts
+index ae67eb1..263d3a4 100644
+--- a/shared/logic/fieldLogic.ts
++++ b/shared/logic/fieldLogic.ts
+@@ -77,6 +77,37 @@ export function radioOptions(options: Value | undefined): RadioOption[] {
+   });
+ }
+ 
++export interface ChoiceOption {
++  readonly value: Scalar;
++  readonly label: string;
++  readonly detail: string | null;
++}
++
++/**
++ * Choice/Select/Checklist options: scalars, or `{value, label?, detail?}`
++ * objects with a scalar value; anything else is dropped. The label is what
++ * the option reads as on screen (the value when no label is given); the
++ * value is what the binding holds. Scalar entries keep their exact legacy
++ * display via itemText, so `["mayor", "flödet själv"]` renders unchanged.
++ */
++export function choiceOptions(options: Value | undefined): ChoiceOption[] {
++  return list(options).flatMap((option: unknown): ChoiceOption[] => {
++    if (isScalar(option)) return [{ value: option, label: itemText(option), detail: null }];
++    // Like OptionCards, an object without a usable value is not an option:
++    // null is the empty state, never a selectable entry.
++    if (!isObject(option) || !isScalar(option.value) || option.value === null) return [];
++    const label = isScalar(option.label) && option.label !== null ? String(option.label) : null;
++    const detail = isScalar(option.detail) ? optionalText(option.detail) : null;
++    return [
++      {
++        value: option.value,
++        label: label === null || label === "" ? itemText(option.value) : label,
++        detail: detail === "" ? null : detail,
++      },
++    ];
++  });
++}
++
+ /** How a list entry or option value reads on screen. */
+ export function itemText(value: Value): string {
+   if (value === null) return "None";
+diff --git a/shared/logic/table-layout.ts b/shared/logic/table-layout.ts
+new file mode 100644
+index 0000000..07a9441
+--- /dev/null
++++ b/shared/logic/table-layout.ts
+@@ -0,0 +1,39 @@
++// Pure column sizing for Table: no React, so it is unit-testable.
++//
++// The old renderer gave every column `flex: 1, minWidth: 110` inside a
++// horizontal ScrollView. In that indefinite-width container the flex basis
++// is meaningless: short-content columns ("#", "1") collapsed to invisibility
++// and wide content pushed the last column (e.g. a Badge column) off screen.
++// Instead each column gets an explicit pixel width from its longest content,
++// so every column is visible; the table only scrolls when the summed minimum
++// widths genuinely exceed the available width.
++import { isNode, text } from "./values";
++
++/** Approximate pixel width of one cell's rendered content. */
++function cellContentWidth(cell: unknown): number {
++  if (isNode(cell)) {
++    const label = text(cell.props.text ?? cell.props.label ?? cell.props.title);
++    // A node (Badge, …) carries chrome around its label: dot, gaps, padding.
++    return (label === "" ? 6 : label.length) * 6.5 + 34;
++  }
++  const value = text(cell);
++  if (value === "") return 24;
++  // Long prose wraps; cap its claim so one verbose column cannot starve the rest.
++  return Math.min(value.length, 48) * 6.5 + 20;
++}
++
++/**
++ * One explicit width per column: at least 48 px (a short header or a
++ * one-character cell stays readable), at most 300 px, sized by the widest
++ * cell or header in the column.
++ */
++export function tableColumnWidths(
++  columns: readonly string[],
++  rows: readonly (readonly unknown[])[],
++): number[] {
++  return columns.map((column, cIdx) => {
++    let widest = column.length * 6.5 + 20;
++    for (const row of rows) widest = Math.max(widest, cellContentWidth(row[cIdx]));
++    return Math.round(Math.min(300, Math.max(48, widest)));
++  });
++}
+diff --git a/shared/logic/table-plan.test.ts b/shared/logic/table-plan.test.ts
+new file mode 100644
+index 0000000..62bf7a4
+--- /dev/null
++++ b/shared/logic/table-plan.test.ts
+@@ -0,0 +1,63 @@
++import { describe, expect, it } from "vitest";
++import { compile, evaluate, initialState } from "../core";
++import { planMessage, planSelectedCount, readPlan } from "../core/decisions";
++import { tableColumnWidths } from "./table-layout";
++
++const badge = (label: string, tone: string) => ({
++  kind: "node",
++  type: "Badge",
++  key: `badge:${label}`,
++  props: { text: label, tone },
++});
++
++describe("Table column widths (short strings and Badge cells)", () => {
++  it("keeps the reported mayor table's columns visible and ordered by content", () => {
++    const columns = ["#", "Saknas", "Hos mayor", "Risk"];
++    const rows = [
++      ["1", "Pluginets runtime: primen ligger i första meddelandet", "gc-runtime i systemprompten", badge("hög", "bad")],
++      ["2", "Skillen gc.mayor laddas inte", "GC_PASEO_SKILLS", badge("låg", "good")],
++    ];
++    const widths = tableColumnWidths(columns, rows);
++    expect(widths).toHaveLength(4);
++    // The one-character "#" / "1" column is narrow but never collapsed away.
++    expect(widths[0]).toBeGreaterThanOrEqual(48);
++    expect(widths[0]).toBeLessThan(widths[1]);
++    // The Badge column gets room for its pill instead of being pushed off screen.
++    expect(widths[3]).toBeGreaterThanOrEqual(48);
++    // The long prose column claims the most room.
++    expect(widths[1]).toBe(Math.max(...widths));
++  });
++
++  it("compiles the reported source with its short strings and Badge nodes intact", () => {
++    const source =
++      'Table(["#", "Saknas", "Hos mayor", "Risk"], [["1", "Pluginets runtime saknas", "gc-runtime", Badge("hög", tone: "bad")]])';
++    const compiled = compile(source);
++    expect(compiled.diagnostics).toEqual([]);
++    const { roots } = evaluate(compiled.program!, initialState(compiled.program!));
++    expect(roots[0].props.columns).toEqual(["#", "Saknas", "Hos mayor", "Risk"]);
++    const rows = roots[0].props.rows as unknown[][];
++    expect(rows[0][0]).toBe("1");
++    expect(rows[0][3]).toMatchObject({ type: "Badge", props: { text: "hög", tone: "bad" } });
++  });
++});
++
++describe("Plan selected count", () => {
++  const { steps } = readPlan([
++    { title: "Konfig och prompt", risk: "low" },
++    { title: "Mail-väckning", risk: "medium" },
++    { title: "Runtimebyte", risk: "high" },
++  ] as never);
++
++  it("counts every ticked step when the persisted checks are still empty", () => {
++    // A Plan first mounted while streaming captures an empty checks array;
++    // the boxes render ticked (`checked[i] !== false`), so the count must too.
++    expect(planSelectedCount(steps, [])).toBe(3);
++    expect(planMessage(steps, [], "")).toBe("Go ahead with the plan.");
++  });
++
++  it("counts explicit unchecks the same way the submit message does", () => {
++    expect(planSelectedCount(steps, [true, false, true])).toBe(2);
++    expect(planSelectedCount(steps, [false, false, false])).toBe(0);
++    expect(steps.map((step) => step.risk)).toEqual(["low", "medium", "high"]);
++  });
++});
