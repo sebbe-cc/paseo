@@ -574,3 +574,51 @@ test("an untracked symlink renders its target path, not target contents", async 
   );
   assert.ok(patch.patch.includes(secret), "the patch records the link target path");
 });
+
+test("a missing base matching the branch name still measures from forkSha", async () => {
+  const { readProjectChanges, readProjectCommits } = await loadModules();
+  const dir = localRepo();
+  const forkSha = git(dir, "rev-parse", "main");
+  commit(dir, "own-1.txt", "own 1");
+  commit(dir, "own-2.txt", "own 2");
+  // refs/remotes/origin/main does not exist here, so the stored base is
+  // missing while the checkout sits on main, its short name.
+  const entries = [
+    wsEntry("ws-missing-main", dir, storedBase("refs/remotes/origin/main", forkSha, true)),
+  ];
+
+  const commits = await readProjectCommits(paseoAt(dir, entries), agent());
+  assert.equal(commits.ok, true, JSON.stringify(commits));
+  assert.equal(commits.baseMissing, true);
+  assert.equal(commits.onBase, false, "a missing ref is never on-base");
+  assert.deepEqual(
+    commits.commits.map((c) => c.subject),
+    ["own 2", "own 1"],
+  );
+
+  const changes = await readProjectChanges(paseoAt(dir, entries), agent(), null, null);
+  assert.equal(changes.ok, true, JSON.stringify(changes));
+  assert.equal(changes.scope.onBase, false);
+  assert.deepEqual(changes.files.map((f) => f.path).sort(), ["own-1.txt", "own-2.txt"]);
+});
+
+test("an untracked filename keeps its surrounding whitespace", async () => {
+  const { readProjectChanges } = await loadModules();
+  const { worktree, forkPoint } = setup();
+  const name = " note.txt ";
+  writeFileSync(join(worktree, name), "spaced out\n");
+
+  const result = await readProjectChanges(
+    paseoAt(worktree, [
+      wsEntry("ws-space", worktree, storedBase("refs/remotes/origin/main", forkPoint)),
+    ]),
+    agent(),
+    null,
+    null,
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const byPath = new Map(result.files.map((f) => [f.path, f]));
+  assert.equal(byPath.get(name)?.untracked, true, "the exact filename is listed");
+  const patch = result.patches.find((p) => p.path === name);
+  assert.ok(patch && patch.patch.includes("+spaced out"), "its contents are shown");
+});
