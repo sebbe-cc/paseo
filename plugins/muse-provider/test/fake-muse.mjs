@@ -71,13 +71,20 @@ function receiveFrame(line) {
   counts.set(frame.method, count + 1);
   if (retryResponse(frame, count)) return;
   const request = candidates[count];
-  if (!request)
+  if (!request) {
+    // Resume drift correction re-selects the configured model, which has no
+    // fixture entry in resume scenarios. Ack it like a normal model change.
+    if (frame.method === "session/setModel") {
+      respond(frame, { status: "accepted", commandId: frame.params.commandId });
+      return;
+    }
     return rpcError(
       frame,
       -32601,
       "unknownMethod",
       `No fixture request for ${frame.method} #${count}`,
     );
+  }
   const recorded = request.msg;
   validateCommand(frame, recorded);
   const response = rows.find(
