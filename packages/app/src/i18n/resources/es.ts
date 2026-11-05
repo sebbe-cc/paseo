@@ -963,6 +963,8 @@ export const es: TranslationResources = {
         },
       },
       diff: {
+        missingBase:
+          "La base {{ref}} ya no existe. Se compara con el punto de bifurcación guardado.",
         openChangesTab: "Abrir la pestaña Cambios",
         openDiffTab: "Abrir la pestaña Diferencia",
         closeChangesTab: "Cerrar la pestaña Cambios",

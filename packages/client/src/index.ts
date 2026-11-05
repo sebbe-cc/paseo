@@ -255,7 +255,7 @@ export interface PaseoWorkspaceActions {
    * on hosts that support them. The returned entry carries the daemon's
    * resolved base (see {@link workspaceBaseOf}) once the daemon reports it.
    */
-  get(id: string, options?: { requestId?: string }): Promise<PaseoWorkspace | null>;
+  get(workspaceId: string, requestId?: string): Promise<PaseoWorkspace | null>;
   ref(workspace: string | PaseoWorkspace): PaseoWorkspaceHandle;
   open(
     input: string | PaseoWorkspaceOpenOptions,
@@ -802,7 +802,7 @@ export function createPaseoApi(
     },
     workspaces: {
       list: listWorkspaces,
-      get: getWorkspace,
+      get: (workspaceId, requestId) => getWorkspace(workspaceId, { requestId }),
       ref: (workspace) => createWorkspaceHandle(workspace),
       open: (input, requestId) =>
         openWorkspace(daemonClient, createWorkspaceHandle, input, requestId),

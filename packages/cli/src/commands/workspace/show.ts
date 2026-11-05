@@ -24,6 +24,32 @@ export interface WorkspaceDetailRow {
   baseMissing: boolean;
   /** Commit the comparison starts from when the ref is missing; "" otherwise. */
   forkSha: string;
+  /** Why the daemon could not resolve the base; "" when it did. */
+  baseError: string;
+}
+
+/**
+ * The daemon reports the resolved base at the top level of the descriptor;
+ * earlier hosts nested it under gitRuntime, which workspaceBaseOf reads.
+ * A malformed top-level base reads as null (never by direct access), so the
+ * entry stays usable against hosts that report something unexpected.
+ */
+function resolvedBaseOf(workspace: WorkspaceDescriptorPayload): PaseoWorkspaceBase | null {
+  const top = (workspace as { base?: unknown }).base;
+  if (top === undefined) return workspaceBaseOf(workspace);
+  if (top === null || typeof top !== "object") return null;
+  const { ref, forkSha, source, missing } = top as Record<string, unknown>;
+  if (ref !== null && typeof ref !== "string") return null;
+  if (forkSha !== null && typeof forkSha !== "string") return null;
+  if (source !== "stored" && source !== "default" && source !== "none") return null;
+  if (typeof missing !== "boolean") return null;
+  return { ref, forkSha, source, missing };
+}
+
+function formatBaseStatus(row: WorkspaceDetailRow): string {
+  if (row.baseError) return row.baseError;
+  if (row.baseMissing) return "missing; comparing against saved fork point";
+  return row.base ? "available" : "unavailable";
 }
 
 /**
@@ -40,7 +66,7 @@ export function formatWorkspaceBase(base: PaseoWorkspaceBase | null): string {
 }
 
 export function toWorkspaceDetail(workspace: WorkspaceDescriptorPayload): WorkspaceDetailRow {
-  const base = workspaceBaseOf(workspace);
+  const base = resolvedBaseOf(workspace);
   return {
     workspaceId: workspace.id,
     project: workspace.projectDisplayName,
@@ -53,6 +79,7 @@ export function toWorkspaceDetail(workspace: WorkspaceDescriptorPayload): Worksp
     baseSource: base?.source ?? "",
     baseMissing: base?.missing ?? false,
     forkSha: base?.forkSha ?? "",
+    baseError: workspace.baseError ?? "",
   };
 }
 
@@ -67,6 +94,8 @@ export const workspaceDetailSchema: OutputSchema<WorkspaceDetailRow> = {
     { header: "BACKGROUND", field: (row) => (row.background ? "yes" : ""), width: 10 },
     { header: "BASE", field: "base", width: 40 },
     { header: "BASE SOURCE", field: "baseSource", width: 12 },
+    { header: "FORK SHA", field: "forkSha", width: 40 },
+    { header: "BASE STATUS", field: formatBaseStatus, width: 45 },
   ],
   renderHuman: (result) => {
     const row = result.type === "single" ? result.data : result.data[0];
@@ -84,6 +113,9 @@ export const workspaceDetailSchema: OutputSchema<WorkspaceDetailRow> = {
       lines.push(`base: ${row.base}`);
       lines.push(`base source: ${row.baseSource}`);
       if (row.baseMissing && row.forkSha) lines.push(`fork sha: ${row.forkSha}`);
+      lines.push(`base status: ${formatBaseStatus(row)}`);
+    } else if (row.baseError) {
+      lines.push(`base: unavailable (${row.baseError})`);
     } else {
       lines.push("base: not reported (update the host for base-aware views)");
     }
@@ -108,7 +140,10 @@ export async function runShowCommand(
   try {
     // A show addresses one workspace by id, so a background one resolves too
     // on hosts that support them.
-    const filter = client.supportsBackgroundWorkspaces() ? { includeBackground: true } : {};
+    const filter = {
+      idPrefix: workspaceId,
+      ...(client.supportsBackgroundWorkspaces() ? { includeBackground: true } : {}),
+    };
     let cursor: string | undefined;
     do {
       const payload = await client.fetchWorkspaces({

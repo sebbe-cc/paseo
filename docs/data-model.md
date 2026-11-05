@@ -30,6 +30,16 @@ Workspace archive runs lifecycle teardown from the exact `cwd` but removes only 
 `worktreeRoot` after its last active reference disappears. Worktree recovery recreates that backing
 checkout from `mainRepoRoot`, then restores the relative path from `worktreeRoot` to `cwd`.
 
+Comparison bases live in the checkout's Git admin directory, at `paseo/worktree.json`.
+Version 3 preserves the fully qualified branch ref and its creation-time merge-base (`forkSha`).
+Keep that fork point when updating runtime or branch-name metadata: a pruned remote ref must
+still produce the workspace diff, never a comparison against an unrelated default branch.
+Consumers read `base` through the workspace API or `paseo workspace show --json`; they must not
+infer it from a branch display name. `missing: true` means the comparison uses the saved fork
+point. Legacy metadata without a recoverable branch or fork point produces an explicit error.
+Without stored metadata, only `refs/remotes/origin/HEAD` selects the default; local branches
+are never implicit defaults.
+
 Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries.
 
 All server-side stores live under `$PASEO_HOME` (defaults to `~/.paseo`).

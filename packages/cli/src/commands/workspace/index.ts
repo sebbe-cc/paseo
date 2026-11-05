@@ -1,3 +1,4 @@
+import { runShowCommand } from "./show.js";
 import { Command } from "commander";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
@@ -6,7 +7,6 @@ import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
 import { runSetupCommand } from "./setup.js";
-import { runShowCommand } from "./show.js";
 
 export function createWorkspaceCommand(): Command {
   const workspace = new Command("workspace").description("Manage workspaces");
