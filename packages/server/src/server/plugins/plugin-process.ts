@@ -683,7 +683,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!worker && parsed.success && parsed.data.type === "initialize") {
       try {
         initializeEnvironmentProxy();
-        worker = createPluginWorker({ channel, contribute: evaluateBundle(parsed.data.bundle) });
+        const { bundle, pluginDirectory, runtimeExternals } = parsed.data;
+        worker = createPluginWorker({
+          channel,
+          contribute: evaluateBundle(bundle, { pluginDirectory, runtimeExternals }),
+        });
       } catch (error) {
         channel.send({ type: "fatal", error: describeError(error) });
         return;
