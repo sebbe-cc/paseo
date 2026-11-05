@@ -963,6 +963,7 @@ export async function createPaseoDaemon(
     workspaceRegistry,
     serviceProxy,
     publicBaseUrl: serviceProxyPublicBaseUrl,
+    logger,
     onLifecycleChanged: (workspaceId) => {
       scriptHealthMonitor.invalidateWorkspace(workspaceId);
       void emitScriptStatus(workspaceId, []);

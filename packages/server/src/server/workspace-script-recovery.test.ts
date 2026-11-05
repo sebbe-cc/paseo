@@ -156,3 +156,41 @@ test("malformed journals log a warning without reviving arbitrary terminal names
   expect(warn).toHaveBeenCalledTimes(1);
   expect(await readFile(s.persistence.path, "utf8")).toBe("{bad json");
 });
+test("one entry with missing recovery metadata does not abort the other restores", async () => {
+  const s = await setup();
+  const bad = {
+    ...s.entry,
+    scriptName: "broken",
+    terminalId: randomUUID(),
+    port: undefined,
+    projectSlug: undefined,
+  };
+  s.store.set(bad);
+  const badTerminal = {
+    id: bad.terminalId,
+    cwd: s.entry.cwd,
+    workspaceId: s.entry.workspaceId,
+    onExit: () => () => {},
+    onCommandFinished: () => () => {},
+  } as unknown as TerminalSession;
+  const getTerminal = s.terminals.getTerminal;
+  s.terminals.getTerminal = ((id: string) =>
+    id === badTerminal.id ? badTerminal : getTerminal(id)) as typeof getTerminal;
+  const warn = vi.fn();
+  await expect(
+    restoreWorkspaceScripts({
+      runtimeStore: s.store,
+      terminalManager: s.terminals,
+      workspaceRegistry: s.workspaces,
+      serviceProxy: s.serviceProxy,
+      publicBaseUrl: "https://example.test",
+      logger: { warn },
+    }),
+  ).resolves.toBeUndefined();
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(s.store.get(bad)?.lifecycle).toBe("stopped");
+  expect(s.store.get(s.entry)?.lifecycle).toBe("running");
+  expect(s.serviceProxy.getWorkspaceHealthTargets(s.entry.workspaceId)).toEqual([
+    expect.objectContaining({ scriptName: "web", port: s.entry.port }),
+  ]);
+});
