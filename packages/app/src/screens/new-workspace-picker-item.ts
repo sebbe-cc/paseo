@@ -128,9 +128,15 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
 export interface BaseRefCheckoutStatus {
   currentBranch: string | null;
   upstreamRef?: string | null;
-  // The daemon-resolved workspace base: the stored base for a Paseo-owned source, the
-  // repo default otherwise. Absent on daemons that predate it.
-  base?: { ref: string; missing?: boolean | null } | null;
+  // The daemon-resolved workspace base (pa-9av7.1 wire contract): the stored
+  // comparison base for a Paseo-owned source (source "stored"), the repository
+  // default otherwise (source "default"). Only "default" may select a new
+  // workspace's base. Absent on daemons that predate it.
+  base?: {
+    ref: string;
+    source?: "stored" | "default" | null;
+    missing?: boolean | null;
+  } | null;
 }
 
 // Display only. The exact ref is what every request carries; this is just how a ref reads in
@@ -161,13 +167,14 @@ function refQualifier(refName: string): string | null {
 // picker once showed local main while branching off something else.
 //
 // The daemon owns the default: without an explicit pick the creation falls back to the
-// server's repo default, so the picker never substitutes the current branch or its
-// upstream — that silently based new workspaces on the branch you happened to be on.
+// server's repo default. Only a repository-default base (source "default") may select
+// the default: a stored comparison base names what the source was cut from (an epic or
+// release branch), never what a new workspace branches off. A missing base (pruned or
+// deleted) has no ref to branch from; both fall back to the server default like a
+// daemon that sends no base at all.
 export function defaultBasePickerItem(status: BaseRefCheckoutStatus): PickerItem | null {
   const baseRef = status.base?.ref?.trim();
-  // A missing base (pruned or deleted) has no ref to branch from; the creation then
-  // falls back to the server default like a daemon that sends no base at all.
-  if (!baseRef || status.base?.missing === true) return null;
+  if (!baseRef || status.base?.missing === true || status.base?.source !== "default") return null;
   const name = branchNameFromRef(baseRef);
   return {
     kind: "branch",
