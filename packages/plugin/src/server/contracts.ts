@@ -38,6 +38,7 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
       context: PluginHandlerContext,
     ) => ZodInput<OutputSchema> | Promise<ZodInput<OutputSchema>>,
   ): void;
+  registerVoiceProvider(provider: import("./voice.js").VoiceProviderRegistration): void;
   registerProvider(provider: ProviderRegistration): void;
   registerUsageSource(source: UsageSourceRegistration): void;
 }

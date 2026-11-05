@@ -1,20 +1,35 @@
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceDraftTabSetup } from "@/workspace-tabs/model";
 
-export type ClientSlashCommandKind = "archive-agent" | "replace-agent-with-draft";
+export type ClientSlashCommandKind =
+  | "make-voice-target"
+  | "archive-agent"
+  | "replace-agent-with-draft";
 export type ClientSlashCommandExecution = "immediate" | "insert";
 
 export interface ClientSlashCommand {
   name: string;
   aliases: readonly string[];
   description: string;
-  descriptionKey: "composer.clientCommands.archiveAgent" | "composer.clientCommands.freshDraft";
+  descriptionKey:
+    | "composer.clientCommands.archiveAgent"
+    | "composer.clientCommands.freshDraft"
+    | "globalVoice.makeTarget";
   argumentHint: string;
   kind: ClientSlashCommandKind;
   execution: ClientSlashCommandExecution;
 }
 
 export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
+  {
+    name: "voice-target",
+    aliases: [],
+    description: "Make this agent the voice target",
+    descriptionKey: "globalVoice.makeTarget",
+    argumentHint: "",
+    kind: "make-voice-target",
+    execution: "immediate",
+  },
   {
     name: "exit",
     aliases: ["quit", "q"],

@@ -10,6 +10,8 @@ import { File, Paths } from "expo-file-system";
 import { createPlaybackQueue } from "./playback";
 import { playFile } from "./file-playback";
 import { playPcm16 } from "./pcm";
+import { playPcmStream } from "./pcm-stream";
+import { parsePcmSampleRate } from "./pcm";
 
 export function createAudioEngine(
   callbacks: AudioEngineCallbacks,
@@ -113,6 +115,46 @@ export function createAudioEngine(
 
   let nextFileId = 0;
   async function playAudio(audio: AudioPlaybackSource, signal: AbortSignal): Promise<number> {
+    if (audio.stream) {
+      await ensureInitialized();
+      let start: Promise<void> | null = null;
+      return playPcmStream(
+        audio.stream,
+        {
+          now: () => performance.now() / 1000,
+          async schedule(chunk, at, chunkSignal) {
+            // Native communication engines already queue PCM buffers. Prime them
+            // together after the same short startup buffer used by Web Audio.
+            start ??= new Promise<void>((resolve, reject) => {
+              const abort = () => {
+                clearTimeout(timer);
+                reject(new Error("Playback stopped"));
+              };
+              const timer = setTimeout(
+                () => {
+                  chunkSignal.removeEventListener("abort", abort);
+                  resolve();
+                },
+                Math.max(0, at * 1000 - performance.now()),
+              );
+              chunkSignal.addEventListener("abort", abort, { once: true });
+              if (chunkSignal.aborted) abort();
+            });
+            await start;
+            const bytes = new Uint8Array(await chunk.arrayBuffer());
+            const duration = bytes.length / 2 / (parsePcmSampleRate(chunk.type) ?? 24000);
+            await playPcm16(
+              bytes,
+              chunk.type,
+              chunkSignal,
+              native,
+              Math.max(0, (at + duration) * 1000 - performance.now()),
+            );
+          },
+        },
+        signal,
+      );
+    }
     const bytes = new Uint8Array(await audio.arrayBuffer());
     if (signal.aborted) throw new Error("Playback stopped");
     if (audio.type.startsWith("audio/pcm")) {
