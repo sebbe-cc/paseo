@@ -1760,6 +1760,30 @@ test("force-stops a Muse host that ignores stdin EOF", async () => {
   }
 }, 15000);
 
+test("does not reject when a killed Muse host's pipe stays open", async () => {
+  const h = await stubbornHostHarness({ MUSE_TEST_ORPHAN_PIPE: "1" });
+  try {
+    const result = await Promise.race([
+      h.provider.status!({ launch: h.launch }),
+      delay(12000).then(() => {
+        throw new Error("Muse status did not finish closing its host");
+      }),
+    ]);
+    expect(result).toEqual({ available: true });
+    const recorded = await h.recorded();
+    const hosts = recorded.filter((row) => row.event === "stubbornHost");
+    expect(hosts).toHaveLength(1);
+    expect(() => process.kill(hosts[0].pid, 0)).toThrow();
+  } finally {
+    await cleanupStubbornHosts(h);
+    for (const orphan of (await h.recorded()).filter((row) => row.event === "orphanHost")) {
+      try {
+        process.kill(orphan.pid, "SIGKILL");
+      } catch {}
+    }
+  }
+}, 20000);
+
 test("closes the whole Muse host after an uncorrelated MSP error", async () => {
   const h = await stubbornHostHarness({ MUSE_TEST_NULL_ERROR_ID: "1" });
   try {
