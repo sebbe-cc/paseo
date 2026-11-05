@@ -62,7 +62,11 @@
               releaseBuild = self.packages.${system}.desktop-release-build;
               buildVersion = paseo.version;
               buildMetadata = "desvio.${rev}";
-              releaseVersion = "${paseo.version}-desvio.${date}.${rev}";
+              # The short rev can be all digits with a leading zero (e.g. 0660291),
+              # which semver forbids as a numeric prerelease identifier. The g
+              # prefix (git-describe style) keeps every rev a valid string
+              # identifier while the timestamp keeps prerelease ordering.
+              releaseVersion = "${paseo.version}-desvio.${date}.g${rev}";
             };
           }
         )
