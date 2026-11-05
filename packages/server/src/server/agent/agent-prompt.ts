@@ -15,6 +15,7 @@ export type AgentRunController = Pick<
   | "getAgent"
   | "tryRunOutOfBand"
   | "hasInFlightRun"
+  | "queueAgentPrompt"
   | "reloadStalePluginSession"
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
@@ -34,7 +35,7 @@ export interface StartAgentRunOptions {
   clearPendingPermissions?: boolean;
 }
 
-export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
+export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started" | "queued";
 
 async function steerOrReplaceActiveRun(
   agentManager: AgentRunController,
@@ -140,6 +141,14 @@ export async function startAgentRun(
   }
 }
 
+function agentRunMetadata(agentId: string, snapshot: ReturnType<AgentRunController["getAgent"]>) {
+  return {
+    agentId,
+    provider: snapshot?.provider,
+    providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+  };
+}
+
 async function startAgentRunInner(
   agentManager: AgentRunController,
   agentId: string,
@@ -147,7 +156,22 @@ async function startAgentRunInner(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
-  const snapshot = agentManager.getAgent(agentId);
+  const metadata = agentRunMetadata(agentId, agentManager.getAgent(agentId));
+  // `queue` never steers into or replaces the active turn (pa-r6a9i): while a
+  // run is in flight the prompt goes straight to the provider session, which
+  // holds it in its foreground-turn queue and drains it at the turn boundary.
+  if (options?.activeTurnBehavior === "queue" && agentManager.hasInFlightRun(agentId)) {
+    const queued = await agentManager.queueAgentPrompt(agentId, prompt, options?.runOptions);
+    logger.trace(
+      {
+        ...metadata,
+        queuedTurnId: queued.turnId,
+      },
+      "agent.session.queue.request",
+    );
+    options?.onDispatch?.("queued");
+    return { disposition: "queued" };
+  }
   const steered = await steerOrReplaceActiveRun(agentManager, agentId, prompt, options);
   if (steered?.disposition === "steered") {
     options?.onDispatch?.("steered");
@@ -158,9 +182,7 @@ async function startAgentRunInner(
     : await startOrReplaceRun(agentManager, agentId, prompt, options);
   logger.trace(
     {
-      agentId,
-      provider: snapshot?.provider,
-      providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+      ...metadata,
       shouldReplace: replaced,
     },
     "agent.session.start_stream.iterator_returned",
@@ -182,18 +204,14 @@ async function startAgentRunInner(
       }
       logger.trace(
         {
-          agentId,
-          provider: snapshot?.provider,
-          providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+          ...metadata,
         },
         "agent.session.iterator.drained",
       );
     } catch (error) {
       logger.trace(
         {
-          agentId,
-          provider: snapshot?.provider,
-          providerSessionId: snapshot?.persistence?.sessionId ?? undefined,
+          ...metadata,
           err: error,
         },
         "agent.session.iterator.error",
