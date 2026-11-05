@@ -166,6 +166,22 @@ function cloneTerminalInfo(info: RequiredWorkerTerminalInfo): RequiredWorkerTerm
   };
 }
 
+/**
+ * Keeps the newer of two retained command completions by worker-side seq. A
+ * completion that arrives before its terminal's list snapshot is registered
+ * (the response and the event dispatch synchronously in one socket batch,
+ * while the adoption continuation runs later) must not be dropped, and a
+ * stale snapshot or duplicate must not overwrite a newer completion.
+ */
+function newerCompletion(
+  candidate: TerminalCommandCompletionState | null | undefined,
+  current: TerminalCommandCompletionState | null | undefined,
+): TerminalCommandCompletionState | null {
+  if (!candidate || typeof candidate.seq !== "number") return current ?? null;
+  if (!current || typeof current.seq !== "number") return candidate;
+  return candidate.seq > current.seq ? candidate : current;
+}
+
 export function createWorkerTerminalManager(
   managerOptions: WorkerTerminalManagerOptions,
 ): DaemonTerminalManager {
@@ -179,6 +195,11 @@ export function createWorkerTerminalManager(
   const pendingRequests = new Map<string, PendingRequest>();
   const inFlight = new Set<Promise<void>>();
   const recordsById = new Map<string, WorkerTerminalRecord>();
+  // Completions that arrive before their terminal is registered (a list
+  // response and a completion in the same socket batch dispatch synchronously,
+  // before the adoption continuation registers the snapshot). Consumed by
+  // registerRecord; pruned for terminals the worker no longer lists.
+  const pendingCompletionsById = new Map<string, TerminalCommandCompletionState>();
   const terminalIdsByCwd = new Map<string, Set<string>>();
   const terminalActivityTokenById = new Map<string, string>();
   // Creation owns a reference to the session independently of the live-terminal
@@ -251,11 +272,16 @@ export function createWorkerTerminalManager(
     state: WorkerTerminalState;
     lastCommandFinished?: TerminalCommandCompletionState | null;
   }): TerminalSession {
+    // A completion may have arrived before this snapshot (same socket batch as
+    // the list response). Merge by seq so neither side loses a newer completion.
+    const stashed = pendingCompletionsById.get(input.info.id);
+    if (stashed) pendingCompletionsById.delete(input.info.id);
+    const listed = newerCompletion(input.lastCommandFinished, stashed) ?? null;
     const existing = recordsById.get(input.info.id);
     if (existing) {
       existing.info = cloneTerminalInfo(input.info);
       existing.state = input.state;
-      existing.lastCommandFinished = input.lastCommandFinished ?? null;
+      existing.lastCommandFinished = newerCompletion(listed, existing.lastCommandFinished) ?? null;
       return existing.session;
     }
 
@@ -263,7 +289,7 @@ export function createWorkerTerminalManager(
       info: cloneTerminalInfo(input.info),
       state: input.state,
       activity: input.info.activity,
-      lastCommandFinished: input.lastCommandFinished ?? null,
+      lastCommandFinished: listed,
       replayPreamble: "",
       exitInfo: null,
       messageListeners: new Set(),
@@ -417,6 +443,7 @@ export function createWorkerTerminalManager(
     }
     recordsById.delete(terminalId);
     terminalActivityTokenById.delete(terminalId);
+    pendingCompletionsById.delete(terminalId);
     const terminalIds = terminalIdsByCwd.get(record.info.cwd);
     if (terminalIds) {
       terminalIds.delete(terminalId);
@@ -500,12 +527,28 @@ export function createWorkerTerminalManager(
   ): void {
     const record = recordsById.get(message.terminalId);
     if (!record) {
+      // The list snapshot has not been registered yet (a list response and a
+      // completion in the same socket batch dispatch synchronously, before the
+      // adoption continuation runs). Retain by seq instead of dropping, so
+      // adoption still reconciles the completion.
+      if (typeof message.info.seq === "number") {
+        const retained = newerCompletion(
+          { seq: message.info.seq, exitCode: message.info.exitCode },
+          pendingCompletionsById.get(message.terminalId),
+        );
+        if (retained) pendingCompletionsById.set(message.terminalId, retained);
+      }
       return;
     }
     // Workers older than protocol 6 send no seq; their completions still reach
-    // listeners, but the mirror stays unknown and restore trusts the journal.
+    // listeners, but the mirror stays unknown and restore trusts the journal. A
+    // stale duplicate must not overwrite a newer retained completion.
     if (typeof message.info.seq === "number") {
-      record.lastCommandFinished = { seq: message.info.seq, exitCode: message.info.exitCode };
+      record.lastCommandFinished =
+        newerCompletion(
+          { seq: message.info.seq, exitCode: message.info.exitCode },
+          record.lastCommandFinished,
+        ) ?? record.lastCommandFinished;
     }
     const info: TerminalCommandFinishedInfo = { exitCode: message.info.exitCode };
     for (const listener of Array.from(record.commandFinishedListeners)) {
@@ -738,6 +781,7 @@ export function createWorkerTerminalManager(
     for (const terminalId of Array.from(recordsById.keys())) {
       removeRecord(terminalId);
     }
+    pendingCompletionsById.clear();
   }
 
   function disconnectWorker(): Promise<void> {
@@ -796,6 +840,9 @@ export function createWorkerTerminalManager(
         terminalActivityTokenById.set(info.id, item.activityToken);
       }
       cwds.add(info.cwd);
+    }
+    for (const terminalId of Array.from(pendingCompletionsById.keys())) {
+      if (!liveIds.has(terminalId)) pendingCompletionsById.delete(terminalId);
     }
     for (const cwd of cwds) {
       emitTerminalsChanged({ cwd, terminals: listTerminalItemsForCwd(cwd) });

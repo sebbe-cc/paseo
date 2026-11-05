@@ -73,6 +73,10 @@ import {
   TerminalWorkerIncompatibleError,
 } from "./terminal-worker-pool.js";
 import { connectTerminalWorker } from "./terminal-worker-client.js";
+import { WorkspaceScriptRuntimeStore } from "../server/workspace-script-runtime-store.js";
+import { restoreWorkspaceScripts } from "../server/workspace-script-recovery.js";
+import { createServiceProxySubsystem } from "../server/service-proxy.js";
+import type { WorkspaceRegistry } from "../server/workspace-registry.js";
 import { launchTerminalWorker } from "./terminal-worker-launch.js";
 
 type TerminalRow = TerminalState["grid"][number];
@@ -2684,5 +2688,132 @@ it("retains the last command completion in the worker across detach and adoption
   expect(manager.getTerminal(session.id)?.getLastCommandFinished()).toEqual({
     seq: 1,
     exitCode: 7,
+  });
+});
+
+it("keeps a completion that lands in the same batch as the adoption snapshot", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const workspaceId = "ws-script-race";
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-script-race-"));
+  temporaryDirs.push(cwd);
+  const terminalId = "terminal-script-race";
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  // One socket batch: the stale snapshot first, then the completion it missed.
+  // Both dispatch synchronously; the adoption continuation runs after.
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal: {
+          id: terminalId,
+          name: "Shell",
+          cwd,
+          workspaceId,
+          activity: null,
+        },
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: null,
+      },
+    ],
+  });
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 1, exitCode: 3 },
+  });
+  await expect(adopting).resolves.toBe(1);
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 1,
+    exitCode: 3,
+  });
+  // Running restore against the adopted mirror must mark the journaled run
+  // stopped, so script start accepts a relaunch instead of staying running.
+  const logger = pino({ level: "silent" });
+  const store = await WorkspaceScriptRuntimeStore.open({
+    path: join(cwd, "runtime.json"),
+    logger,
+  });
+  const entry = {
+    workspaceId,
+    scriptName: "web",
+    type: "script" as const,
+    lifecycle: "running" as const,
+    terminalId,
+    exitCode: null as number | null,
+    cwd,
+    commandSeq: 0,
+  };
+  store.set(entry);
+  await store.flush();
+  const workspaces = {
+    get: async () => ({ workspaceId, cwd, branch: "main", archivedAt: null }),
+  } as unknown as Pick<WorkspaceRegistry, "get">;
+  await restoreWorkspaceScripts({
+    runtimeStore: store,
+    terminalManager: manager,
+    workspaceRegistry: workspaces,
+    serviceProxy: createServiceProxySubsystem({ logger }),
+    publicBaseUrl: "https://example.test",
+  });
+  expect(store.get(entry)).toMatchObject({ lifecycle: "stopped", exitCode: 3 });
+  expect(store.isRunning(entry)).toBe(false);
+});
+
+it("adopts the newest completion when the snapshot and a live event disagree", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const terminalId = "terminal-race-newest";
+  const terminal = {
+    id: terminalId,
+    name: "Shell",
+    cwd: "/workspace",
+    workspaceId: "ws-race",
+    activity: null,
+  };
+  // The completion beats the snapshot into the daemon: stashed first, then the
+  // older snapshot registers. The newer completion must survive the merge.
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 3, exitCode: 1 },
+  });
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal,
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: { seq: 2, exitCode: 0 },
+      },
+    ],
+  });
+  await expect(adopting).resolves.toBe(1);
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 3,
+    exitCode: 1,
+  });
+  // A stale duplicate redelivery must not clobber the newer mirror.
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 2, exitCode: 0 },
+  });
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 3,
+    exitCode: 1,
   });
 });
