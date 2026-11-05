@@ -52,6 +52,7 @@ import type { AttachmentMetadata, BrowserElementAttachment } from "@/attachments
 import { persistAttachmentFromDataUrl } from "@/attachments/service";
 import { WORKSPACE_SECONDARY_HEADER_HEIGHT } from "@/constants/layout";
 import { getOverlayRoot } from "@/lib/overlay-root";
+import { registerFocusTarget } from "@/keyboard/focus-regions";
 import {
   getDesktopHost,
   isElectronRuntime,
@@ -867,6 +868,7 @@ export function BrowserPane({
     webview.addEventListener("dom-ready", handleDomReady);
     webview.addEventListener("focus", handleWebviewFocus);
     webview.addEventListener("mousedown", handleWebviewFocus);
+    const unregisterFocusTarget = registerFocusTarget(clip, handleWebviewFocus);
 
     if (isPresentedRef.current) {
       rememberResolvedBrowserWebviewSize(browserId, webview);
@@ -893,6 +895,7 @@ export function BrowserPane({
       webview.removeEventListener("dom-ready", handleDomReady);
       webview.removeEventListener("focus", handleWebviewFocus);
       webview.removeEventListener("mousedown", handleWebviewFocus);
+      unregisterFocusTarget();
       const browserStillExists = Boolean(
         useBrowserStore.getState().browsersById[browserIdRef.current],
       );
