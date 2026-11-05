@@ -179,6 +179,17 @@ export class BrowserKeyboard {
       repeat: input.isAutoRepeat,
       shift: input.shift,
     };
+    if (
+      input.type === "keyUp" &&
+      (input.key === "Alt" || input.key === "Control" || input.key === "Meta") &&
+      !guest.hostContents.isDestroyed()
+    ) {
+      guest.hostContents.send(SHORTCUT_OUTPUT_CHANNEL, {
+        ...matchInput,
+        browserId: registration.browserId,
+        type: "keyUp",
+      });
+    }
     const belongsToBrowserPolicy =
       policy !== undefined && matchesBrowserShortcutPolicy(policy, matchInput);
     const belongsToMenuPolicy =
