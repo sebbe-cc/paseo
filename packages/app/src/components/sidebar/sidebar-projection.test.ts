@@ -5,7 +5,8 @@ import type {
   SidebarWorkspaceEntry,
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
-import type { SidebarGroupMode } from "@/stores/sidebar-view-store";
+import { SIDEBAR_UNLABELLED_LABEL_KEY, type SidebarGroupMode } from "@/stores/sidebar-view-store";
+import { labelWorkspaceGroupKey } from "./sidebar-labels";
 import { buildSidebarProjection } from "./sidebar-projection";
 
 function makeWorkspace(
@@ -82,6 +83,7 @@ function projectionInput(options?: { groupMode?: SidebarGroupMode; pinnedCollaps
     projectNamesByViewKey: new Map([["project", "Project"]]),
     groupMode: options?.groupMode ?? ("project" as const),
     labelCatalog: [],
+    labelGroupOrder: [],
     pinnedCollapsed: options?.pinnedCollapsed ?? false,
     collapsedProjectKeys: new Set<string>(),
     collapsedWorkspaceGroupKeys: new Set<string>(),
@@ -196,6 +198,39 @@ describe("buildSidebarProjection", () => {
     expect([...projection.shortcutModel.shortcutIndexByWorkspaceKey]).toEqual([
       ["srv:shared", 1],
       ["srv:other", 2],
+    ]);
+  });
+
+  it("orders label sections by the stored label group order, new labels last", () => {
+    const backend = makeWorkspace("backend", "done", ["Backend"]);
+    const urgent = makeWorkspace("urgent", "done", ["Urgent"]);
+    const fresh = makeWorkspace("fresh", "done", ["Fresh"]);
+    const homeless = makeWorkspace("homeless", "done", []);
+    const projection = buildSidebarProjection({
+      ...projectionInput({ groupMode: "label" }),
+      projects: [
+        makeProject([backend.placement, urgent.placement, fresh.placement, homeless.placement]),
+      ],
+      pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+      workspaceEntriesByKey: new Map([
+        [backend.entry.workspaceKey, backend.entry],
+        [urgent.entry.workspaceKey, urgent.entry],
+        [fresh.entry.workspaceKey, fresh.entry],
+        [homeless.entry.workspaceKey, homeless.entry],
+      ]),
+      labelCatalog: [
+        { name: "Backend", color: "sky" },
+        { name: "Urgent", color: "red" },
+        { name: "Fresh", color: "teal" },
+      ],
+      labelGroupOrder: ["label:urgent", "label:backend"],
+    });
+
+    expect(projection.workspaceGroups.map((group) => group.key)).toEqual([
+      "label:urgent",
+      "label:backend",
+      "label:fresh",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
     ]);
   });
 
