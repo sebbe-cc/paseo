@@ -117,3 +117,138 @@ test("a named plugin shortcut follows the settings override in the app and brows
     }),
   ).toBe(false);
 });
+
+const escapeInput = {
+  code: "Escape",
+  key: "Escape",
+  altKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  shiftKey: false,
+  repeat: false,
+};
+
+test("rejects plain keys unless the contribution allows them", () => {
+  expect(() =>
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      onPress: () => true,
+    }),
+  ).toThrow("Plugin shortcuts require a modifier");
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      allowPlainKey: true,
+      onPress: () => true,
+    }),
+  );
+  expect(() =>
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Alt+Q",
+      phase: "sideways" as unknown as "capture",
+      onPress: () => true,
+    }),
+  ).toThrow('Plugin shortcut phase must be "capture" or "after-screen"');
+});
+
+test("dispatches after-screen shortcuts only in the after-screen pass", () => {
+  const afterScreen = vi.fn(() => true);
+  const capture = vi.fn(() => true);
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      allowPlainKey: true,
+      phase: "after-screen",
+      onPress: afterScreen,
+    }),
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      allowPlainKey: true,
+      onPress: capture,
+    }),
+  );
+
+  expect(pluginKeyboardShortcuts.dispatch(escapeInput, true)).toBe(true);
+  expect(capture).toHaveBeenCalledOnce();
+  expect(afterScreen).not.toHaveBeenCalled();
+  expect(pluginKeyboardShortcuts.dispatchAfterScreen(escapeInput, true)).toBe(true);
+  expect(afterScreen).toHaveBeenCalledOnce();
+});
+
+test("accepts a plain settings override only when the contribution allows it", () => {
+  const allowed = vi.fn(() => true);
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "plain", {
+      id: "plain-key",
+      label: "Plain key",
+      combo: "Alt+X",
+      allowPlainKey: true,
+      onPress: allowed,
+    }),
+    pluginKeyboardShortcuts.add("host-a", "modified", {
+      id: "plain-key",
+      label: "Plain key",
+      combo: "Alt+X",
+      onPress: () => true,
+    }),
+  );
+  const allowedBinding = pluginKeyboardShortcuts
+    .list()
+    .find((binding) => binding.bindingId === "plugin:host-a:plain:plain-key")!;
+  const deniedBinding = pluginKeyboardShortcuts
+    .list()
+    .find((binding) => binding.bindingId === "plugin:host-a:modified:plain-key")!;
+  const plainY = {
+    code: "KeyY",
+    key: "y",
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    repeat: false,
+  };
+  const overrides = {
+    [allowedBinding.bindingId!]: "Y",
+    [deniedBinding.bindingId!]: "Y",
+  };
+  expect(pluginKeyboardShortcuts.dispatch(plainY, true, overrides)).toBe(true);
+  expect(allowed).toHaveBeenCalledOnce();
+  expect(pluginKeyboardShortcuts.dispatch(plainY, true, { [deniedBinding.bindingId!]: "Y" })).toBe(
+    false,
+  );
+});
+
+test("releases a plain shortcut on its own key", () => {
+  const release = vi.fn();
+  const other = vi.fn();
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      allowPlainKey: true,
+      onPress: () => true,
+      onRelease: release,
+    }),
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Alt+Tab",
+      onPress: () => true,
+      onRelease: other,
+    }),
+  );
+  pluginKeyboardShortcuts.release("Alt", true);
+  expect(release).not.toHaveBeenCalled();
+  expect(other).toHaveBeenCalledOnce();
+  pluginKeyboardShortcuts.release("Escape", true);
+  expect(release).toHaveBeenCalledOnce();
+});
+
+test("keeps after-screen shortcuts out of browser tab prefixes", () => {
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Escape",
+      allowPlainKey: true,
+      phase: "after-screen",
+      onPress: () => true,
+    }),
+  );
+  expect(pluginKeyboardShortcuts.browserPrefixes(true)).toEqual([]);
+});

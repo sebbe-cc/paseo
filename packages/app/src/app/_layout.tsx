@@ -90,6 +90,7 @@ import { useLatchedBoolean } from "@/hooks/use-latched-boolean";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { KeyboardShiftProvider } from "@/keyboard/shift";
+import { usePublishPluginActiveScreen } from "@/plugins/screen-navigation";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
@@ -394,6 +395,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     exitFocusMode,
     cycleTheme,
   });
+  usePublishPluginActiveScreen();
 
   useActiveWorktreeNewAction();
   useGlobalNewWorkspaceAction();

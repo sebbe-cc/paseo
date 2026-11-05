@@ -8,6 +8,7 @@ import {
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navigation";
+import { pluginScreenNavigation } from "./screen-navigation";
 
 let activeWorkspace: { serverId: string; workspaceId: string } | null = null;
 let previousKey = "";
@@ -44,6 +45,11 @@ export function setPluginActiveWorkspace(selection: typeof activeWorkspace) {
 }
 
 export const pluginRecentNavigation: PluginRecentNavigation = {
+  getActiveScreen: pluginScreenNavigation.getActiveScreen,
+  subscribeScreen: pluginScreenNavigation.subscribeScreen,
+  canGoBack: pluginScreenNavigation.canGoBack,
+  goBack: pluginScreenNavigation.goBack,
+  closeScreen: pluginScreenNavigation.closeScreen,
   getActive,
   subscribe(listener) {
     // Subscribe on first use: the layout store imports this module through plugins/registry.

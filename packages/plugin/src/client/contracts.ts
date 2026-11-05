@@ -178,6 +178,11 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
   readonly navigation: PluginRecentNavigation;
+  /**
+   * True while an app overlay (a registered overlay, a DOM popover, a modal)
+   * holds the top layer, so a screen-level key handler can step aside.
+   */
+  hasOpenOverlay(): boolean;
   addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
@@ -213,12 +218,45 @@ export interface PluginNavigationLocation {
   readonly tabId: string | null;
 }
 
-export interface PluginRecentNavigation {
+export type PluginActiveScreen =
+  | {
+      kind: "plugin-screen";
+      serverId: string;
+      pluginId: string;
+      screenId: string;
+      params: PluginScreenParams;
+    }
+  | { kind: "page"; route: string };
+
+export interface PluginScreenNavigation {
+  /**
+   * The screen on top: a plugin screen with its params, or a full-screen page
+   * with its route. Null until the app has published the first route.
+   */
+  getActiveScreen(): PluginActiveScreen | null;
+  /** Reports every screen change; returns an unsubscribe function. */
+  subscribeScreen(listener: (screen: PluginActiveScreen | null) => void): PluginCleanup;
+  /** Whether the app's router can go back from here. */
+  canGoBack(): boolean;
+  /** Goes back through the app's router. False when there is nothing to go back to. */
+  goBack(): boolean;
+  /**
+   * Closes the open plugin screen, like its own close button: back through the
+   * router, or to the host when there is no history. False when no plugin
+   * screen is open.
+   */
+  closeScreen(): boolean;
+}
+
+export interface PluginRecentNavigation extends PluginScreenNavigation {
   getActive(): PluginNavigationLocation | null;
   subscribe(listener: (location: PluginNavigationLocation | null) => void): PluginCleanup;
   activateWorkspace(input: Pick<PluginNavigationLocation, "serverId" | "workspaceId">): boolean;
   activateTab(input: PluginNavigationLocation & { tabId: string }): boolean;
 }
+
+/** When a plugin shortcut runs: first in the capture pass, or after the screen. */
+export type PluginShortcutPhase = "capture" | "after-screen";
 
 export interface PluginKeyboardShortcutContribution {
   /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
@@ -226,6 +264,19 @@ export interface PluginKeyboardShortcutContribution {
   /** Stable within this plugin. Together with label, exposes the shortcut in Settings. */
   id?: string;
   label?: string;
+  /**
+   * Accept a key without modifiers, such as Escape. Settings rebinds accept a
+   * plain key the same way. Only set this for keys the plugin truly owns: a
+   * plain key fires wherever the app has focus.
+   */
+  allowPlainKey?: boolean;
+  /**
+   * "capture" (default) runs before the focused screen sees the key.
+   * "after-screen" runs in the bubble phase after the screen's own handlers,
+   * and is skipped when the key was already handled (defaultPrevented) or an
+   * overlay claims it.
+   */
+  phase?: PluginShortcutPhase;
   onPress(): boolean | undefined;
   onRelease?(): void;
 }

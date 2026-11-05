@@ -308,6 +308,18 @@ and returns an unsubscribe function. `activateWorkspace({ serverId, workspaceId 
 and `activateTab({ serverId, workspaceId, tabId })` return `false` when the target no
 longer exists. They preserve the selected tab and never create a new one.
 
+`getActiveScreen()` returns the screen on top: `{ kind: "plugin-screen", serverId,
+pluginId, screenId, params }` for a plugin screen, or `{ kind: "page", route }`
+for any other full-screen page. `subscribeScreen(listener)` reports screen
+changes. `canGoBack()` and `goBack()` wrap the app router, on every platform.
+`closeScreen()` closes the open plugin screen exactly like its own close button
+(back through the router, else back to the host) and returns `false` when no
+plugin screen is open.
+
+`client.hasOpenOverlay()` is `true` while an app overlay (a registered overlay,
+a DOM popover, a modal) holds the top layer. A screen-level key handler should
+step aside then, so one keypress never closes two layers at once.
+
 `client.addKeyboardShortcut({ combo, id?, label?, onPress, onRelease? })` registers
 one modified key such as `Alt+Tab` or `Ctrl+Tab`, including inside an Electron
 browser tab. Provide a stable kebab-case `id` and a `label` together to list the
@@ -318,6 +330,16 @@ clear, and reset it there; the saved key also works inside browser tabs.
 shortcuts. Registration returns an idempotent remover and is also removed when
 the plugin stops. Operating system shortcuts take precedence if the OS intercepts
 a key before it reaches Paseo.
+
+Pass `allowPlainKey: true` to register a key without modifiers, such as
+`Escape`. Settings rebinds accept a plain key the same way. Only claim keys
+the plugin truly owns: a plain key fires wherever the app has focus.
+
+Pass `phase: "after-screen"` to run the shortcut after the focused screen saw
+the key: it dispatches in the bubble phase and is skipped when the key was
+already handled (`defaultPrevented`) or an overlay claims it. The default
+`"capture"` phase runs before the screen sees the key. After-screen shortcuts
+stay out of Electron browser tabs, which have no screen to run first.
 
 ### External links and workspace browsers
 

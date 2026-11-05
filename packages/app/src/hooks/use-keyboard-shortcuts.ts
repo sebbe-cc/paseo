@@ -394,6 +394,26 @@ export function useKeyboardShortcuts({
     }
   });
 
+  // After-screen plugin shortcuts run in the bubble phase, once the focused
+  // screen had its chance: a handled key (defaultPrevented) or an overlay
+  // layer claiming Escape stays with the screen.
+  const handleAfterScreenKeyDown = useStableEvent((event: KeyboardEvent) => {
+    if (!shouldHandle()) {
+      return;
+    }
+    if (event.defaultPrevented || keyBelongsToDomPopover(event)) {
+      return;
+    }
+    const store = useKeyboardShortcutsStore.getState();
+    if (store.capturingShortcut) {
+      return;
+    }
+    if (pluginKeyboardShortcuts.dispatchAfterScreen(event, isMac, overrides)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
+
   const handleBrowserShortcutInput = useStableEvent((payload: unknown) => {
     const input = parseBrowserShortcutInput(payload);
     if (!input) {
@@ -422,6 +442,7 @@ export function useKeyboardShortcuts({
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keydown", handleAfterScreenKeyDown);
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlurOrHide);
     document.addEventListener("visibilitychange", handleBlurOrHide);
@@ -439,6 +460,7 @@ export function useKeyboardShortcuts({
         };
       }
       window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keydown", handleAfterScreenKeyDown);
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlurOrHide);
       document.removeEventListener("visibilitychange", handleBlurOrHide);
@@ -450,6 +472,7 @@ export function useKeyboardShortcuts({
     };
   }, [
     enabled,
+    handleAfterScreenKeyDown,
     handleBrowserShortcutInput,
     handleKeyDown,
     handleKeyUp,

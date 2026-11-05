@@ -1,4 +1,5 @@
 import { createPlayAudio, type AudioEngine } from "@/audio";
+import { hasActiveWebOverlay, hasOpenDomPopover } from "@/lib/overlay-root";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { createPluginHosts } from "./hosts";
 import type { PluginClientOpenPanelOptions } from "@getpaseo/plugin/client";
@@ -29,6 +30,7 @@ export function createPluginClientRuntime(
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
     navigation: pluginRecentNavigation,
+    hasOpenOverlay: () => hasActiveWebOverlay() || hasOpenDomPopover(),
     addKeyboardShortcut: (contribution) =>
       pluginKeyboardShortcuts.add(installation.serverId, installation.id, contribution),
     hosts: createPluginHosts(getHostRuntimeStore(), installation.lifetime.signal),

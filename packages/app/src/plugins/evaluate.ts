@@ -114,6 +114,7 @@ export type PluginClientRuntime = Pick<
   | "addComposerPill"
   | "addHeaderButton"
   | "addKeyboardShortcut"
+  | "hasOpenOverlay"
   | "navigation"
 > & { hosts: ReturnType<typeof createPluginHosts> };
 

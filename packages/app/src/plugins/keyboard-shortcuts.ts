@@ -21,6 +21,10 @@ function notify(): void {
   for (const listener of listeners) listener();
 }
 
+function hasShortcutModifier(combo: KeyCombo): boolean {
+  return combo.alt === true || combo.ctrl === true || combo.meta === true || combo.mod === true;
+}
+
 function effectiveCombo(registration: Registration, overrides: ShortcutOverrides): KeyCombo | null {
   const override = registration.bindingId ? overrides[registration.bindingId] : undefined;
   if (override === null || override === "") return null;
@@ -28,7 +32,7 @@ function effectiveCombo(registration: Registration, overrides: ShortcutOverrides
     try {
       if (override.includes(" ")) return registration.parsed;
       const parsed = parseShortcutString(override);
-      if (parsed.alt || parsed.ctrl || parsed.meta || parsed.mod) return parsed;
+      if (hasShortcutModifier(parsed) || registration.allowPlainKey === true) return parsed;
     } catch {
       return registration.parsed;
     }
@@ -53,6 +57,34 @@ function usesModifier(combo: KeyCombo, key: string, isMac: boolean): boolean {
   return false;
 }
 
+/** A released key ends a plain shortcut when it names the same key. */
+function matchesReleaseKey(combo: KeyCombo, key: string): boolean {
+  if (key === combo.code) return true;
+  return combo.key !== undefined && key.toLowerCase() === combo.key.toLowerCase();
+}
+
+function dispatchPhase(
+  input: KeyboardShortcutInput,
+  isMac: boolean,
+  overrides: ShortcutOverrides,
+  phase: "capture" | "after-screen",
+): boolean {
+  const activeServerId = pluginRecentNavigation.getActive()?.serverId;
+  const activeRegistrations = [...registrations].filter((item) => item.serverId === activeServerId);
+  for (const registration of activeRegistrations.length ? activeRegistrations : registrations) {
+    if ((registration.phase ?? "capture") !== phase) continue;
+    const combo = effectiveCombo(registration, overrides);
+    if (!combo || !matches(input, combo, isMac)) continue;
+    try {
+      return registration.onPress() !== false;
+    } catch (error) {
+      console.warn("[Plugins] Keyboard shortcut failed", error);
+      return true;
+    }
+  }
+  return false;
+}
+
 export const pluginKeyboardShortcuts = {
   add(serverId: string, pluginId: string, contribution: PluginKeyboardShortcutContribution) {
     if (typeof contribution.onPress !== "function")
@@ -63,8 +95,15 @@ export const pluginKeyboardShortcuts = {
       throw new Error("Shortcut id must be a stable kebab-case name");
     if (contribution.combo.includes(" ")) throw new Error("Plugin shortcuts must be a single key");
     const parsed = parseShortcutString(contribution.combo);
-    if (!parsed.alt && !parsed.ctrl && !parsed.meta && !parsed.mod) {
+    if (!hasShortcutModifier(parsed) && contribution.allowPlainKey !== true) {
       throw new Error("Plugin shortcuts require a modifier");
+    }
+    if (
+      contribution.phase !== undefined &&
+      contribution.phase !== "capture" &&
+      contribution.phase !== "after-screen"
+    ) {
+      throw new Error('Plugin shortcut phase must be "capture" or "after-screen"');
     }
     const bindingId = contribution.id ? `plugin:${serverId}:${pluginId}:${contribution.id}` : null;
     if (bindingId && [...registrations].some((item) => item.bindingId === bindingId))
@@ -103,26 +142,31 @@ export const pluginKeyboardShortcuts = {
     isMac: boolean,
     overrides: ShortcutOverrides = {},
   ): boolean {
-    const activeServerId = pluginRecentNavigation.getActive()?.serverId;
-    const activeRegistrations = [...registrations].filter(
-      (item) => item.serverId === activeServerId,
-    );
-    for (const registration of activeRegistrations.length ? activeRegistrations : registrations) {
-      const combo = effectiveCombo(registration, overrides);
-      if (!combo || !matches(input, combo, isMac)) continue;
-      try {
-        return registration.onPress() !== false;
-      } catch (error) {
-        console.warn("[Plugins] Keyboard shortcut failed", error);
-        return true;
-      }
-    }
-    return false;
+    return dispatchPhase(input, isMac, overrides, "capture");
+  },
+  /**
+   * Runs the "after-screen" registrations: keys the focused screen saw first.
+   * Callers skip this pass when the key was already handled (defaultPrevented).
+   */
+  dispatchAfterScreen(
+    input: KeyboardShortcutInput,
+    isMac: boolean,
+    overrides: ShortcutOverrides = {},
+  ): boolean {
+    return dispatchPhase(input, isMac, overrides, "after-screen");
   },
   release(key: string | null, isMac: boolean, overrides: ShortcutOverrides = {}): void {
     for (const registration of registrations) {
       const combo = effectiveCombo(registration, overrides);
-      if (key !== null && (!combo || !usesModifier(combo, key, isMac))) continue;
+      if (key === null) {
+        // Blur or hide: every held shortcut is released.
+      } else if (!combo) {
+        continue;
+      } else if (hasShortcutModifier(combo)) {
+        if (!usesModifier(combo, key, isMac)) continue;
+      } else if (!matchesReleaseKey(combo, key)) {
+        continue;
+      }
       try {
         registration.onRelease?.();
       } catch (error) {
@@ -132,6 +176,9 @@ export const pluginKeyboardShortcuts = {
   },
   browserPrefixes(isMac: boolean, overrides: ShortcutOverrides = {}): BrowserShortcutPrefix[] {
     return [...registrations].flatMap((registration) => {
+      // After-screen shortcuts belong to the app's screens; browser tabs have
+      // no screen to run first, so they keep their own keys.
+      if (registration.phase === "after-screen") return [];
       const parsed = effectiveCombo(registration, overrides);
       if (!parsed) return [];
       return [
