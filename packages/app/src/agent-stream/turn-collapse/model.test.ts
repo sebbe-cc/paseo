@@ -101,7 +101,9 @@ describe("collapseTurns", () => {
       reply("final"),
     ]);
 
-    expect(ids(result.tail)).toEqual(["u1", "final"]);
+    // Assistant text never folds: the mid-turn reply stays at turn level next
+    // to the final one (pa-2rx2y4: folded-away text vanished with the fold).
+    expect(ids(result.tail)).toEqual(["u1", "early", "final"]);
     expect(result.turnsByHostId.get("u1")).toEqual({
       hostId: "u1",
       expanded: false,
@@ -109,7 +111,8 @@ describe("collapseTurns", () => {
         tools: expect.objectContaining({ commandCount: 2 }),
       },
     });
-    expect(result.hostIdByFoldedMessageId.get("early")).toBe("u1");
+    expect(result.hostIdByHiddenRowId.has("early")).toBe(false);
+    expect(result.hostIdByHiddenRowId.get("c1")).toBe("u1");
   });
 
   it("shows an expanded turn's work as nested rows between the prompt and the reply", () => {
