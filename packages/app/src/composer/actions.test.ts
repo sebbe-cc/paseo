@@ -180,7 +180,7 @@ interface FakeSendCall {
   text: string;
   options: {
     messageId: string;
-    activeTurnBehavior?: "interrupt" | "steer";
+    activeTurnBehavior?: import("@getpaseo/protocol/messages").ActiveTurnBehavior;
     images: Array<{ data: string; mimeType: string }>;
     attachments: AgentAttachment[];
   };
