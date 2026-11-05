@@ -845,6 +845,42 @@ function hideAlerts() {
 }
 ```
 
+### Sidebar project groups
+
+`client.addSidebarProjectGroups({ groups, onManage?, manageLabel? })` groups the sidebar's
+project list under plugin-owned headers. Paseo draws the headers; the plugin owns the data.
+It is undefined on older hosts, so check for it before calling. One contribution per plugin;
+it returns a registration with `update(contribution)` and an idempotent `remove()`.
+
+```tsx
+const registration = client.addSidebarProjectGroups?.({
+  groups: [{ id: "heads", name: "Heads", projectIds: ["directory:/repos/paseo"], order: 0 }],
+  onManage: () => client.openScreen({ screenId: "groups" }),
+});
+registration?.update({
+  groups: [
+    { id: "heads", name: "Heads", projectIds: ["directory:/repos/paseo"], order: 0 },
+    { id: "fleet", name: "Fleet", projectIds: [], order: 1 },
+  ],
+  onManage: () => client.openScreen({ screenId: "groups" }),
+});
+```
+
+Each group needs a kebab-case `id` (stable within the plugin), a non-empty `name` of at most
+64 characters, a `projectIds` array of daemon project ids, and a finite `order` number.
+Headers render in ascending `order`, ties breaking on name. A sidebar project joins the first
+group that lists any of its host placements' project ids, so the same project id groups a
+project on every host it lives on. Unknown ids match nothing: a group whose projects are all
+gone renders as an empty header the user can still manage or collapse. Group membership is
+edited in the plugin's own UI, never by dragging rows; a drop in the grouped list only keeps
+the flat project order.
+
+The host tracks collapse per group (`sidebar-project-group:<pluginId>:<groupId>`), persists
+it with the other collapsed sidebar sections, and makes headers keyboard stops that expand
+and collapse. The header's context menu
+holds the manage item when `onManage` is set, labeled `manageLabel` or "Manage project groups".
+`update` replaces the whole contribution in place; updates after `remove()` do nothing.
+
 ## Host UI
 
 Import Paseo-owned UI from `@getpaseo/plugin/client/ui` in client code. This example

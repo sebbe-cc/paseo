@@ -25,6 +25,9 @@ import {
   type PluginTimelineRendererContribution,
   type PluginTimelineTransformerContribution,
   type PluginButtonRegistration,
+  type PluginSidebarProjectGroup,
+  type PluginSidebarProjectGroupsContribution,
+  type PluginSidebarProjectGroupsRegistration,
 } from "@getpaseo/plugin/client";
 import type {
   EvaluatedPlugin,
@@ -92,6 +95,69 @@ function requireId(value: string, label: string): string {
   return id;
 }
 
+const MAX_PROJECT_GROUP_NAME_LENGTH = 64;
+
+/**
+ * A plugin's project-groups contribution, validated and copied: group ids
+ * are contribution ids, names are trimmed text, project ids are trimmed
+ * non-empty strings, and order is a finite number. Unknown project ids are
+ * kept — they match nothing until the project exists.
+ */
+function normalizeSidebarProjectGroups(
+  contribution: PluginSidebarProjectGroupsContribution,
+): NonNullable<EvaluatedPlugin["sidebarProjectGroups"]> {
+  if (typeof contribution !== "object" || contribution === null) {
+    throw new Error("Sidebar project groups need a contribution object");
+  }
+  if (!Array.isArray(contribution.groups)) {
+    throw new Error("Sidebar project groups need a groups array");
+  }
+  const seen = new Set<string>();
+  const groups = contribution.groups.map((group, index) => {
+    const where = `Sidebar project group ${index}`;
+    if (typeof group !== "object" || group === null) {
+      throw new Error(`${where} is not an object`);
+    }
+    const candidate = group as Partial<PluginSidebarProjectGroup>;
+    const id = requireId(String(candidate.id ?? ""), `${where.toLowerCase()} id`);
+    if (seen.has(id)) throw new Error(`Duplicate sidebar project group: ${id}`);
+    seen.add(id);
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    if (!name) throw new Error(`Sidebar project group ${id} has no name`);
+    if (name.length > MAX_PROJECT_GROUP_NAME_LENGTH) {
+      throw new Error(`Sidebar project group ${id} has a name over 64 characters`);
+    }
+    if (!Array.isArray(candidate.projectIds)) {
+      throw new Error(`Sidebar project group ${id} needs a projectIds array`);
+    }
+    const projectIds: string[] = [];
+    for (const projectId of candidate.projectIds) {
+      if (typeof projectId !== "string") {
+        throw new Error(`Sidebar project group ${id} has a non-string project id`);
+      }
+      const trimmed = projectId.trim();
+      if (trimmed && !projectIds.includes(trimmed)) projectIds.push(trimmed);
+    }
+    if (typeof candidate.order !== "number" || !Number.isFinite(candidate.order)) {
+      throw new Error(`Sidebar project group ${id} needs a finite order number`);
+    }
+    return { id, name, projectIds, order: candidate.order };
+  });
+  const { onManage, manageLabel } = contribution;
+  if (onManage !== undefined && typeof onManage !== "function") {
+    throw new Error("Sidebar project groups onManage is not a function");
+  }
+  const label = typeof manageLabel === "string" ? manageLabel.trim() : "";
+  if (contribution.manageLabel !== undefined && !label) {
+    throw new Error("Sidebar project groups manageLabel is empty");
+  }
+  return {
+    groups,
+    ...(onManage ? { onManage } : {}),
+    ...(label ? { manageLabel: label } : {}),
+  };
+}
+
 /** A non-empty string, or a function of the screen's params resolved when the header renders. */
 function requireScreenTitle(screenId: string, title: unknown): PluginScreenTitle<PluginText> {
   if (typeof title === "function") return title as PluginScreenTitle<PluginText>;
@@ -126,6 +192,7 @@ export function runPluginClientBundle(
   onChange: () => void = () => undefined,
 ): EvaluatedPlugin {
   const collector: Omit<EvaluatedPlugin, "id" | "cleanup"> = {
+    sidebarProjectGroups: null,
     surfaces: [],
     settingsScreens: [],
     sidebarItems: { header: [], footer: [] },
@@ -497,6 +564,48 @@ export function runPluginClientBundle(
         timelineRendererIds.delete(rendererId),
       );
     },
+    addSidebarProjectGroups(
+      contribution: PluginSidebarProjectGroupsContribution,
+    ): PluginSidebarProjectGroupsRegistration {
+      if (stopped) throw new Error("Plugin has stopped");
+      if (collector.sidebarProjectGroups) {
+        throw new Error(`Duplicate sidebar project groups in plugin ${id}`);
+      }
+      let active = true;
+      // The holder keeps its identity: the registry copies the evaluated
+      // plugin once, so `update` mutates the holder in place and the host
+      // keeps reading the same object after every publish.
+      const holder = normalizeSidebarProjectGroups(contribution);
+      collector.sidebarProjectGroups = holder;
+      notifyChange();
+      const remove = () => {
+        if (!active) return;
+        active = false;
+        // Empty the holder too: the registry copied its reference, so only
+        // mutating it hides the headers from already-published snapshots.
+        holder.groups = [];
+        delete holder.onManage;
+        delete holder.manageLabel;
+        collector.sidebarProjectGroups = null;
+        removals.delete(remove);
+        notifyChange();
+      };
+      removals.add(remove);
+      return {
+        update: (next) => {
+          if (active && !stopped) {
+            const normalized = normalizeSidebarProjectGroups(next);
+            holder.groups = normalized.groups;
+            if (normalized.onManage) holder.onManage = normalized.onManage;
+            else delete holder.onManage;
+            if (normalized.manageLabel) holder.manageLabel = normalized.manageLabel;
+            else delete holder.manageLabel;
+            notifyChange();
+          }
+        },
+        remove,
+      };
+    },
     addComposerPill(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
       return trackButton(runtime.addComposerPill(contribution));
@@ -580,6 +689,7 @@ export function runPluginClientBundle(
   return {
     id,
     cleanup,
+    sidebarProjectGroups: collector.sidebarProjectGroups,
     surfaces: collector.surfaces,
     settingsScreens: collector.settingsScreens,
     sidebarItems: collector.sidebarItems,
