@@ -11,6 +11,89 @@ import {
   type UsageReport,
 } from "@getpaseo/protocol/messages";
 
+/**
+ * Ceiling for source-owned observation age (pa-vtgw9). Quota observed
+ * longer ago than this is never served as quota — not as a live report and
+ * not via `lastSuccessful` — however fresh the poll itself is.
+ */
+export const MAX_OBSERVED_AGE_MS = 1_800_000;
+
+/**
+ * Source-owned observation state of a report (pa-vtgw9 R2). `absent` means
+ * the source sent no observation and the report keeps legacy poll-time
+ * semantics. `invalid` means the source DID send an observation but it is
+ * unparsable or in the future: it must never authorize quota, and a future
+ * timestamp is never clamped to "just now" — silent skew would keep quota
+ * alive past its real observation. Only `valid` carries quota age.
+ */
+type ObservationState = { kind: "absent" } | { kind: "valid"; at: number } | { kind: "invalid" };
+
+function observationStateOf(report: UsageReport, now: number): ObservationState {
+  if (report.status !== "available" || !report.observedAt) return { kind: "absent" };
+  const at = Date.parse(report.observedAt);
+  if (Number.isNaN(at) || at > now) return { kind: "invalid" };
+  return { kind: "valid", at };
+}
+
+function ageText(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+/**
+ * A stored last-successful snapshot stays servable only while its own
+ * observation is fresh. Snapshots from sources without `observedAt` keep
+ * the previous behavior (always servable); snapshots with an observation
+ * older than the ceiling — or with a present-but-invalid/future
+ * observation (R2) — are dropped so repeated failures can never
+ * reintroduce stale quota after a restart.
+ */
+function lastSuccessfulStillFresh(
+  snapshot: NonNullable<UsageReportEntry["lastSuccessful"]>,
+  now: number,
+): boolean {
+  const state = observationStateOf(snapshot.report, now);
+  if (state.kind === "absent") return true;
+  if (state.kind === "invalid") return false;
+  return now - state.at <= MAX_OBSERVED_AGE_MS;
+}
+
+/**
+ * A source-owned history snapshot attached to an error report (pa-vtgw9
+ * R1). Usable only with a non-empty window list and a valid, non-future
+ * observation inside the ceiling; anything else is not history.
+ */
+function historyCandidate(
+  history: { observedAt: string; windows: unknown[] } | undefined,
+  now: number,
+): { at: number } | null {
+  if (!history || !Array.isArray(history.windows) || history.windows.length === 0) return null;
+  const at = Date.parse(history.observedAt);
+  if (Number.isNaN(at) || at > now) return null;
+  if (now - at > MAX_OBSERVED_AGE_MS) return null;
+  return { at };
+}
+
+/**
+ * R3: every published source-owned history obeys the same observation
+ * validation and ceiling as live quota. A history that is not a usable
+ * candidate (missing, empty, invalid/future, or past the ceiling) is
+ * removed from the report; anything else — status, error text, problem
+ * details, and fresh history — passes through untouched.
+ */
+function stripUnauthorizedHistory<T extends UsageReport>(report: T, now: number): T {
+  if (!("history" in report)) return report;
+  const history = (report as { history?: { observedAt: string; windows: unknown[] } }).history;
+  if (historyCandidate(history, now)) return report;
+  const copy = { ...report } as Record<string, unknown>;
+  delete copy.history;
+  return copy as T;
+}
+
 export interface UsageSource {
   id: string;
   label: string;
@@ -22,6 +105,17 @@ export interface UsageSource {
    * place. First claimant (by source id) wins; conflicts are logged.
    */
   replaces?: readonly string[];
+  /**
+   * Opt out of the built-in discovery/fetch fallback for taken-over
+   * sources. With no provable same-account match the registry never shows
+   * another account's quota under this source's cards, but a source whose
+   * accounts cannot match native identities at all — or whose native fetch
+   * would start a host just to fail, such as a CPA-backed Muse source —
+   * sets this to skip the taken-over sources' discovery and fetch calls
+   * entirely. A failing override then reports its own error (or its last
+   * successful snapshot with its age) instead of built-in values.
+   */
+  skipNativeFallback?: boolean;
   discover(scope: UsageScope): Promise<unknown>;
   fetch(input: unknown): Promise<unknown>;
 }
@@ -29,6 +123,8 @@ export interface UsageSource {
 interface Login {
   input: unknown;
   harness: string;
+  /** Verified account identity attested at discovery, if any. Never a locator hash. */
+  identity?: string;
 }
 
 interface KnownReport {
@@ -37,8 +133,12 @@ interface KnownReport {
   overriddenId?: string;
   logins: [Login, ...Login[]];
   label?: string;
-  /** Built-in logins tried when the override yields nothing usable. */
-  fallback?: { source: UsageSource; logins: [Login, ...Login[]] };
+  /**
+   * Built-in logins tried when the override yields nothing usable. `identity`
+   * is the verified account identity both sides proved at discovery; a
+   * fallback fetch only serves when it attests this exact string.
+   */
+  fallback?: { source: UsageSource; logins: [Login, ...Login[]]; identity: string };
 }
 
 export interface AgentUsageLookup {
@@ -71,7 +171,16 @@ export class UsageSourceRegistry {
   private readonly byAgent = new Map<string, AgentReports>();
   private readonly cache = new Map<string, { at: number; entry: UsageReportEntry }>();
   private readonly successful = new Map<string, NonNullable<UsageReportEntry["lastSuccessful"]>>();
-  private readonly pending = new Map<string, Promise<UsageReportEntry>>();
+  // Pending values are nullable: a fetch retired while in flight resolves
+  // null and is dropped by listReports before any callback or return.
+  private readonly pending = new Map<string, Promise<UsageReportEntry | null>>();
+  /**
+   * Bumped on every override/liveness mutation (register, unregister,
+   * disable, enable). In-flight fetches capture it and refuse to start
+   * native fallback or publish cache entries once it moved: a retired
+   * request must never start a native host or publish a ghost card.
+   */
+  private generation = 0;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -128,6 +237,7 @@ export class UsageSourceRegistry {
       }
     }
     const next = new Map<string, string>();
+    this.generation++;
     for (const [target, ids] of claimants) {
       if (!this.sources.has(target)) continue;
       const sorted = [...ids].sort((a, b) => a.localeCompare(b));
@@ -213,18 +323,120 @@ export class UsageSourceRegistry {
       this.mergeKnown();
       ids = [...this.known.keys()];
     }
+    // A fetch retired while in flight resolves null and is dropped here:
+    // retired entries reach neither the per-report callback nor the returned
+    // list, so a reload, disable, or opt-out can never publish a ghost card
+    // or an older quota.
+    //
+    // R3: every publication passes the same ceiling check — before the
+    // per-report callback and again on the final list after the sibling
+    // wait. A fast entry that ages past the ceiling while a sibling fetch
+    // is still in flight is downgraded before it reaches the client, and
+    // the error status always stays visible.
     return Promise.all(
       [...new Set(ids)].flatMap((id) => {
         const known = reports.get(id);
         if (!known) return [];
         return [
           this.fetchId(id, known, options.forceRefresh).then((entry) => {
-            options.onReport?.(entry);
-            return entry;
+            if (entry === null) return null;
+            const publishable = this.toPublishable(entry, this.now());
+            options.onReport?.(publishable);
+            return publishable;
           }),
         ];
       }),
+    ).then((entries) =>
+      entries
+        .filter((entry): entry is UsageReportEntry => entry !== null)
+        .map((entry) => this.toPublishable(entry, this.now())),
     );
+  }
+
+  /**
+   * R2 ceiling for one report: an available report with a
+   * present-but-invalid/future observation, or an observation past the
+   * ceiling, becomes a visible error. Anything else passes through —
+   * including legacy reports that never claimed an observation.
+   */
+  private enforceReportCeiling(report: UsageReport, now: number): UsageReport {
+    if (report.status !== "available") return report;
+    const state = observationStateOf(report, now);
+    if (state.kind === "invalid") {
+      return {
+        status: "error",
+        error: `quota observation is invalid (observedAt ${report.observedAt})`,
+      };
+    }
+    if (state.kind === "valid" && now - state.at > MAX_OBSERVED_AGE_MS) {
+      return {
+        status: "error",
+        error: `quota data is stale (last success ${ageText(now - state.at)})`,
+      };
+    }
+    return report;
+  }
+
+  /**
+   * R1 history bridge: prefer the registry's own fresh snapshot; otherwise
+   * bridge a fresh source-owned history attached to this same error, so a
+   * cold restart with valid backend history still shows error + recent
+   * quota instead of error alone. The current error status always stays
+   * visible — history only ever lands in `lastSuccessful`.
+   */
+  private bridgeHistory(
+    report: UsageReport,
+    cacheKey: string,
+    completedAt: string,
+    now: number,
+  ): UsageReportEntry["lastSuccessful"] {
+    const snapshot = this.successful.get(cacheKey);
+    if (snapshot && lastSuccessfulStillFresh(snapshot, now)) return snapshot;
+    if (report.status === "available") return undefined;
+    const history = "history" in report ? report.history : undefined;
+    if (!history || !historyCandidate(history, now)) return undefined;
+    return {
+      fetchedAt: completedAt,
+      report: {
+        status: "available",
+        windows: history.windows,
+        ...(history.planLabel ? { planLabel: history.planLabel } : {}),
+        ...(history.balances ? { balances: history.balances } : {}),
+        ...(history.details ? { details: history.details } : {}),
+        observedAt: history.observedAt,
+      },
+    };
+  }
+
+  /**
+   * R3: re-applies the source-owned observation ceiling to an already-built
+   * entry. Available reports with an invalid/future observation or an
+   * observation past the ceiling become visible errors; a stale or
+   * invalid/future retained snapshot is dropped. The same observation
+   * validation and ceiling also govern every published source-owned
+   * history — on the main report and on every loginErrors report — at all
+   * three boundaries: an unauthorized history is removed while the
+   * current error status, error text, and problem details stay visible.
+   * Idempotent: safe to apply at the warm hit, the callback, and the
+   * final return.
+   */
+  private toPublishable(entry: UsageReportEntry, now: number): UsageReportEntry {
+    const report = stripUnauthorizedHistory(this.enforceReportCeiling(entry.report, now), now);
+    const lastSuccessful =
+      entry.lastSuccessful && lastSuccessfulStillFresh(entry.lastSuccessful, now)
+        ? entry.lastSuccessful
+        : undefined;
+    const loginErrors = entry.loginErrors?.map((loginError) => {
+      const cleaned = stripUnauthorizedHistory(loginError.report, now);
+      return cleaned === loginError.report ? loginError : { ...loginError, report: cleaned };
+    });
+    if (
+      report === entry.report &&
+      lastSuccessful === entry.lastSuccessful &&
+      loginErrors === entry.loginErrors
+    )
+      return entry;
+    return { ...entry, report, lastSuccessful, ...(loginErrors ? { loginErrors } : {}) };
   }
 
   private pruneAgents(): void {
@@ -281,12 +493,7 @@ export class UsageSourceRegistry {
           continue;
         }
         mergeLogins(known, report.logins);
-        if (report.fallback) {
-          const fallback = known.fallback;
-          if (fallback && fallback.source === report.fallback.source) {
-            mergeLogins(fallback, report.fallback.logins);
-          } else known.fallback = report.fallback;
-        }
+        if (report.fallback) mergeFallback(known, report.fallback);
       }
     }
     // Fetch freshness expires independently of successful snapshots. Retain only live identities.
@@ -324,6 +531,13 @@ export class UsageSourceRegistry {
         z.object({
           key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
           label: z.string().optional(),
+          // Vendor-scoped verified account identity (`vendor:rest`). Only an
+          // explicitly verified identity may appear here; a locator hash or
+          // unknown identity omits the field and fails closed at match time.
+          identity: z
+            .string()
+            .regex(/^[a-z0-9-]{1,32}:\S{1,200}$/)
+            .optional(),
           harness: z.string().min(1).optional(),
           input: z.json(),
         }),
@@ -334,18 +548,38 @@ export class UsageSourceRegistry {
   private addAccount(
     reports: Map<string, KnownReport>,
     id: string,
-    account: { key: string; label?: string; harness?: string; input: unknown },
+    account: {
+      key: string;
+      label?: string;
+      identity?: string;
+      harness?: string;
+      input: unknown;
+    },
     source: UsageSource,
     overriddenId?: string,
     fallback?: KnownReport["fallback"],
   ): void {
     const reportId = `${id}:${account.key}`;
     // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05 once plugin floor >= v0.11.0.
-    const login = { input: account.input, harness: account.harness ?? source.label };
+    const login: Login = {
+      input: account.input,
+      harness: account.harness ?? source.label,
+      ...(account.identity !== undefined ? { identity: account.identity } : {}),
+    };
     const known = reports.get(reportId);
     if (known) {
       mergeLogins(known, [login]);
-      if (fallback && !known.fallback) known.fallback = fallback;
+      if (fallback) {
+        // Logins from different scopes must prove the same identity; a
+        // conflicting match fails closed instead of mixing quotas.
+        const current = known.fallback;
+        if (!current) known.fallback = fallback;
+        else if (current.source === fallback.source && current.identity === fallback.identity) {
+          mergeLogins(current, fallback.logins);
+        } else if (current.identity !== fallback.identity) {
+          known.fallback = undefined;
+        }
+      }
     } else {
       reports.set(reportId, { source, overriddenId, logins: [login], label: account.label, fallback });
     }
@@ -393,17 +627,35 @@ export class UsageSourceRegistry {
         const reports = new Map<string, KnownReport>();
         const winner = this.sources.get(winnerId)!;
         const target = this.sources.get(targetId)!;
+        // An opted-out winner never touches the taken-over source: no
+        // discovery call (which a native source could answer with another
+        // account's identity) and no fetch call (which could start a host
+        // just to fail, e.g. a transient muse serve).
+        const skipNative = winner.skipNativeFallback === true;
         const [winnerAccounts, targetAccounts] = await Promise.all([
           winner
             .discover(scope)
             .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
             .catch((err: unknown) => ({ ok: false as const, err })),
-          target
-            .discover(scope)
-            .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
-            .catch((err: unknown) => ({ ok: false as const, err })),
+          skipNative
+            ? Promise.resolve({ ok: true as const, accounts: [] })
+            : target
+                .discover(scope)
+                .then((raw) => ({ ok: true as const, accounts: this.parseAccounts(raw) }))
+                .catch((err: unknown) => ({ ok: false as const, err })),
         ]);
         if (!winnerAccounts.ok) {
+          if (skipNative) {
+            this.logger.warn(
+              { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
+              "Usage source takeover failed; native fallback disabled",
+            );
+            // Keep only this winner's own previous cards (stale). Restoring
+            // the taken-over source's cards would reintroduce native cards
+            // in a provider the winner owns.
+            this.previousFor(reports, previous, (report) => report.overriddenId === targetId);
+            return reports;
+          }
           this.logger.warn(
             { sourceId: winnerId, target: targetId, err: winnerAccounts.err },
             "Usage source takeover failed; falling back to built-in source",
@@ -420,19 +672,44 @@ export class UsageSourceRegistry {
           }
           return reports;
         }
-        const fallbackLogins =
-          targetAccounts.ok && targetAccounts.accounts.length > 0
-            ? {
-                source: target,
-                logins: targetAccounts.accounts.map((account) => ({
-                  // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
-                  input: account.input,
-                  harness: account.harness ?? target.label,
-                })) as [Login, ...Login[]],
-              }
-            : undefined;
+        const targetByKey = new Map<
+          string,
+          { input: unknown; harness?: string; identity?: string }[]
+        >();
+        if (targetAccounts.ok) {
+          for (const account of targetAccounts.accounts) {
+            const list = targetByKey.get(account.key) ?? [];
+            list.push(account);
+            targetByKey.set(account.key, list);
+          }
+        }
         for (const account of winnerAccounts.accounts) {
-          this.addAccount(reports, targetId, account, winner, targetId, fallbackLogins);
+          // Fallback needs a proven same-account match: both sides must
+          // carry an explicitly verified identity in a shared vendor
+          // namespace, and the strings must be exactly equal. A locator
+          // hash, key equality alone, or an unknown identity on either side
+          // is not proof and fails closed: the override keeps its own error
+          // (or its last successful snapshot with its age). The card key
+          // only groups cards; it never authorizes quota movement.
+          const candidates = targetByKey.get(account.key) ?? [];
+          const matched =
+            account.identity !== undefined
+              ? candidates.filter((native) => native.identity === account.identity)
+              : [];
+          const fallback =
+            matched.length > 0
+              ? {
+                  source: target,
+                  identity: account.identity!,
+                  logins: matched.map((match) => ({
+                    // COMPAT(usageLoginHarness): added in v0.11.0, remove after 2027-04-05.
+                    input: match.input,
+                    harness: match.harness ?? target.label,
+                    identity: match.identity,
+                  })) as [Login, ...Login[]],
+                }
+              : undefined;
+          this.addAccount(reports, targetId, account, winner, targetId, fallback);
         }
         return reports;
       }),
@@ -469,17 +746,38 @@ export class UsageSourceRegistry {
     };
   }
 
-  private fetchId(id: string, known: KnownReport, forceRefresh = false): Promise<UsageReportEntry> {
+  private fetchId(
+    id: string,
+    known: KnownReport,
+    forceRefresh = false,
+  ): Promise<UsageReportEntry | null> {
     // Account identity groups cards; the ordered login set identifies a fetch result.
     const cacheKey = cacheIdentity(id, known);
     const cached = this.cache.get(cacheKey);
+    // R3: a warm hit is a publication, not a shortcut past the ceiling. The
+    // cached entry is re-checked against the source-owned observation age
+    // before it reaches any callback or return, so quota that aged past
+    // the ceiling while cached is never served from the fast path.
     if (!forceRefresh && cached && this.now() - cached.at < this.ttlMs)
-      return Promise.resolve(cached.entry);
+      return Promise.resolve(this.toPublishable(cached.entry, this.now()));
     const pending = this.pending.get(cacheKey);
     if (pending) return pending;
-    const request = (async () => {
+    const generation = this.generation;
+    // False once an override/liveness mutation retired this request. A
+    // retired request never starts native fallback and never publishes:
+    // after unregister/disable or a new opt-out winner, the old primary's
+    // quota must not start a native host or reappear as a ghost card.
+    const isLive = () =>
+      this.generation === generation && this.sources.get(known.source.id) === known.source;
+    const request: Promise<UsageReportEntry | null> = (async () => {
       const fetchedAt = new Date(this.now()).toISOString();
-      const outcome = await this.fetchWithFallback(known);
+      const outcome = await this.fetchWithFallback(known, isLive);
+      if (!isLive()) {
+        // Retired while in flight: publish nothing anywhere — no callback,
+        // no return, no cache, no last-success. An override retire has no
+        // live card left to serve.
+        return null;
+      }
       const completedAt = new Date(this.now()).toISOString();
       // Taken-over cards keep the native identity: same id prefix, label and
       // icon as the built-in source they replace.
@@ -493,12 +791,20 @@ export class UsageSourceRegistry {
         fetchedAt,
         ...outcome,
       };
+      // Provenance ceiling (pa-vtgw9): when a source owns its observation
+      // time via `observedAt`, age is measured from that timestamp — never
+      // from poll/fetch time. Quota older than the ceiling is never served
+      // as quota, and a repeated failure can never stamp a new observation.
+      // Sources without `observedAt` keep the previous poll-time semantics.
+      const now = this.now();
+      entry.report = this.enforceReportCeiling(entry.report, now);
       if (entry.report.status === "available") {
-        entry.successfulAt = completedAt;
+        entry.successfulAt = entry.report.observedAt ?? completedAt;
       } else {
-        entry.lastSuccessful = this.successful.get(cacheKey);
+        entry.lastSuccessful = this.bridgeHistory(entry.report, cacheKey, completedAt, now);
       }
       if (
+        isLive() &&
         this.sources.get(known.source.id) === known.source &&
         this.activeCacheKeys().has(cacheKey)
       ) {
@@ -557,22 +863,72 @@ export class UsageSourceRegistry {
 
   private async fetchWithFallback(
     known: KnownReport,
+    isLive: () => boolean,
   ): Promise<Pick<UsageReportEntry, "report" | "loginErrors">> {
     const primary = await this.fetchLogins(known.source, known.logins);
     if (primary.available) return { report: primary.available };
-    if (!known.fallback) {
+    const failed = (): Pick<UsageReportEntry, "report" | "loginErrors"> => ({
       // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
       // Keep the final single report so older apps still parse and display failed accounts.
-      return {
-        report: primary.loginErrors[primary.loginErrors.length - 1]!.report,
-        loginErrors: primary.loginErrors,
-      };
-    }
-    const fallback = await this.fetchLogins(known.fallback.source, known.fallback.logins);
+      report: primary.loginErrors[primary.loginErrors.length - 1]!.report,
+      loginErrors: primary.loginErrors,
+    });
+    if (!known.fallback) return failed();
+    // A retired request never touches native sources: after unregister,
+    // disable, or a new opt-out winner, the old primary's failure must not
+    // start a native host (e.g. a transient muse serve) just to fail.
+    if (!isLive()) return failed();
+    const fallback = await this.fetchFallbackLogins(
+      known.fallback.source,
+      known.fallback.logins,
+      known.fallback.identity,
+    );
     const loginErrors = [...primary.loginErrors, ...fallback.loginErrors];
     if (fallback.available) return { report: fallback.available, loginErrors };
+    // The card keeps the override's own error; native failures (including a
+    // discarded identity mismatch) stay visible in `loginErrors` only, so a
+    // rotation can never replace A's error with another account's values.
     // COMPAT(usageLoginErrors): added in v0.11.0, remove after 2027-04-05 once app floor >= v0.11.0.
-    return { report: loginErrors[loginErrors.length - 1]!.report, loginErrors };
+    return { report: primary.loginErrors[primary.loginErrors.length - 1]!.report, loginErrors };
+  }
+
+  /**
+   * Native fallback bound to the verified identity both sides proved at
+   * discovery AND to the credentials actually read for the quota request.
+   * A new discovery alone does not close the rotation race (the login file
+   * may change between discovery and fetch, and targeted refreshes skip
+   * discovery entirely), so each available native result must attest the
+   * expected identity. Anything else — a mismatch, or an available result
+   * with no attestation — is discarded with a provenance error and the
+   * override keeps its own error (or its last successful snapshot).
+   */
+  private async fetchFallbackLogins(
+    source: UsageSource,
+    logins: readonly Login[],
+    expectedIdentity: string,
+  ): Promise<{ available: UsageReport | null; loginErrors: NonNullable<UsageReportEntry["loginErrors"]> }> {
+    const attempts = logins.map((login) => this.fetchBeforeDeadline(source, login.input));
+    const loginErrors: NonNullable<UsageReportEntry["loginErrors"]> = [];
+    for (const [index, login] of logins.entries()) {
+      const report = await attempts[index]!;
+      if (report.status !== "available") {
+        loginErrors.push({ harness: login.harness, report });
+        continue;
+      }
+      if (report.accountIdentity === expectedIdentity) {
+        return { available: report, loginErrors };
+      }
+      loginErrors.push({
+        harness: login.harness,
+        report: {
+          status: "error",
+          error:
+            `Native login identity ${report.accountIdentity ?? "unknown"} does not match ` +
+            `the override account's verified identity; its quota is not served under this card.`,
+        },
+      });
+    }
+    return { available: null, loginErrors };
   }
 
   private async fetchLogin(source: UsageSource, input: unknown): Promise<UsageReport> {
@@ -606,6 +962,25 @@ function legacyError(report: UsageReport, now: number): string | null {
   if (report.status === "error") return report.error;
   if (report.status === "unavailable") return legacyProblem(report.problem, now);
   return null;
+}
+
+/**
+ * Merges a fallback discovered in another scope into a known card. Logins
+ * from different scopes must prove the same verified identity; a
+ * conflicting match fails closed instead of mixing quotas.
+ */
+function mergeFallback(into: KnownReport, from: NonNullable<KnownReport["fallback"]>): void {
+  const current = into.fallback;
+  if (!current) {
+    into.fallback = from;
+    return;
+  }
+  if (current.source !== from.source) {
+    into.fallback = from;
+    return;
+  }
+  if (current.identity !== from.identity) into.fallback = undefined;
+  else mergeLogins(current, from.logins);
 }
 
 // Inputs are opaque JSON locators. Canonical equality deduplicates discovery across scopes.
