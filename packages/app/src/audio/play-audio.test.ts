@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createPlayAudio } from "./play-audio";
 import { playPcm16, parsePcmSampleRate, resampleToPcm16 } from "./pcm";
 import { playFile, type FilePlaybackStatus, type FilePlayer } from "./file-playback";
@@ -97,6 +97,38 @@ test("voice PCM cancellation stops native output and rejects", async () => {
   owner.abort();
   await expect(result).rejects.toThrow("Playback stopped");
   expect(stopped).toBe(true);
+});
+
+test("queued native PCM acknowledges each packet after the preceding buffered audio", async () => {
+  vi.useFakeTimers();
+  try {
+    const written = vi.fn();
+    const played = vi.fn();
+    const output = { resumePlayback() {}, playPCMData: written, stopPlayback() {} };
+    const signal = new AbortController().signal;
+    const bytes = new Uint8Array(3200);
+    const first = playPcm16(bytes, "audio/pcm;rate=16000", signal, output, 250).then((duration) => {
+      played(0);
+      return duration;
+    });
+    const second = playPcm16(bytes, "audio/pcm;rate=16000", signal, output, 350).then(
+      (duration) => {
+        played(1);
+        return duration;
+      },
+    );
+    expect(written).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(played).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(played.mock.calls).toEqual([[0]]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(played.mock.calls).toEqual([[0], [1]]);
+    await expect(first).resolves.toBe(0.1);
+    await expect(second).resolves.toBe(0.1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 function filePlayer() {

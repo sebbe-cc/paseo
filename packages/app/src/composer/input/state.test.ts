@@ -14,6 +14,8 @@ import {
   runDefaultSendAction,
   runMessageInputKeyboardAction,
   stopRealtimeVoice,
+  toggleRealtimeVoice,
+  type ToggleRealtimeVoiceContext,
 } from "./state";
 
 const connected = { isConnected: true } as never;
@@ -610,5 +612,49 @@ describe("fullscreen glyph rail", () => {
     expect(
       resolveGlyphRailOffset({ controlSize: 28, sendIconSize: 20, glyphIconSize: 16 }),
     ).toBeCloseTo(1 / 6);
+  });
+});
+
+describe("chat voice handoff", () => {
+  function context(
+    overrides: Partial<ToggleRealtimeVoiceContext> = {},
+  ): ToggleRealtimeVoiceContext {
+    return {
+      voice: {
+        isVoiceSwitching: false,
+        isVoiceModeForAgent: () => false,
+        startVoice: vi.fn(async () => {}),
+      },
+      voiceServerId: "host",
+      voiceAgentId: "chat-agent",
+      isConnected: true,
+      disabled: false,
+      isAgentRunning: true,
+      isPluginVoice: true,
+      handleStopRealtimeVoice: vi.fn(),
+      toast: { error: vi.fn() },
+      interruptBeforeVoiceMessage: "Interrupt first",
+      exitFullscreen: vi.fn(),
+      ...overrides,
+    };
+  }
+  it("switches to a running chat agent with plugin voice without cancelling its work", () => {
+    const ctx = context();
+    toggleRealtimeVoice(ctx);
+    expect(ctx.voice?.startVoice).toHaveBeenCalledWith("host", "chat-agent");
+    expect(ctx.handleStopRealtimeVoice).not.toHaveBeenCalled();
+    expect(ctx.toast.error).not.toHaveBeenCalled();
+  });
+  it("keeps the busy-agent guard for classic voice", () => {
+    const ctx = context({ isPluginVoice: false });
+    toggleRealtimeVoice(ctx);
+    expect(ctx.voice?.startVoice).not.toHaveBeenCalled();
+    expect(ctx.toast.error).toHaveBeenCalledWith("Interrupt first");
+  });
+  it("does not overlap a pending switch", () => {
+    const ctx = context();
+    ctx.voice!.isVoiceSwitching = true;
+    toggleRealtimeVoice(ctx);
+    expect(ctx.voice?.startVoice).not.toHaveBeenCalled();
   });
 });
