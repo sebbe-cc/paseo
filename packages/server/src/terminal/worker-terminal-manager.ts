@@ -1,3 +1,4 @@
+import { createTerminalProgramStopper, type TerminalStopOptions } from "./terminal-program-stop.js";
 import type { TerminalReplaySink, TerminalReplayMetadata } from "./terminal-replay.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
@@ -121,6 +122,7 @@ interface WorkerTerminalManagerOptions {
   // The kill path. The daemon passes the reaper, which verifies every program is gone; the
   // default asks the connected worker to shut down.
   closeTerminals?: () => Promise<void>;
+  stopProgram?: (id: string, options?: TerminalStopOptions) => Promise<void>;
 }
 
 /** The daemon's terminal manager: its terminals live in a worker that can outlive it. */
@@ -380,15 +382,8 @@ export function createWorkerTerminalManager(
       kill(): void {
         sendBestEffortRequest({ type: "killTerminal", terminalId: record.info.id });
       },
-      killAndWait(options?: {
-        gracefulTimeoutMs?: number;
-        forceTimeoutMs?: number;
-      }): Promise<void> {
-        return sendRequest({
-          type: "killTerminalAndWait",
-          terminalId: record.info.id,
-          ...(options ? { options } : {}),
-        }).then(() => undefined);
+      killAndWait(options?: TerminalStopOptions): Promise<void> {
+        return killTerminalAndWait(record.info.id, options);
       },
     };
 
@@ -431,9 +426,52 @@ export function createWorkerTerminalManager(
     }
   }
 
+  const pendingExits = new Map<
+    string,
+    Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }> | null
+  >();
+  const stopping = new Map<string, Promise<void>>();
+
+  function killTerminalAndWait(id: string, killOptions?: TerminalStopOptions): Promise<void> {
+    const existing = stopping.get(id);
+    if (existing) return existing;
+    if (!recordsById.has(id)) return Promise.resolve();
+    const result = (async () => {
+      if (managerOptions.stopProgram) {
+        if (!pendingExits.has(id)) pendingExits.set(id, null);
+        await managerOptions.stopProgram(id, killOptions);
+      }
+      try {
+        await sendRequest({
+          type: "killTerminalAndWait",
+          terminalId: id,
+          ...(killOptions ? { options: killOptions } : {}),
+        });
+      } catch (error) {
+        // The controller confirmed process death even if the old worker lost its ack.
+        if (!managerOptions.stopProgram) throw error;
+      }
+      const exit = pendingExits.get(id);
+      pendingExits.delete(id);
+      if (exit) handleTerminalExitEvent(exit);
+      else if (managerOptions.stopProgram && recordsById.has(id))
+        handleTerminalExitEvent({
+          type: "terminalExit",
+          terminalId: id,
+          info: { exitCode: null, signal: null, lastOutputLines: [] },
+        });
+    })().finally(() => stopping.delete(id));
+    stopping.set(id, result);
+    return result;
+  }
+
   function handleTerminalExitEvent(
     message: Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }>,
   ): void {
+    if (pendingExits.has(message.terminalId)) {
+      pendingExits.set(message.terminalId, message);
+      return;
+    }
     const record = recordsById.get(message.terminalId);
     if (!record) {
       return;
@@ -488,6 +526,7 @@ export function createWorkerTerminalManager(
   function handleTerminalCommandFinishedEvent(
     message: Extract<TerminalWorkerToParentMessage, { type: "terminalCommandFinished" }>,
   ): void {
+    if (pendingExits.has(message.terminalId)) return;
     const record = recordsById.get(message.terminalId);
     if (!record) {
       return;
@@ -914,16 +953,7 @@ export function createWorkerTerminalManager(
       });
     },
 
-    async killTerminalAndWait(
-      id: string,
-      options?: { gracefulTimeoutMs?: number; forceTimeoutMs?: number },
-    ): Promise<void> {
-      await sendRequest({
-        type: "killTerminalAndWait",
-        terminalId: id,
-        ...(options ? { options } : {}),
-      });
-    },
+    killTerminalAndWait,
 
     async captureTerminal(
       id: string,
@@ -1186,6 +1216,15 @@ export async function startWorkerTerminalManager(
         ? { getTerminalActivityUrl: options.getTerminalActivityUrl }
         : {}),
       closeTerminals: closeAll,
+      ...(process.platform === "win32"
+        ? {}
+        : {
+            stopProgram: createTerminalProgramStopper({
+              paseoHome: options.paseoHome,
+              recordId: record.recordId,
+              inspector,
+            }),
+          }),
     });
     const count = await manager.adoptTerminals();
     if (count > 0) {
