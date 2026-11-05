@@ -41,7 +41,10 @@ import {
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { dispatchTopWebOverlayKeyDown, keyBelongsToDomPopover } from "@/lib/overlay-root";
-import { pluginKeyboardShortcuts } from "@/plugins/keyboard-shortcuts";
+import {
+  canDispatchAfterScreenKeyDown,
+  pluginKeyboardShortcuts,
+} from "@/plugins/keyboard-shortcuts";
 import { setPluginActiveWorkspace } from "@/plugins/recent-navigation";
 
 export function useKeyboardShortcuts({
@@ -395,13 +398,13 @@ export function useKeyboardShortcuts({
   });
 
   // After-screen plugin shortcuts run in the bubble phase, once the focused
-  // screen had its chance: a handled key (defaultPrevented) or an overlay
-  // layer claiming Escape stays with the screen.
+  // screen had its chance: a handled key, an overlay layer claiming the key,
+  // or an in-progress IME composition stays with the screen.
   const handleAfterScreenKeyDown = useStableEvent((event: KeyboardEvent) => {
     if (!shouldHandle()) {
       return;
     }
-    if (event.defaultPrevented || keyBelongsToDomPopover(event)) {
+    if (!canDispatchAfterScreenKeyDown(event)) {
       return;
     }
     const store = useKeyboardShortcutsStore.getState();

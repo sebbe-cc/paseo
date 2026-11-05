@@ -3,6 +3,8 @@ import { parseShortcutString, type KeyCombo } from "@/keyboard/shortcut-string";
 import type { KeyboardShortcutInput } from "@/keyboard/keyboard-shortcuts";
 import type { ShortcutOverrides } from "@/keyboard/keyboard-shortcuts";
 import type { BrowserShortcutPrefix } from "@/desktop/browser/shortcuts";
+import { keyBelongsToDomPopover } from "@/lib/overlay-root";
+import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { pluginRecentNavigation } from "./recent-navigation";
 
 interface Registration extends PluginKeyboardShortcutContribution {
@@ -61,6 +63,25 @@ function usesModifier(combo: KeyCombo, key: string, isMac: boolean): boolean {
 function matchesReleaseKey(combo: KeyCombo, key: string): boolean {
   if (key === combo.code) return true;
   return combo.key !== undefined && key.toLowerCase() === combo.key.toLowerCase();
+}
+
+export interface AfterScreenKeyEvent {
+  readonly defaultPrevented: boolean;
+  readonly key: string;
+  readonly isComposing?: boolean;
+  readonly keyCode?: number;
+}
+
+/**
+ * Whether an after-screen plugin shortcut may run for this key event: the
+ * focused screen saw the key first, so a key it handled (defaultPrevented),
+ * an overlay layer claiming it, or an in-progress IME composition stays with
+ * the screen. The window bubble listener applies this before dispatching.
+ */
+export function canDispatchAfterScreenKeyDown(event: AfterScreenKeyEvent): boolean {
+  if (isImeComposingKeyboardEvent(event)) return false;
+  if (event.defaultPrevented || keyBelongsToDomPopover(event)) return false;
+  return true;
 }
 
 function dispatchPhase(

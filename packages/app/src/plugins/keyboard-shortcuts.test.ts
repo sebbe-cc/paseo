@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
+import { canDispatchAfterScreenKeyDown, pluginKeyboardShortcuts } from "./keyboard-shortcuts";
 
 vi.mock("./recent-navigation", () => ({
   pluginRecentNavigation: { getActive: () => ({ serverId: "host-a" }) },
@@ -239,6 +239,52 @@ test("releases a plain shortcut on its own key", () => {
   expect(other).toHaveBeenCalledOnce();
   pluginKeyboardShortcuts.release("Escape", true);
   expect(release).toHaveBeenCalledOnce();
+});
+
+test("after-screen routing skips IME composition keys", () => {
+  const onPress = vi.fn(() => true);
+  removers.push(
+    pluginKeyboardShortcuts.add("host-a", "example", {
+      combo: "Enter",
+      allowPlainKey: true,
+      phase: "after-screen",
+      onPress,
+    }),
+  );
+  const enter = {
+    code: "Enter",
+    key: "Enter",
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    repeat: false,
+    defaultPrevented: false,
+  };
+  // An ordinary Enter reaches the plugin through the after-screen routing.
+  expect(canDispatchAfterScreenKeyDown(enter)).toBe(true);
+  expect(pluginKeyboardShortcuts.dispatchAfterScreen(enter, true)).toBe(true);
+  expect(onPress).toHaveBeenCalledOnce();
+  // Confirming an IME candidate must never call the plugin.
+  onPress.mockClear();
+  expect(canDispatchAfterScreenKeyDown({ ...enter, isComposing: true })).toBe(false);
+  // A key the screen already handled stays with the screen too.
+  expect(canDispatchAfterScreenKeyDown({ ...enter, defaultPrevented: true })).toBe(false);
+  // Composition Escape (keyCode 229) is blocked the same way ...
+  const escapeComposing = {
+    code: "Escape",
+    key: "Escape",
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    repeat: false,
+    defaultPrevented: false,
+    keyCode: 229,
+  };
+  expect(canDispatchAfterScreenKeyDown(escapeComposing)).toBe(false);
+  // ... while an ordinary Escape still routes.
+  expect(canDispatchAfterScreenKeyDown({ ...escapeComposing, keyCode: 27 })).toBe(true);
 });
 
 test("keeps after-screen shortcuts out of browser tab prefixes", () => {
