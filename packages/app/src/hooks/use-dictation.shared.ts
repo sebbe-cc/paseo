@@ -11,6 +11,8 @@ export interface UseDictationOptions {
   canStart?: () => boolean;
   canConfirm?: () => boolean;
   enableDuration?: boolean;
+  /** The agent chat this composer belongs to. */
+  agentId?: string;
 }
 
 export interface UseDictationResult {
