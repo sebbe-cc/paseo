@@ -5,6 +5,9 @@ import net from "node:net";
 import express from "express";
 import { describe, expect, it } from "vitest";
 import pino from "pino";
+import { WebSocket, WebSocketServer } from "ws";
+import { once } from "node:events";
+import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import {
   buildLocalServiceHostname,
   buildPublicServiceHostname,
@@ -16,6 +19,72 @@ import {
 } from "./service-proxy.js";
 
 const logger = pino({ level: "silent" });
+
+function echoServiceWebSocket(ws: WebSocket, req: http.IncomingMessage): void {
+  ws.on("message", (data) => ws.send(`${req.url}:${data.toString()}`));
+}
+
+describe("service WebSocket routing on the daemon listener", () => {
+  it("forwards service upgrades while preserving daemon host and origin checks", async () => {
+    const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    upstream.on("connection", echoServiceWebSocket);
+    await once(upstream, "listening");
+    const clients: WebSocket[] = [];
+    const daemon = await createTestPaseoDaemon({
+      hostnames: [],
+      serviceProxy: { publicBaseUrl: "https://services.example.test" },
+    });
+    const connect = (host: string, requestPath = "/ws", origin?: string) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}${requestPath}`, {
+        headers: { host },
+        origin,
+        handshakeTimeout: 3000,
+      });
+      clients.push(ws);
+      return ws;
+    };
+    try {
+      const route = daemon.daemon.serviceProxy.registerWorkspaceService({
+        workspaceId: "workspace-ws",
+        projectSlug: "repo",
+        branchName: "feature",
+        scriptName: "dev",
+        publicBaseUrl: "https://services.example.test",
+        port: (upstream.address() as net.AddressInfo).port,
+      });
+      const publicHostname = "dev--feature--repo.services.example.test";
+      expect(route.publicHostname).toBe(publicHostname);
+      for (const host of [publicHostname, route.hostname]) {
+        for (const requestPath of ["/ws", "/hmr?token=test"]) {
+          const ws = connect(host, requestPath, `https://${host}`);
+          await once(ws, "open");
+          const reply = once(ws, "message");
+          ws.send("hello");
+          expect((await reply)[0].toString()).toBe(`${requestPath}:hello`);
+          ws.close();
+          await once(ws, "close");
+        }
+      }
+
+      const daemonWs = connect(`localhost:${daemon.port}`);
+      await once(daemonWs, "open");
+      daemonWs.close();
+      await once(daemonWs, "close");
+
+      await expect(once(connect("foreign.example.test"), "open")).rejects.toThrow(
+        "Unexpected server response: 403",
+      );
+      await expect(
+        once(connect(`localhost:${daemon.port}`, "/ws", "https://foreign.example.test"), "open"),
+      ).rejects.toThrow("Unexpected server response: 403");
+    } finally {
+      for (const ws of clients) ws.terminate();
+      for (const ws of upstream.clients) ws.terminate();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await daemon.close();
+    }
+  });
+});
 
 function readServerSourceFiles(dir = path.resolve(import.meta.dirname)): string[] {
   const entries: string[] = [];
