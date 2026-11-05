@@ -1967,11 +1967,15 @@ export async function createPaseoDaemon(
   const stop = async (options?: { keepTerminals?: boolean }) => {
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
+    // Arm the AgentManager shutdown guard before the first await: a turn that
+    // fails during capture or any awaited teardown step below (a pi RPC
+    // process exits on its own ~20 ms after the shutdown request) is still
+    // unfinished work and must stay running for restart recovery.
     // Snapshot restart-resume candidates before anything tears down: stopping
-    // providers can fail in-flight turns (a pi RPC process exits on its own
-    // ~20 ms after the shutdown request), and a failed turn no longer looks
-    // running. AgentManager additionally keeps turns that fail during shutdown
-    // as running, so the intent recorded here survives until close.
+    // providers can fail in-flight turns, and a failed turn no longer looks
+    // running. The guard above keeps such turns running, so the intent
+    // recorded here survives until close.
+    agentManager.prepareForShutdown();
     await restartRecovery.captureRunningAgents();
     localCredential = null;
     await deleteLocalCredential(config.paseoHome);
@@ -1990,7 +1994,8 @@ export async function createPaseoDaemon(
     wsServer?.prepareForShutdown();
     await finishSubscriptions.close();
     await wsServer?.agentMessages.close();
-    agentManager.prepareForShutdown();
+    // Guard was armed on stop() entry (see above) so it covers the whole
+    // teardown, not just the agent close.
     await closeAllAgents(logger, agentManager);
     await withTimeout({
       promise: pluginRuntime.drainEvents(),

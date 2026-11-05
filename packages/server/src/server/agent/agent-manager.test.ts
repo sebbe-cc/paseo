@@ -2142,6 +2142,108 @@ test("turn failing after shutdown begins stays running so restart recovery keeps
   }
 });
 
+test("turn failing mid-teardown after the early shutdown guard stays eligible for restart resume", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-shutdown-mid-teardown-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  // stop() arms the shutdown guard before its first await, then captures
+  // running agents, then awaits teardown steps (credential delete, hub stop,
+  // ...) during which a provider process (pi) can exit on its own and fail
+  // the in-flight turn. This replays that order: without the early guard the
+  // failure below takes the normal error path and applySnapshot clears the
+  // captured resumeOnStartup flag, so a restarted daemon never resumes.
+  class MidTeardownFailSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      return { turnId: "turn-mid-teardown-1" };
+    }
+  }
+
+  class MidTeardownFailClient extends TestAgentClient {
+    readonly sessions: MidTeardownFailSession[] = [];
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      const session = new MidTeardownFailSession(config);
+      this.sessions.push(session);
+      return session;
+    }
+  }
+
+  const client = new MidTeardownFailClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+  });
+
+  try {
+    const agent = await manager.createAgent(
+      {
+        provider: "codex",
+        cwd: workdir,
+      },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    const dispatch = await startAgentRun(manager, agent.id, "work", logger);
+    expect(dispatch.disposition).toBe("turn_started");
+    const session = client.sessions[0];
+    expect(session).toBeDefined();
+    session?.pushEvent({ type: "turn_started", provider: "codex", turnId: "turn-mid-teardown-1" });
+    await manager.flush();
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("running");
+
+    // stop() entry: the shutdown guard is armed before the first await.
+    manager.prepareForShutdown();
+
+    // What restartRecovery.captureRunningAgents() records while the turn
+    // still looks running.
+    await storage.flush();
+    const captured = await storage.get(agent.id);
+    expect(captured?.lastStatus).toBe("running");
+    await storage.upsert({ ...captured!, resumeOnStartup: true });
+    await storage.flush();
+
+    // An awaited teardown step passes; the provider process exits on its own
+    // during it and the in-flight turn fails.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    session?.pushEvent({
+      type: "turn_failed",
+      provider: "codex",
+      turnId: "turn-mid-teardown-1",
+      error: "provider process exited",
+    });
+    await manager.flush();
+    await storage.flush();
+
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("running");
+    expect(await storage.get(agent.id)).toMatchObject({
+      lastStatus: "running",
+      resumeOnStartup: true,
+    });
+
+    await manager.closeAgent(agent.id);
+    await manager.flush();
+    await storage.flush();
+
+    // A restarted daemon reads the persisted record from disk:
+    // prepareStartup resumes it when resumeOnStartup is still set (or the
+    // status is still running).
+    const restarted = new AgentStorage(storagePath, logger);
+    const persisted = await restarted.get(agent.id);
+    expect(persisted?.resumeOnStartup === true || persisted?.lastStatus === "running").toBe(true);
+    expect(persisted).toMatchObject({
+      lastStatus: "closed",
+      resumeOnStartup: true,
+    });
+  } finally {
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("reload does not create a replacement when the closed snapshot cannot be persisted", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-persist-failure-test-"));
   const storagePath = join(workdir, "agents");
