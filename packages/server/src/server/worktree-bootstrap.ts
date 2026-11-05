@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
+import { watchWorkspaceScript } from "./workspace-script-lifecycle.js";
 import {
   getScriptConfigs,
   getWorktreeTerminalSpecs,
@@ -518,6 +519,12 @@ async function acquireWorkspaceScriptTerminal(params: {
 export async function spawnWorkspaceScript(
   options: SpawnWorkspaceScriptOptions,
 ): Promise<WorktreeScriptResult> {
+  return options.runtimeStore.withScriptLock(options, () => spawnWorkspaceScriptUnlocked(options));
+}
+
+async function spawnWorkspaceScriptUnlocked(
+  options: SpawnWorkspaceScriptOptions,
+): Promise<WorktreeScriptResult> {
   const {
     repoRoot,
     workspaceId,
@@ -598,58 +605,22 @@ export async function spawnWorkspaceScript(
       lifecycle: "running",
       terminalId: terminal.id,
       exitCode: null,
+      cwd: repoRoot,
+      ...(port === null ? {} : { port }),
+      projectSlug,
+      branchName,
     });
     runtimeRegistered = true;
+    await runtimeStore.flush();
 
-    const stopRuntimeIfCurrent = (input: { exitCode: number | null; removeRoute: boolean }) => {
-      const current = runtimeStore.get({ workspaceId, scriptName });
-      if (current?.terminalId !== terminal.id || current.lifecycle !== "running") {
-        return;
-      }
-
-      disposeLifecycleListeners?.();
-      disposeLifecycleListeners = null;
-
-      if (input.removeRoute && hostname) {
-        serviceProxy.removeWorkspaceService({ workspaceId, scriptName });
-      }
-      runtimeStore.set({
-        workspaceId,
-        scriptName,
-        type: scriptType,
-        lifecycle: "stopped",
-        terminalId: terminal.id,
-        exitCode: input.exitCode,
-      });
-      onLifecycleChanged?.();
-      logger?.info(
-        {
-          scriptName,
-          hostname,
-          exitCode: input.exitCode,
-          terminalId: terminal.id,
-        },
-        "Stopped worktree script",
-      );
-    };
-
-    const unsubscribeExit = terminal.onExit((info) => {
-      stopRuntimeIfCurrent({
-        exitCode: info.exitCode,
-        removeRoute: true,
-      });
+    disposeLifecycleListeners = watchWorkspaceScript({
+      terminal,
+      runtimeStore,
+      serviceProxy,
+      workspaceId,
+      scriptName,
+      onLifecycleChanged,
     });
-
-    let unsubscribeCommandFinished: (() => void) | null = null;
-    if (!serviceScript) {
-      unsubscribeCommandFinished = terminal.onCommandFinished((info) => {
-        stopRuntimeIfCurrent({ exitCode: info.exitCode, removeRoute: false });
-      });
-    }
-    disposeLifecycleListeners = () => {
-      unsubscribeExit();
-      unsubscribeCommandFinished?.();
-    };
 
     if (!reusableTerminal) {
       await waitForTerminalBootstrapReadiness(terminal);
