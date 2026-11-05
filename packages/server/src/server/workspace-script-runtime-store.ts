@@ -14,6 +14,11 @@ const runtimeEntrySchema = z.object({
   port: z.number().int().min(1).max(65535).optional(),
   projectSlug: z.string().optional(),
   branchName: z.string().nullable().optional(),
+  // Worker-side command completion seq when the run was launched. Restore marks
+  // the run stopped when the worker has seen a later completion. Absent on
+  // entries written before the worker tracked completions; then restore trusts
+  // the journal as before.
+  commandSeq: z.number().int().min(0).optional(),
 });
 const journalSchema = z.object({ version: z.literal(1), entries: z.array(runtimeEntrySchema) });
 
@@ -28,6 +33,7 @@ export interface ScriptRuntimeEntry {
   port?: number;
   projectSlug?: string;
   branchName?: string | null;
+  commandSeq?: number;
 }
 
 interface RuntimeEntryKey {

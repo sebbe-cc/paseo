@@ -64,7 +64,10 @@ import {
   terminalWorkerRecordPath,
   type TerminalWorkerRecord,
 } from "./terminal-worker-record.js";
-import { TERMINAL_WORKER_PROTOCOL_OVERRIDE_ENV } from "./terminal-worker-protocol.js";
+import {
+  TERMINAL_WORKER_PROTOCOL_OVERRIDE_ENV,
+  TERMINAL_WORKER_PROTOCOL_VERSION,
+} from "./terminal-worker-protocol.js";
 import {
   NoTerminalWorkerAvailableError,
   TerminalWorkerIncompatibleError,
@@ -1633,19 +1636,19 @@ it.each([1, 4])(
     expect(manager.getTerminal(old.terminalId)).toBeUndefined();
     const workers = await workerRecords(paseoHome);
     expect(workers).toHaveLength(1);
-    expect(workers[0]!.protocolVersion).toBe(5);
+    expect(workers[0]!.protocolVersion).toBe(TERMINAL_WORKER_PROTOCOL_VERSION);
   },
 );
 
 it("leaves a worker from a newer Paseo running, reports it incompatible, and closes it on a kill stop", async () => {
   const paseoHome = createTemporaryHome();
-  const newer = await leaveWorkerWithTerminal(paseoHome, 6);
+  const newer = await leaveWorkerWithTerminal(paseoHome, TERMINAL_WORKER_PROTOCOL_VERSION + 1);
 
   manager = await startRealWorkerManager({ paseoHome });
 
   const unavailable = manager.getUnavailableError?.();
   expect(unavailable).toBeInstanceOf(TerminalWorkerIncompatibleError);
-  expect(unavailable?.message).toContain("worker protocol 6");
+  expect(unavailable?.message).toContain(`worker protocol ${TERMINAL_WORKER_PROTOCOL_VERSION + 1}`);
   await expect(manager.getTerminals(newer.cwd)).rejects.toBeInstanceOf(
     TerminalWorkerIncompatibleError,
   );
@@ -2658,3 +2661,28 @@ it.each([false, true])(
   },
   45000,
 );
+
+it("retains the last command completion in the worker across detach and adoption", async () => {
+  const paseoHome = createTemporaryHome();
+  manager = await startRealWorkerManager({ paseoHome });
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-completion-"));
+  temporaryDirs.push(cwd);
+  // A plain shell with no integration: the only completion is the one emitted below.
+  const session = await manager.createTerminal({
+    workspaceId: "ws-completion",
+    cwd,
+    command: "/bin/sh",
+    args: [],
+  });
+  session.send({ type: "input", data: "printf '\\033]633;D;7\\007'\r" });
+  await waitForCondition(() => session.getLastCommandFinished()?.seq === 1, 10000);
+  expect(session.getLastCommandFinished()).toEqual({ seq: 1, exitCode: 7 });
+  // The daemon lets go with --keep-terminals semantics; a new daemon adopts the
+  // same worker and must see the same retained completion.
+  await manager.detach();
+  manager = await startRealWorkerManager({ paseoHome });
+  expect(manager.getTerminal(session.id)?.getLastCommandFinished()).toEqual({
+    seq: 1,
+    exitCode: 7,
+  });
+});

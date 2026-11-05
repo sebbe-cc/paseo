@@ -13,6 +13,7 @@ import type {
   ClientMessage,
   ServerMessage,
   TerminalActivityTransition,
+  TerminalCommandCompletionState,
   TerminalCommandFinishedInfo,
   TerminalExitInfo,
   TerminalSession,
@@ -94,6 +95,9 @@ interface WorkerTerminalRecord {
   info: RequiredWorkerTerminalInfo;
   state: WorkerTerminalState;
   activity: TerminalActivity | null;
+  // Worker-retained last command completion, populated from adoption and live
+  // events. Null when none has been seen or the worker does not report it.
+  lastCommandFinished: TerminalCommandCompletionState | null;
   // Cached input-mode preamble from the worker (the authoritative tracker lives
   // in the worker process). Updated with streamed output and snapshot responses.
   replayPreamble: string;
@@ -245,11 +249,13 @@ export function createWorkerTerminalManager(
   function registerRecord(input: {
     info: RequiredWorkerTerminalInfo;
     state: WorkerTerminalState;
+    lastCommandFinished?: TerminalCommandCompletionState | null;
   }): TerminalSession {
     const existing = recordsById.get(input.info.id);
     if (existing) {
       existing.info = cloneTerminalInfo(input.info);
       existing.state = input.state;
+      existing.lastCommandFinished = input.lastCommandFinished ?? null;
       return existing.session;
     }
 
@@ -257,6 +263,7 @@ export function createWorkerTerminalManager(
       info: cloneTerminalInfo(input.info),
       state: input.state,
       activity: input.info.activity,
+      lastCommandFinished: input.lastCommandFinished ?? null,
       replayPreamble: "",
       exitInfo: null,
       messageListeners: new Set(),
@@ -314,6 +321,9 @@ export function createWorkerTerminalManager(
         return () => {
           record.commandFinishedListeners.delete(listener);
         };
+      },
+      getLastCommandFinished(): TerminalCommandCompletionState | null {
+        return record.lastCommandFinished;
       },
       onTitleChange(listener: (title?: string) => void): () => void {
         record.titleChangeListeners.add(listener);
@@ -492,8 +502,14 @@ export function createWorkerTerminalManager(
     if (!record) {
       return;
     }
+    // Workers older than protocol 6 send no seq; their completions still reach
+    // listeners, but the mirror stays unknown and restore trusts the journal.
+    if (typeof message.info.seq === "number") {
+      record.lastCommandFinished = { seq: message.info.seq, exitCode: message.info.exitCode };
+    }
+    const info: TerminalCommandFinishedInfo = { exitCode: message.info.exitCode };
     for (const listener of Array.from(record.commandFinishedListeners)) {
-      listener(message.info);
+      listener(info);
     }
   }
 
@@ -766,7 +782,11 @@ export function createWorkerTerminalManager(
     }
     for (const item of listed) {
       const info = asRequiredWorkerTerminalInfo(item.terminal);
-      registerRecord({ info, state: item.state });
+      registerRecord({
+        info,
+        state: item.state,
+        lastCommandFinished: item.lastCommandFinished ?? null,
+      });
       const record = recordsById.get(info.id);
       if (record) {
         record.replayPreamble = item.replayPreamble;
