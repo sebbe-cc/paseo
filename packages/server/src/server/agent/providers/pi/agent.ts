@@ -495,8 +495,8 @@ function buildResumeConfig(
 // after the session file was deleted silently drops all context while the
 // persisted nativeHandle keeps pointing at the old path (pa-vigk.5/D4). Refuse
 // the resume instead: the failure surfaces through the normal resume-failure
-// channels (rpc_error agent_resume_failed + activity-log error, "Agent restart
-// recovery failed" on the startup sweep) instead of an empty session.
+// channels (rpc_error agent_resume_failed + activity-log error, stored error
+// attention on the startup sweep) instead of an empty session.
 function assertPiResumeSessionFilePresent(sessionFile: string, sessionId: string): void {
   if (!looksLikePiSessionFilePath(sessionFile)) {
     // An opaque Pi session id: pi resolves it to its own session file, so

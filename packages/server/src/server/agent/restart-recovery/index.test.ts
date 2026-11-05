@@ -29,17 +29,23 @@ test("recovery saves intent before normalization, clears before dispatch, and re
       );
     }
     const dispatched: string[] = [];
+    const reported: Array<{ id: string; error: unknown }> = [];
     const recovery = createRestartRecovery({
       storage,
       settings: () => ({ enabled: true, prompt: "Continue verbatim.\n" }),
       eligible: async () => true,
       dispatch: async (id, prompt) => {
         expect((await storage.get(id))?.resumeOnStartup).toBe(false);
-        if (id === "broken") throw new Error("unavailable");
+        if (id === "broken")
+          throw new Error(
+            'Cannot resume Pi session "broken": session file is missing: /tmp/pi-sessions/broken.jsonl. The previous context is unavailable. Restore the file or start a new session instead.',
+          );
         if (id === "stuck") return new Promise(() => {});
         dispatched.push(id + prompt);
       },
-      report: () => {},
+      report: (id, error) => {
+        reported.push({ id, error });
+      },
     });
     await recovery.prepareStartup();
     expect((await storage.get("working"))?.resumeOnStartup).toBe(true);
@@ -50,6 +56,11 @@ test("recovery saves intent before normalization, clears before dispatch, and re
     await recovery.waitForResume("working", running);
     await recovery.waitForResume("idle", running);
     expect(dispatched).toEqual(["workingContinue verbatim.\n"]);
+    // A resume that fails before registration (e.g. a missing Pi session
+    // file) reaches the report hook with the agent id and the error, so the
+    // startup wiring can surface it as stored error attention.
+    expect(reported.map(({ id }) => id)).toEqual(["broken"]);
+    expect(String((reported[0]?.error as Error)?.message)).toContain("session file is missing");
     const stopped = new AbortController();
     stopped.abort();
     await expect(recovery.waitForResume("stuck", stopped.signal)).rejects.toBeDefined();
