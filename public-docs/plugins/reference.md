@@ -318,18 +318,25 @@ const caps = actions?.getCapabilities(); // { voiceInput, panelScroll }
 Probe each part separately with `getCapabilities()`: voice and panel scroll go live
 independently. Joystick navigation is gated under `panelScroll` — there is no separate
 joystick flag. Voice hold-to-talk starts the app's existing dictation pipeline for the
-exact `{serverId, agentId}` target; releasing stops the pipeline and delivers the
-transcript to that agent. An empty transcript sends nothing. Starting a new session
-retires the previous one, and the app stops the microphone on dropped release, window
-change, and disconnect as the last guarantor.
+exact `{serverId, agentId}` target; releasing stops the microphone first, flushes the
+final partial second of speech, and delivers the transcript to that agent. An empty
+transcript sends nothing. A release during pending microphone acquisition never
+enables recording. Starting a new session retires the previous one without delivery,
+and the app stops the microphone on dropped release, window change, and disconnect
+as the last guarantor. Scrolling resolves the real scroll viewport from the focused
+element (overflow and dimensions, never the focused input itself).
 
 ```ts
 await actions?.startVoiceInput({ serverId, agentId });
 // ... while the control is held ...
 await actions?.stopVoiceInput(); // delivers the transcript to the agent
 actions?.scrollFocusedPanel("down", "page"); // works without a mounted plugin panel
-actions?.navigatePanel("history"); // up/down: history/sidebar, left/right: back/forward
+actions?.navigatePanel("back"); // back/forward ride the real session history
 ```
+
+Navigation advertises only implemented operations: `back`/`forward` navigate for
+real, while `history`/`sidebar` throw an unsupported error naming the missing app
+wiring instead of silently succeeding — surface that reason, never a fallback.
 
 Agent interruption and provider mode controls are separate SDK calls on the agent
 handle (`cancel()`, `setMode()`, `setModel()`, `setFeature()`), not part of this

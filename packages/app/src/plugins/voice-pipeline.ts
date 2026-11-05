@@ -30,10 +30,15 @@ export interface VoicePipelineDaemonClient extends DictationStreamClient {
   subscribeConnectionStatus(listener: (state: { status: string }) => void): () => void;
 }
 
-/** Headless mic capture: PCM16 base64 segments via onPcmSegment until stop(). */
+/**
+ * Headless mic capture: PCM16 base64 segments via onPcmSegment until stop().
+ * stop() is release (flushes the final partial chunk); cancel() discards
+ * buffered audio without delivering it.
+ */
 export interface VoiceAudioSource {
   start(): Promise<void>;
   stop(): Promise<void>;
+  cancel(): Promise<void>;
 }
 
 export interface VoiceAudioSourceConfig {
@@ -99,10 +104,11 @@ export function createDesktopVoicePipeline(
     active = null;
     disarmLoss();
     if (!session) return;
-    // Mic off first; the stream is cancelled, never delivered.
+    // Mic off first; buffered audio is discarded (never delivered from a
+    // retired session), then the stream is cancelled.
     void (async () => {
       try {
-        await session.source.stop();
+        await session.source.cancel();
       } catch {
         // The mic is already gone; still cancel the stream below.
       }

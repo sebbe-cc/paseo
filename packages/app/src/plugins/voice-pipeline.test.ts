@@ -79,6 +79,7 @@ class FakeDaemonClient {
 class FakeAudioSource implements VoiceAudioSource {
   started = false;
   stopped = 0;
+  cancelled = 0;
   failStart = false;
   private config: VoiceAudioSourceConfig | null = null;
 
@@ -93,6 +94,11 @@ class FakeAudioSource implements VoiceAudioSource {
 
   async stop(): Promise<void> {
     this.stopped += 1;
+    this.started = false;
+  }
+
+  async cancel(): Promise<void> {
+    this.cancelled += 1;
     this.started = false;
   }
 
@@ -171,7 +177,12 @@ describe("desktop voice pipeline", () => {
     await pipeline.start(TARGET);
     sources[0].emitPcm("cGNtMQ==");
     await pipeline.start({ serverId: "srv", agentId: "agent-2" });
+    // Abandonment is fire-and-forget; let its microtasks land.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sources[0].started).toBe(false);
+    // Retired sessions are cancelled (buffer discarded), never released.
+    expect(sources[0].cancelled).toBe(1);
+    expect(sources[0].stopped).toBe(0);
     expect(sources).toHaveLength(2);
     sources[1].emitPcm("cGNtMg==");
     await pipeline.stop();

@@ -110,19 +110,26 @@ export function createVoiceAudioSource(
   let context: VoiceCaptureAudioContext | null = null;
   let started = false;
   let pending = new Int16Array(0);
+  // code-1: every stop/cancel retires the current generation. A start whose
+  // microphone acquisition was still pending (permission dialog, slow device)
+  // resolves stale: its tracks are stopped and it never enables recording.
+  let generation = 0;
+
+  function stopTracks(target: VoiceCaptureStream | null): void {
+    if (!target) return;
+    for (const track of target.getTracks()) {
+      try {
+        track.stop();
+      } catch {
+        // no-op
+      }
+    }
+  }
 
   function teardown(): void {
     started = false;
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        try {
-          track.stop();
-        } catch {
-          // no-op
-        }
-      }
-      stream = null;
-    }
+    stopTracks(stream);
+    stream = null;
     if (context) {
       const closing = context;
       context = null;
@@ -133,6 +140,7 @@ export function createVoiceAudioSource(
 
   return {
     async start(): Promise<void> {
+      const gen = generation;
       const mic = await platform.getUserMedia({
         audio: {
           channelCount: 1,
@@ -141,15 +149,16 @@ export function createVoiceAudioSource(
           autoGainControl: true,
         },
       });
+      if (gen !== generation) {
+        // Released (or blurred/disconnected) while acquisition was pending:
+        // never enable recording for a hold that already ended. A later new
+        // hold runs under a newer generation and is unaffected.
+        stopTracks(mic);
+        return;
+      }
       const audioContext = platform.createAudioContext();
       if (!audioContext) {
-        for (const track of mic.getTracks()) {
-          try {
-            track.stop();
-          } catch {
-            // no-op
-          }
-        }
+        stopTracks(mic);
         throw new Error("AudioContext unavailable");
       }
       stream = mic;
@@ -187,7 +196,29 @@ export function createVoiceAudioSource(
       }
     },
 
+    // code-2: normal release. New audio is refused first, then the final
+    // partial chunk is flushed so a hold shorter than one second — or the
+    // tail of any hold — still reaches the dictation sender. teardown()
+    // clears the buffer afterwards.
     async stop(): Promise<void> {
+      generation += 1;
+      started = false;
+      if (pending.length > 0) {
+        const tail = pending;
+        pending = new Int16Array(0);
+        try {
+          config.onPcmSegment(int16ToBase64(tail));
+        } catch (error) {
+          config.onError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+      teardown();
+    },
+
+    // code-2: cancellation discards. A retired session (new press, capture
+    // error, teardown) must never deliver audio it did not release.
+    async cancel(): Promise<void> {
+      generation += 1;
       teardown();
     },
   };

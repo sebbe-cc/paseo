@@ -63,6 +63,10 @@ class FakePlatform implements VoiceCapturePlatform {
   stoppedTracks = 0;
   failGetUserMedia = false;
   noAudioContext = false;
+  private deferred: {
+    promise: Promise<VoiceCaptureStream>;
+    resolve: (stream: VoiceCaptureStream) => void;
+  } | null = null;
   stream: VoiceCaptureStream = {
     getTracks: () => [
       {
@@ -73,8 +77,23 @@ class FakePlatform implements VoiceCapturePlatform {
     ],
   };
 
+  /** Next getUserMedia() stays pending until releaseDeferred() (permission dialog). */
+  armDeferred(): void {
+    let resolve!: (stream: VoiceCaptureStream) => void;
+    const promise = new Promise<VoiceCaptureStream>((accept) => {
+      resolve = accept;
+    });
+    this.deferred = { promise, resolve };
+  }
+
+  releaseDeferred(): void {
+    this.deferred?.resolve(this.stream);
+    this.deferred = null;
+  }
+
   async getUserMedia(): Promise<VoiceCaptureStream> {
     if (this.failGetUserMedia) throw new Error("Permission denied");
+    if (this.deferred) return this.deferred.promise;
     return this.stream;
   }
 
@@ -116,6 +135,9 @@ describe("voice capture", () => {
     const bytes = Buffer.from(segments[0], "base64");
     expect(bytes.length).toBe(16000 * 2);
     await source?.stop();
+    // code-2: release flushes the 384-sample tail as a second segment.
+    expect(segments).toHaveLength(2);
+    expect(Buffer.from(segments[1], "base64").length).toBe(384 * 2);
     expect(platform.stoppedTracks).toBe(1);
     expect(platform.contexts[0].closed).toBe(true);
   });
@@ -143,5 +165,74 @@ describe("voice capture", () => {
     const source = createVoiceAudioSource({ onPcmSegment: () => undefined }, platform);
     await expect(source?.stop()).resolves.toBeUndefined();
     expect(platform.stoppedTracks).toBe(0);
+  });
+
+  it("code-2: sub-second speech is preserved as one tail segment", async () => {
+    const platform = new FakePlatform();
+    const segments: string[] = [];
+    const source = createVoiceAudioSource(
+      { onPcmSegment: (segment) => segments.push(segment) },
+      platform,
+    );
+    await source?.start();
+    // Two callbacks: 8192 samples, no full chunk while held.
+    for (let i = 0; i < 2; i++) {
+      platform.contexts[0].processors[0]?.fire(sineFrames(4096));
+    }
+    expect(segments).toHaveLength(0);
+    await source?.stop();
+    expect(segments).toHaveLength(1);
+    expect(Buffer.from(segments[0], "base64").length).toBe(8192 * 2);
+    expect(platform.stoppedTracks).toBe(1);
+  });
+
+  it("code-2: cancel discards buffered audio instead of flushing it", async () => {
+    const platform = new FakePlatform();
+    const segments: string[] = [];
+    const source = createVoiceAudioSource(
+      { onPcmSegment: (segment) => segments.push(segment) },
+      platform,
+    );
+    await source?.start();
+    for (let i = 0; i < 2; i++) {
+      platform.contexts[0].processors[0]?.fire(sineFrames(4096));
+    }
+    await source?.cancel();
+    expect(segments).toHaveLength(0);
+    expect(platform.stoppedTracks).toBe(1);
+    expect(platform.contexts[0].closed).toBe(true);
+  });
+
+  it("code-1: release during deferred acquisition never enables recording", async () => {
+    const platform = new FakePlatform();
+    platform.armDeferred();
+    const segments: string[] = [];
+    const source = createVoiceAudioSource(
+      { onPcmSegment: (segment) => segments.push(segment) },
+      platform,
+    );
+    // Hold starts; the permission dialog keeps getUserMedia pending.
+    const starting = source?.start();
+    await Promise.resolve();
+    // Release (or window blur / daemon disconnect) retires the hold.
+    await source?.stop();
+    // Permission granted afterwards: stale result must not record.
+    platform.releaseDeferred();
+    await starting;
+    expect(platform.contexts).toHaveLength(0);
+    expect(segments).toHaveLength(0);
+    // The stale mic stream is stopped, never graphed.
+    expect(platform.stoppedTracks).toBe(1);
+    // A later new hold works normally.
+    const second = createVoiceAudioSource(
+      { onPcmSegment: (segment) => segments.push(segment) },
+      platform,
+    );
+    await second?.start();
+    expect(platform.contexts).toHaveLength(1);
+    platform.contexts[0].processors[0]?.fire(sineFrames(4096));
+    await second?.stop();
+    expect(segments).toHaveLength(1);
+    expect(platform.stoppedTracks).toBe(2);
   });
 });

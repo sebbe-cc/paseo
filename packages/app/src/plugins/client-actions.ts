@@ -238,19 +238,50 @@ interface DomScrollNode {
   scrollBy?(options: { top: number }): void;
   parentElement?: DomScrollNode | null;
   clientHeight?: unknown;
+  scrollHeight?: unknown;
+}
+
+interface DomComputedStyle {
+  overflowY?: unknown;
 }
 
 interface DomScrollHost {
-  querySelector(selector: string): DomScrollNode | null;
   activeElement?: DomScrollNode | null;
+  getComputedStyle?(element: DomScrollNode): DomComputedStyle | null;
 }
 
-function findScrollableAncestor(element: DomScrollNode): DomScrollNode | null {
+/**
+ * code-3: a node is a vertical scroll viewport only when content overflows
+ * it (scrollHeight > clientHeight > 0) and CSS allows scrolling
+ * (overflow-y auto/scroll where style info is available). Method presence
+ * alone is not enough: inputs, buttons and plain pane wrappers all expose
+ * scrollBy without being scrollable.
+ */
+function isScrollableViewport(node: DomScrollNode, host: DomScrollHost): boolean {
+  if (typeof node.scrollBy !== "function") return false;
+  if (typeof node.clientHeight !== "number" || !(node.clientHeight > 0)) return false;
+  if (typeof node.scrollHeight !== "number" || !(node.scrollHeight > node.clientHeight)) {
+    return false;
+  }
+  if (typeof host.getComputedStyle === "function") {
+    const style = host.getComputedStyle(node);
+    const overflowY = style?.overflowY;
+    if (typeof overflowY === "string" && overflowY !== "auto" && overflowY !== "scroll") {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findScrollableAncestor(element: DomScrollNode, host: DomScrollHost): DomScrollNode | null {
   let current: DomScrollNode | null = element;
   const seen = new Set<DomScrollNode>();
   while (current && !seen.has(current)) {
     seen.add(current);
-    if (typeof current.scrollBy === "function") return current;
+    // Start at the focused element itself: a focused multiline composer is
+    // a real viewport. Non-overflowing inputs/buttons/wrappers are skipped
+    // so scrolling reaches the timeline viewport instead.
+    if (isScrollableViewport(current, host)) return current;
     // Structural DOM hosts expose parentage through `parentElement`; plain
     // fakes simply terminate the walk by omitting it.
     current = current.parentElement ?? null;
@@ -259,10 +290,12 @@ function findScrollableAncestor(element: DomScrollNode): DomScrollNode | null {
 }
 
 /**
- * DOM resolver for the focused panel: prefers the focused pane marker and
- * falls back to the focused element's scrollable ancestor. Works without a
- * mounted plugin panel. Returns null (→ panelScroll unsupported) where no
- * document exists (native, SSR, bare node).
+ * DOM resolver for the focused panel: walks from the focused element to the
+ * nearest real scroll viewport (overflow + dimensions, no marker query —
+ * code-3: no producer of data-focused-pane exists in the app, so a marker
+ * lookup can never supply the pane). Works without a mounted plugin panel.
+ * Returns null (→ panelScroll unsupported) where no document exists
+ * (native, SSR, bare node) or nothing focused is inside a viewport.
  */
 export function createDomPanelResolver(doc?: DomScrollHost): FocusedPanelResolver | null {
   const host =
@@ -273,11 +306,9 @@ export function createDomPanelResolver(doc?: DomScrollHost): FocusedPanelResolve
   if (!host) return null;
   return {
     resolveFocusedScrollablePanel: () => {
-      const marked = host.querySelector("[data-focused-pane='true']");
-      const start = marked ?? host.activeElement ?? null;
+      const start = host.activeElement ?? null;
       if (!start) return null;
-      const scrollable =
-        typeof start.scrollBy === "function" ? start : findScrollableAncestor(start);
+      const scrollable = findScrollableAncestor(start, host);
       if (!scrollable || typeof scrollable.scrollBy !== "function") return null;
       const viewportHeight =
         typeof scrollable.clientHeight === "number" ? scrollable.clientHeight : 0;
@@ -298,31 +329,45 @@ interface HistoryLike {
 
 interface WebNavigatorHost {
   history?: HistoryLike;
-  dispatchPanelEvent?(name: "paseo:open-history" | "paseo:open-sidebar"): void;
 }
 
 function defaultWebNavigatorHost(): WebNavigatorHost | null {
-  const candidate = (globalThis as { window?: unknown }).window as
-    | (WebNavigatorHost & { dispatchEvent?: unknown; CustomEvent?: unknown })
-    | undefined;
+  const candidate = (globalThis as { window?: unknown }).window as WebNavigatorHost | undefined;
   if (!candidate) return null;
-  if (!candidate.history && !candidate.dispatchPanelEvent) return null;
+  if (!candidate.history) return null;
   return candidate;
 }
 
 /**
- * Best-effort web navigator: back/forward ride the real session history;
- * history/sidebar dispatch documented `paseo:*` panel events for the app
- * shell to honor. Sector behavior stays a working assumption until
- * capture proof confirms it.
+ * code-4/S2: the app-owned navigation path. Back/forward ride the real
+ * session history (the desktop/web app routes on window.history —
+ * see utils/host-route-browser.ts), so they visibly navigate. History
+ * and sidebar panels have no headless app seam outside React: no store,
+ * no command, no event producer/consumer exists in packages/app/src,
+ * so they report unsupported instead of silently succeeding. Only
+ * implemented operations are advertised — never an optional no-op.
  */
 export function createWebPanelNavigator(host?: WebNavigatorHost): PanelNavigator | null {
   const resolved = host ?? defaultWebNavigatorHost();
   if (!resolved) return null;
+  const history = resolved.history;
+  if (!history || typeof history.back !== "function" || typeof history.forward !== "function") {
+    return null;
+  }
   return {
-    openHistory: () => resolved.dispatchPanelEvent?.("paseo:open-history"),
-    openSidebar: () => resolved.dispatchPanelEvent?.("paseo:open-sidebar"),
-    goForward: () => resolved.history?.forward(),
-    goBack: () => resolved.history?.back(),
+    openHistory: () => {
+      throw new ClientActionsPartUnavailableError(
+        "panelScroll",
+        "Agent history navigation is not wired in this app build.",
+      );
+    },
+    openSidebar: () => {
+      throw new ClientActionsPartUnavailableError(
+        "panelScroll",
+        "Sidebar navigation is not wired in this app build.",
+      );
+    },
+    goForward: () => history.forward(),
+    goBack: () => history.back(),
   };
 }

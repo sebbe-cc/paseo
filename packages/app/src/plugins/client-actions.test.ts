@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ClientActionsPartUnavailableError,
   createAppClientActionsCapability,
+  createDomPanelResolver,
+  createWebPanelNavigator,
   type ClientActionsVoicePipeline,
   type FocusedPanelResolver,
   type PanelNavigator,
@@ -186,5 +188,133 @@ describe("app clientActions capability", () => {
       capability.startVoiceInput({ serverId: "  ", agentId: "agent-1" }),
     ).rejects.toThrow(/serverId/);
     expect(pipeline.start).not.toHaveBeenCalled();
+  });
+});
+
+interface FakeDomNode {
+  scrollBy(options: { top: number }): void;
+  parentElement: FakeDomNode | null;
+  clientHeight: number;
+  scrollHeight: number;
+  overflowY: string;
+  scrolled: number[];
+}
+
+function makeDomNode(
+  overrides: {
+    clientHeight?: number;
+    scrollHeight?: number;
+    overflowY?: string;
+    parent?: FakeDomNode | null;
+  } = {},
+): FakeDomNode {
+  const node: FakeDomNode = {
+    scrolled: [],
+    scrollBy(options: { top: number }) {
+      node.scrolled.push(options.top);
+    },
+    parentElement: overrides.parent ?? null,
+    clientHeight: overrides.clientHeight ?? 0,
+    scrollHeight: overrides.scrollHeight ?? 0,
+    overflowY: overrides.overflowY ?? "visible",
+  };
+  return node;
+}
+
+function makeDomHost(activeElement: FakeDomNode | null, withStyle: boolean) {
+  return {
+    activeElement,
+    ...(withStyle
+      ? {
+          getComputedStyle: (element: FakeDomNode) => ({ overflowY: element.overflowY }),
+        }
+      : {}),
+  };
+}
+
+describe("code-3: production panel resolver", () => {
+  it("resolves the scrollable viewport, not the focused input inside it", () => {
+    // code-3: a focused single-line composer exposes scrollBy but does not
+    // overflow; scrolling must move the timeline viewport behind it.
+    const viewport = makeDomNode({ clientHeight: 800, scrollHeight: 2000, overflowY: "auto" });
+    const input = makeDomNode({ clientHeight: 24, scrollHeight: 24, parent: viewport });
+    const resolver = createDomPanelResolver(makeDomHost(input, true));
+    const panel = resolver?.resolveFocusedScrollablePanel();
+    expect(panel?.viewportHeight).toBe(800);
+    panel?.scrollBy(800);
+    expect(viewport.scrolled).toEqual([800]);
+    expect(input.scrolled).toEqual([]);
+  });
+
+  it("resolves a focused multiline composer itself when it overflows", () => {
+    const viewport = makeDomNode({ clientHeight: 800, scrollHeight: 2000, overflowY: "auto" });
+    const composer = makeDomNode({
+      clientHeight: 120,
+      scrollHeight: 300,
+      overflowY: "auto",
+      parent: viewport,
+    });
+    const resolver = createDomPanelResolver(makeDomHost(composer, true));
+    const panel = resolver?.resolveFocusedScrollablePanel();
+    expect(panel?.viewportHeight).toBe(120);
+    panel?.scrollBy(120);
+    expect(composer.scrolled).toEqual([120]);
+    expect(viewport.scrolled).toEqual([]);
+  });
+
+  it("skips overflow-hidden content and resolves nothing without a viewport", () => {
+    const clipped = makeDomNode({ clientHeight: 800, scrollHeight: 2000, overflowY: "hidden" });
+    const button = makeDomNode({ clientHeight: 32, scrollHeight: 32, parent: clipped });
+    const resolver = createDomPanelResolver(makeDomHost(button, true));
+    expect(resolver?.resolveFocusedScrollablePanel()).toBeNull();
+  });
+
+  it("resolves by dimensions alone where no style info exists", () => {
+    const viewport = makeDomNode({ clientHeight: 800, scrollHeight: 2000 });
+    const input = makeDomNode({ clientHeight: 24, scrollHeight: 24, parent: viewport });
+    const panel = createDomPanelResolver(
+      makeDomHost(input, false),
+    )?.resolveFocusedScrollablePanel();
+    expect(panel?.viewportHeight).toBe(800);
+  });
+
+  it("returns null without a focused element or document", () => {
+    expect(
+      createDomPanelResolver(makeDomHost(null, true))?.resolveFocusedScrollablePanel(),
+    ).toBeNull();
+  });
+});
+
+describe("code-4/S2: production panel navigator", () => {
+  it("drives back/forward through the real session history", () => {
+    const calls: string[] = [];
+    const navigator = createWebPanelNavigator({
+      history: {
+        back: () => calls.push("back"),
+        forward: () => calls.push("forward"),
+      },
+    });
+    expect(navigator).not.toBeNull();
+    navigator?.goBack();
+    navigator?.goForward();
+    expect(calls).toEqual(["back", "forward"]);
+  });
+
+  it("reports history/sidebar unsupported instead of silently succeeding", () => {
+    const navigator = createWebPanelNavigator({
+      history: {
+        back: () => {},
+        forward: () => {},
+      },
+    });
+    expect(() => navigator?.openHistory()).toThrow(ClientActionsPartUnavailableError);
+    expect(() => navigator?.openHistory()).toThrow(/not wired/);
+    expect(() => navigator?.openSidebar()).toThrow(ClientActionsPartUnavailableError);
+    expect(() => navigator?.openSidebar()).toThrow(/not wired/);
+  });
+
+  it("returns null without usable history", () => {
+    expect(createWebPanelNavigator({})).toBeNull();
+    expect(createWebPanelNavigator({ history: undefined })).toBeNull();
   });
 });
