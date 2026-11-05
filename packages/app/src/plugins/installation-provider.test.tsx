@@ -45,6 +45,7 @@ function installation(invoked: string[]): InstalledPlugin {
     timelineRenderers: [],
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 
