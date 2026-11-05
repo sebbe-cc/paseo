@@ -44,7 +44,10 @@ function setupVoice() {
 function setupPanels() {
   const scrolled: number[] = [];
   const panels: FocusedPanelResolver = {
-    resolveFocusedScrollablePanel: () => ({ viewportHeight: 800, scrollBy: (dy) => scrolled.push(dy) }),
+    resolveFocusedScrollablePanel: () => ({
+      viewportHeight: 800,
+      scrollBy: (dy) => scrolled.push(dy),
+    }),
   };
   const navigated: string[] = [];
   const navigator: PanelNavigator = {
@@ -69,9 +72,10 @@ describe("app clientActions capability", () => {
     expect(
       createAppClientActionsCapability({ voice: pipeline, panels: null }).getCapabilities(),
     ).toEqual({ voiceInput: true, panelScroll: false });
-    expect(
-      createAppClientActionsCapability({}).getCapabilities(),
-    ).toEqual({ voiceInput: false, panelScroll: false });
+    expect(createAppClientActionsCapability({}).getCapabilities()).toEqual({
+      voiceInput: false,
+      panelScroll: false,
+    });
   });
 
   it("runs the voice start/stop sequence against the target", async () => {

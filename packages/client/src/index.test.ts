@@ -1873,9 +1873,7 @@ test("agent handles delegate setMode to setAgentMode and return its result", asy
       },
     }),
   );
-  await expect(failingPromise).rejects.toThrow(
-    "mode mode-id is not supported by provider",
-  );
+  await expect(failingPromise).rejects.toThrow("mode mode-id is not supported by provider");
 
   await client.close();
 });
@@ -1917,9 +1915,7 @@ test("agent handles delegate setModel to setAgentModel and return its result", a
       },
     }),
   );
-  await expect(failingPromise).rejects.toThrow(
-    "model is not supported by provider",
-  );
+  await expect(failingPromise).rejects.toThrow("model is not supported by provider");
 
   await client.close();
 });
@@ -1962,9 +1958,7 @@ test("agent handles delegate setFeature to setAgentFeature and return its result
       },
     }),
   );
-  await expect(failingPromise).rejects.toThrow(
-    "feature feature-id is not supported by provider",
-  );
+  await expect(failingPromise).rejects.toThrow("feature feature-id is not supported by provider");
 
   await client.close();
 });

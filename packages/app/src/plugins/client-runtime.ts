@@ -7,7 +7,11 @@ import {
   createPluginCapabilities,
   createPluginWorkspaceActionContext,
 } from "./actions";
-import { createAppClientActionsCapability, createDomPanelResolver, createWebPanelNavigator } from "./client-actions";
+import {
+  createAppClientActionsCapability,
+  createDomPanelResolver,
+  createWebPanelNavigator,
+} from "./client-actions";
 import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";

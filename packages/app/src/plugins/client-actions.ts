@@ -98,7 +98,9 @@ function requireRouteTarget(target: PluginClientActionsTarget): {
 }
 
 function defaultBlurSubscription(handler: () => void): () => void {
-  const candidate = (globalThis as { window?: { addEventListener?: unknown; removeEventListener?: unknown } }).window;
+  const candidate = (
+    globalThis as { window?: { addEventListener?: unknown; removeEventListener?: unknown } }
+  ).window;
   if (
     !candidate ||
     typeof candidate.addEventListener !== "function" ||

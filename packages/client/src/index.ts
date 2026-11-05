@@ -1,3 +1,4 @@
+export type { TerminalReplayEvent, TerminalStreamEvent } from "./terminal-stream-router.js";
 import type { AgentAddress } from "@getpaseo/protocol/addresses";
 import { parentAddressLabels } from "@getpaseo/protocol/agent-labels";
 export type { AgentAddress } from "@getpaseo/protocol/addresses";
@@ -51,10 +52,7 @@ export type {
   PaseoTerminalCaptureResult,
   PaseoWorkspaceTerminalActions,
 } from "./terminals/index.js";
-import type {
-  AgentProviderNotice,
-  PluginTimelineItem,
-} from "@getpaseo/protocol/agent-types";
+import type { AgentProviderNotice, PluginTimelineItem } from "@getpaseo/protocol/agent-types";
 import type {
   FetchAgentsEntry,
   FetchAgentsOptions,
