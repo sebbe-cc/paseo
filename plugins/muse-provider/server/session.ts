@@ -203,9 +203,13 @@ export class Session {
       ),
     };
     this.providerId = response.session.providerId ?? undefined;
+    const nativeModel = response.session.modelId ?? undefined;
+    const configuredModel = this.config.model;
+    if (input.persistence)
+      await this.reselectModelAfterResume(nativeId, nativeModel, configuredModel);
     this.config = {
       ...this.config,
-      model: response.session.modelId ?? this.config.model,
+      model: configuredModel ?? nativeModel,
       mode: response.session.approvalMode?.mode ?? this.config.mode ?? "onRequest",
     };
     this.options.emit({
@@ -275,6 +279,28 @@ export class Session {
   private live(): Live {
     if (!this.liveState) throw new MuseError("sessionNotOpen", "Muse session is not open");
     return this.liveState;
+  }
+
+  private async reselectModelAfterResume(
+    nativeId: string,
+    nativeModel: string | undefined,
+    configuredModel: string | undefined,
+  ): Promise<void> {
+    // The native session keeps its standing model across restarts, which drifts
+    // away from the configured model (e.g. contributor -> base). Keep the
+    // configured model and re-select it so the next turn uses it.
+    if (!configuredModel || !nativeModel || nativeModel === configuredModel) return;
+    process.stderr.write(
+      `Muse session ${nativeId} model drift on resume: native ${nativeModel} != configured ${configuredModel}; re-selecting configured model\n`,
+    );
+    await this.host.command(
+      "session/setModel",
+      {
+        sessionId: nativeId,
+        model: { providerId: this.providerId, modelId: configuredModel },
+      },
+      ackSchema,
+    );
   }
 
   private async restorePending(
