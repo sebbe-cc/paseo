@@ -2766,6 +2766,83 @@ it("keeps a completion that lands in the same batch as the adoption snapshot", a
   expect(store.isRunning(entry)).toBe(false);
 });
 
+it("drops an exit that lands in the same batch as the adoption snapshot", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const workspaceId = "ws-script-exit-race";
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-script-exit-race-"));
+  temporaryDirs.push(cwd);
+  const terminalId = "terminal-script-exit-race";
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  // One socket batch: the stale snapshot first, then the exit it missed.
+  // Both dispatch synchronously; the adoption continuation runs after.
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal: {
+          id: terminalId,
+          name: "Shell",
+          cwd,
+          workspaceId,
+          activity: null,
+        },
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: null,
+      },
+    ],
+  });
+  worker.emitWorkerMessage({
+    type: "terminalExit",
+    terminalId,
+    info: { exitCode: 1, signal: null, lastOutputLines: [] },
+  });
+  await expect(adopting).resolves.toBe(1);
+  // The stale list entry must not revive the exited terminal.
+  expect(manager.getTerminal(terminalId)).toBeUndefined();
+  // Running restore against the adopted mirror must mark the journaled service
+  // stopped and restartable, without retaining its proxy route.
+  const logger = pino({ level: "silent" });
+  const store = await WorkspaceScriptRuntimeStore.open({
+    path: join(cwd, "runtime.json"),
+    logger,
+  });
+  const entry = {
+    workspaceId,
+    scriptName: "web",
+    type: "service" as const,
+    lifecycle: "running" as const,
+    terminalId,
+    exitCode: null as number | null,
+    cwd,
+    port: 47931,
+    projectSlug: "test-project",
+    branchName: "main",
+  };
+  store.set(entry);
+  await store.flush();
+  const workspaces = {
+    get: async () => ({ workspaceId, cwd, branch: "main", archivedAt: null }),
+  } as unknown as Pick<WorkspaceRegistry, "get">;
+  const serviceProxy = createServiceProxySubsystem({ logger });
+  await restoreWorkspaceScripts({
+    runtimeStore: store,
+    terminalManager: manager,
+    workspaceRegistry: workspaces,
+    serviceProxy,
+    publicBaseUrl: "https://example.test",
+  });
+  expect(store.get(entry)).toMatchObject({ lifecycle: "stopped" });
+  expect(store.isRunning(entry)).toBe(false);
+  expect(serviceProxy.getWorkspaceHealthTargets(workspaceId)).toEqual([]);
+});
+
 it("adopts the newest completion when the snapshot and a live event disagree", async () => {
   const worker = new FakeTerminalWorker();
   manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });

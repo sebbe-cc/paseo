@@ -200,6 +200,12 @@ export function createWorkerTerminalManager(
   // before the adoption continuation registers the snapshot). Consumed by
   // registerRecord; pruned for terminals the worker no longer lists.
   const pendingCompletionsById = new Map<string, TerminalCommandCompletionState>();
+  // Exits that arrive before their terminal is registered (a list response and
+  // a terminalExit in the same socket batch dispatch synchronously, before the
+  // adoption continuation registers the snapshot). Consumed by registerRecord
+  // so a stale list entry cannot revive an exited terminal; pruned for
+  // terminals the worker no longer lists.
+  const pendingExitsById = new Map<string, TerminalExitInfo>();
   const terminalIdsByCwd = new Map<string, Set<string>>();
   const terminalActivityTokenById = new Map<string, string>();
   // Creation owns a reference to the session independently of the live-terminal
@@ -276,12 +282,17 @@ export function createWorkerTerminalManager(
     // the list response). Merge by seq so neither side loses a newer completion.
     const stashed = pendingCompletionsById.get(input.info.id);
     if (stashed) pendingCompletionsById.delete(input.info.id);
+    // An exit may have arrived before this snapshot in the same socket batch.
+    // The snapshot entry is stale: do not revive it as a live terminal.
+    const stashedExit = pendingExitsById.get(input.info.id);
+    if (stashedExit) pendingExitsById.delete(input.info.id);
     const listed = newerCompletion(input.lastCommandFinished, stashed) ?? null;
     const existing = recordsById.get(input.info.id);
     if (existing) {
       existing.info = cloneTerminalInfo(input.info);
       existing.state = input.state;
       existing.lastCommandFinished = newerCompletion(listed, existing.lastCommandFinished) ?? null;
+      if (stashedExit) deliverTerminalExit(existing, stashedExit);
       return existing.session;
     }
 
@@ -433,6 +444,7 @@ export function createWorkerTerminalManager(
     const terminalIds = terminalIdsByCwd.get(record.info.cwd) ?? new Set<string>();
     terminalIds.add(record.info.id);
     terminalIdsByCwd.set(record.info.cwd, terminalIds);
+    if (stashedExit) deliverTerminalExit(record, stashedExit);
     return session;
   }
 
@@ -468,20 +480,14 @@ export function createWorkerTerminalManager(
     }
   }
 
-  function handleTerminalExitEvent(
-    message: Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }>,
-  ): void {
-    const record = recordsById.get(message.terminalId);
-    if (!record) {
-      return;
-    }
-    record.exitInfo = message.info;
+  function deliverTerminalExit(record: WorkerTerminalRecord, info: TerminalExitInfo): void {
+    record.exitInfo = info;
     for (const listener of Array.from(record.exitListeners)) {
-      listener(message.info);
+      listener(info);
     }
     record.exitListeners.clear();
     const previousBucket = deriveTerminalActivityStatusBucket(record.activity);
-    const removedRecord = removeRecord(message.terminalId);
+    const removedRecord = removeRecord(record.info.id);
     if (previousBucket !== null && removedRecord) {
       emitTerminalWorkspaceContributionChanged({
         terminalId: removedRecord.info.id,
@@ -493,6 +499,21 @@ export function createWorkerTerminalManager(
       cwd: record.info.cwd,
       terminals: listTerminalItemsForCwd(record.info.cwd),
     });
+  }
+
+  function handleTerminalExitEvent(
+    message: Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }>,
+  ): void {
+    const record = recordsById.get(message.terminalId);
+    if (!record) {
+      // The list snapshot has not been registered yet (a list response and an
+      // exit in the same socket batch dispatch synchronously, before the
+      // adoption continuation runs). Retain the tombstone instead of dropping
+      // it, so the snapshot cannot revive the exited terminal.
+      pendingExitsById.set(message.terminalId, message.info);
+      return;
+    }
+    deliverTerminalExit(record, message.info);
   }
 
   function handleTerminalTitleChangeEvent(
@@ -782,6 +803,7 @@ export function createWorkerTerminalManager(
       removeRecord(terminalId);
     }
     pendingCompletionsById.clear();
+    pendingExitsById.clear();
   }
 
   function disconnectWorker(): Promise<void> {
@@ -843,6 +865,9 @@ export function createWorkerTerminalManager(
     }
     for (const terminalId of Array.from(pendingCompletionsById.keys())) {
       if (!liveIds.has(terminalId)) pendingCompletionsById.delete(terminalId);
+    }
+    for (const terminalId of Array.from(pendingExitsById.keys())) {
+      if (!liveIds.has(terminalId)) pendingExitsById.delete(terminalId);
     }
     for (const cwd of cwds) {
       emitTerminalsChanged({ cwd, terminals: listTerminalItemsForCwd(cwd) });
