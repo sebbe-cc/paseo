@@ -1,4 +1,9 @@
-import type { TerminalExitInfo, ServerMessage, ClientMessage } from "./terminal.js";
+import type {
+  TerminalCommandCompletionState,
+  TerminalExitInfo,
+  ServerMessage,
+  ClientMessage,
+} from "./terminal.js";
 import type { TerminalReplayEvent, TerminalReplayOptions } from "./terminal-replay.js";
 export interface WorkerTerminalState {
   rows: number;
@@ -39,11 +44,13 @@ export interface WorkerCreateTerminalOptions {
 }
 
 // Bumped when a request, response or event changes shape. The frozen envelope never changes
-// across versions: the frame format, `hello`/`helloAck`, the `listTerminals` info fields, and
-// `shutdown`. A daemon drives a worker of its own version, drains one a version older (no new
-// terminals; it exits after its last terminal), shuts down anything older, and leaves a newer
-// worker running untouched. See docs/terminal-worker.md.
-export const TERMINAL_WORKER_PROTOCOL_VERSION = 5;
+// across versions: the frame format, `hello`/`helloAck`, and `shutdown`. Worker-to-daemon
+// payloads may gain optional additive fields (`listTerminals` items,
+// `terminalCommandFinished`) that older daemons ignore and newer daemons treat as absent on
+// older workers. A daemon drives a worker of its own version, drains one a version older (no
+// new terminals; it exits after its last terminal), shuts down anything older, and leaves a
+// newer worker running untouched. See docs/terminal-worker.md.
+export const TERMINAL_WORKER_PROTOCOL_VERSION = 6;
 
 // Test-only: the protocol version a worker reports, so tests can stand up older and newer
 // workers from one build.
@@ -81,6 +88,12 @@ export interface WorkerListedTerminal {
   state: WorkerTerminalState;
   activityToken: string | null;
   replayPreamble: string;
+  /**
+   * The worker-retained last command completion, counted per terminal since the
+   * worker started it. Absent on workers older than protocol 6; then the daemon
+   * cannot reconcile completions that happened while it was detached.
+   */
+  lastCommandFinished?: TerminalCommandCompletionState | null;
 }
 
 export interface WorkerKillAndWaitOptions {
@@ -192,9 +205,7 @@ export type TerminalWorkerEvent =
   | {
       type: "terminalCommandFinished";
       terminalId: string;
-      info: {
-        exitCode: number | null;
-      };
+      info: TerminalCommandCompletionState;
     }
   | {
       type: "terminalActivityChange";
