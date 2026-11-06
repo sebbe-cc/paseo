@@ -1657,8 +1657,13 @@ it("leaves a worker from a newer Paseo running, reports it incompatible, and clo
 
   await manager.closeTerminals();
 
-  expect(isProcessAlive(newer.workerPid)).toBe(false);
-  expect(isProcessAlive(newer.programPid)).toBe(false);
+  // The kill stop confirms through the reaper, but the pids can outlive the
+  // confirmation as unreaped zombies (or lose a scheduling race under load),
+  // so poll for death the way the protocol-version tests above do.
+  await waitForCondition(
+    () => !isProcessAlive(newer.workerPid) && !isProcessAlive(newer.programPid),
+    10000,
+  );
   expect(await workerRecords(paseoHome)).toEqual([]);
 });
 
