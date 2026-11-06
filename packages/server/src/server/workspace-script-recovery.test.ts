@@ -11,7 +11,11 @@ import {
   ensureWorkspaceServicePortPlan,
   releaseWorkspaceServicePortPlan,
 } from "./workspace-service-port-registry.js";
-import type { TerminalSession, TerminalExitInfo } from "../terminal/terminal.js";
+import type {
+  TerminalCommandFinishedInfo,
+  TerminalSession,
+  TerminalExitInfo,
+} from "../terminal/terminal.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { WorkspaceRegistry } from "./workspace-registry.js";
 const logger = pino({ level: "silent" });
@@ -19,7 +23,11 @@ const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const f of cleanups.splice(0).toReversed()) await f();
 });
-async function setup() {
+async function setup(options?: {
+  type?: "service" | "script";
+  commandSeq?: number;
+  lastCompletion?: { seq: number; exitCode: number | null } | null;
+}) {
   const directory = await mkdtemp(join(tmpdir(), "script-journal-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const workspaceId = randomUUID();
@@ -28,7 +36,7 @@ async function setup() {
   const entry = {
     workspaceId,
     scriptName: "web",
-    type: "service" as const,
+    type: options?.type ?? ("service" as const),
     lifecycle: "running" as const,
     terminalId: randomUUID(),
     exitCode: null,
@@ -36,12 +44,21 @@ async function setup() {
     port: 47931,
     projectSlug: "test-project",
     branchName: "main",
+    ...(options?.commandSeq !== undefined ? { commandSeq: options.commandSeq } : {}),
   };
   const initial = await WorkspaceScriptRuntimeStore.open(persistence);
   initial.set(entry);
   await initial.flush();
   const store = await WorkspaceScriptRuntimeStore.open(persistence);
   const exits = new Set<(info: TerminalExitInfo) => void>();
+  const commands = new Set<(info: TerminalCommandFinishedInfo) => void>();
+  // Mirrors the worker: every completion updates the retained state first, then
+  // reaches whoever listens. Firing without listeners models downtime.
+  let lastCompletion = options?.lastCompletion ?? null;
+  const completeCommand = (exitCode: number | null, seq: number) => {
+    lastCompletion = { seq, exitCode };
+    for (const fn of Array.from(commands)) fn({ exitCode });
+  };
   const terminal = {
     id: entry.terminalId,
     cwd: directory,
@@ -50,7 +67,11 @@ async function setup() {
       exits.add(fn);
       return () => exits.delete(fn);
     },
-    onCommandFinished: () => () => {},
+    onCommandFinished: (fn: (info: TerminalCommandFinishedInfo) => void) => {
+      commands.add(fn);
+      return () => commands.delete(fn);
+    },
+    getLastCommandFinished: () => lastCompletion,
   } as unknown as TerminalSession;
   const terminals = {
     getTerminal: (id: string) => (id === terminal.id ? terminal : undefined),
@@ -77,6 +98,8 @@ async function setup() {
     serviceProxy,
     restore,
     exits,
+    commands,
+    completeCommand,
   };
 }
 test("a new daemon restores status, exact terminal identity, route and reserved port", async () => {
@@ -155,4 +178,73 @@ test("malformed journals log a warning without reviving arbitrary terminal names
   ).toEqual([]);
   expect(warn).toHaveBeenCalledTimes(1);
   expect(await readFile(s.persistence.path, "utf8")).toBe("{bad json");
+});
+test("a plain script that completed while detached is marked stopped and restartable", async () => {
+  const s = await setup({ type: "script", commandSeq: 0, lastCompletion: { seq: 1, exitCode: 3 } });
+  await s.restore();
+  expect(s.store.get(s.entry)).toMatchObject({ lifecycle: "stopped", exitCode: 3 });
+  expect(s.store.isRunning(s.entry)).toBe(false);
+});
+test("a completion missed between adoption and listener install is still reconciled", async () => {
+  const s = await setup({ type: "script", commandSeq: 0 });
+  // The completion lands after the adopted terminal is validated but before the
+  // watcher is installed, so no listener sees it; only the retained state does.
+  const innerGet = s.workspaces.get;
+  let fired = false;
+  s.workspaces.get = (async (...args: []) => {
+    if (!fired) {
+      fired = true;
+      s.completeCommand(5, 1);
+    }
+    return innerGet(...args);
+  }) as typeof innerGet;
+  await s.restore();
+  expect(fired).toBe(true);
+  expect(s.store.get(s.entry)).toMatchObject({ lifecycle: "stopped", exitCode: 5 });
+  // A late duplicate of the same completion is a no-op, not a second transition.
+  s.completeCommand(5, 1);
+  expect(s.store.get(s.entry)).toMatchObject({ lifecycle: "stopped", exitCode: 5 });
+});
+test("a script entry without a completion baseline stays running", async () => {
+  const s = await setup({ type: "script", lastCompletion: { seq: 4, exitCode: 0 } });
+  await s.restore();
+  expect(s.store.get(s.entry)?.lifecycle).toBe("running");
+});
+test("one entry with missing recovery metadata does not abort the other restores", async () => {
+  const s = await setup();
+  const bad = {
+    ...s.entry,
+    scriptName: "broken",
+    terminalId: randomUUID(),
+    port: undefined,
+    projectSlug: undefined,
+  };
+  s.store.set(bad);
+  const badTerminal = {
+    id: bad.terminalId,
+    cwd: s.entry.cwd,
+    workspaceId: s.entry.workspaceId,
+    onExit: () => () => {},
+    onCommandFinished: () => () => {},
+  } as unknown as TerminalSession;
+  const getTerminal = s.terminals.getTerminal;
+  s.terminals.getTerminal = ((id: string) =>
+    id === badTerminal.id ? badTerminal : getTerminal(id)) as typeof getTerminal;
+  const warn = vi.fn();
+  await expect(
+    restoreWorkspaceScripts({
+      runtimeStore: s.store,
+      terminalManager: s.terminals,
+      workspaceRegistry: s.workspaces,
+      serviceProxy: s.serviceProxy,
+      publicBaseUrl: "https://example.test",
+      logger: { warn },
+    }),
+  ).resolves.toBeUndefined();
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(s.store.get(bad)?.lifecycle).toBe("stopped");
+  expect(s.store.get(s.entry)?.lifecycle).toBe("running");
+  expect(s.serviceProxy.getWorkspaceHealthTargets(s.entry.workspaceId)).toEqual([
+    expect.objectContaining({ scriptName: "web", port: s.entry.port }),
+  ]);
 });
