@@ -1452,6 +1452,28 @@ function useDiffTabNavigation({
   };
 }
 
+function MissingBaseWarning({
+  status,
+  diffMode,
+}: {
+  status: CheckoutStatusPayload | null;
+  diffMode: DiffModeMenuProps["diffMode"];
+}) {
+  const { t } = useTranslation();
+  if (!status?.isGit || !status.base?.missing || diffMode === "uncommitted") return null;
+  return (
+    <View
+      style={styles.forgeSetupCallout}
+      testID="changes-missing-base-warning"
+      accessibilityRole="alert"
+    >
+      <Text style={styles.forgeSetupCalloutText}>
+        {t("workspace.git.diff.missingBase", { ref: status.base.ref })}
+      </Text>
+    </View>
+  );
+}
+
 export function ChangesSurface({
   serverId,
   workspaceId,
@@ -1955,6 +1977,8 @@ export function ChangesSurface({
           sidebarSurface={presentation === "tree"}
         />
       ) : null}
+
+      <MissingBaseWarning status={status} diffMode={diffMode} />
 
       {forgeSetupMessage ? (
         <View style={styles.forgeSetupCallout} testID="forge-setup-callout">
