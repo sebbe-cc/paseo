@@ -103,6 +103,7 @@ export function useMenuSurface(componentName: string): MenuSurfaceContextValue {
 }
 
 export interface MenuSurfaceProps {
+  autoFocus?: boolean;
   /** Root page content. */
   children: ReactNode;
   /** Sub pages, reachable from a `MenuSubTrigger` on the root page. */
@@ -225,6 +226,7 @@ function MenuPopoverSurface({
   scrollable = false,
   testID,
   keyboardFocusScope,
+  autoFocus = true,
 }: MenuSurfaceProps): ReactElement | null {
   const menu = useMenuContext("MenuSurface");
   const { value: surfaceValue, getAnchor } = useSubAnchors();
@@ -262,7 +264,12 @@ function MenuPopoverSurface({
 
   return (
     <MenuSurfaceContext.Provider value={hoverValue}>
-      <MenuOverlay visible={menu.open} onClose={handleClose} restoreFocusRef={menu.triggerRef}>
+      <MenuOverlay
+        visible={menu.open}
+        onClose={handleClose}
+        restoreFocusRef={menu.triggerRef}
+        manageFocus={autoFocus}
+      >
         <>
           <AnchoredSurface
             open={menu.open}
@@ -281,6 +288,7 @@ function MenuPopoverSurface({
             scrollable={scrollable}
             testID={testID}
             keyboardFocusScope={keyboardFocusScope}
+            autoFocus={autoFocus}
           >
             <MenuPage depth={0}>{children}</MenuPage>
           </AnchoredSurface>
