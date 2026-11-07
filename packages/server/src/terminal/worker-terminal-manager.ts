@@ -13,6 +13,7 @@ import type {
   ClientMessage,
   ServerMessage,
   TerminalActivityTransition,
+  TerminalCommandCompletionState,
   TerminalCommandFinishedInfo,
   TerminalExitInfo,
   TerminalSession,
@@ -94,6 +95,9 @@ interface WorkerTerminalRecord {
   info: RequiredWorkerTerminalInfo;
   state: WorkerTerminalState;
   activity: TerminalActivity | null;
+  // Worker-retained last command completion, populated from adoption and live
+  // events. Null when none has been seen or the worker does not report it.
+  lastCommandFinished: TerminalCommandCompletionState | null;
   // Cached input-mode preamble from the worker (the authoritative tracker lives
   // in the worker process). Updated with streamed output and snapshot responses.
   replayPreamble: string;
@@ -162,6 +166,22 @@ function cloneTerminalInfo(info: RequiredWorkerTerminalInfo): RequiredWorkerTerm
   };
 }
 
+/**
+ * Keeps the newer of two retained command completions by worker-side seq. A
+ * completion that arrives before its terminal's list snapshot is registered
+ * (the response and the event dispatch synchronously in one socket batch,
+ * while the adoption continuation runs later) must not be dropped, and a
+ * stale snapshot or duplicate must not overwrite a newer completion.
+ */
+function newerCompletion(
+  candidate: TerminalCommandCompletionState | null | undefined,
+  current: TerminalCommandCompletionState | null | undefined,
+): TerminalCommandCompletionState | null {
+  if (!candidate || typeof candidate.seq !== "number") return current ?? null;
+  if (!current || typeof current.seq !== "number") return candidate;
+  return candidate.seq > current.seq ? candidate : current;
+}
+
 export function createWorkerTerminalManager(
   managerOptions: WorkerTerminalManagerOptions,
 ): DaemonTerminalManager {
@@ -175,6 +195,17 @@ export function createWorkerTerminalManager(
   const pendingRequests = new Map<string, PendingRequest>();
   const inFlight = new Set<Promise<void>>();
   const recordsById = new Map<string, WorkerTerminalRecord>();
+  // Completions that arrive before their terminal is registered (a list
+  // response and a completion in the same socket batch dispatch synchronously,
+  // before the adoption continuation registers the snapshot). Consumed by
+  // registerRecord; pruned for terminals the worker no longer lists.
+  const pendingCompletionsById = new Map<string, TerminalCommandCompletionState>();
+  // Exits that arrive before their terminal is registered (a list response and
+  // a terminalExit in the same socket batch dispatch synchronously, before the
+  // adoption continuation registers the snapshot). Consumed by registerRecord
+  // so a stale list entry cannot revive an exited terminal; pruned for
+  // terminals the worker no longer lists.
+  const pendingExitsById = new Map<string, TerminalExitInfo>();
   const terminalIdsByCwd = new Map<string, Set<string>>();
   const terminalActivityTokenById = new Map<string, string>();
   // Creation owns a reference to the session independently of the live-terminal
@@ -245,11 +276,23 @@ export function createWorkerTerminalManager(
   function registerRecord(input: {
     info: RequiredWorkerTerminalInfo;
     state: WorkerTerminalState;
+    lastCommandFinished?: TerminalCommandCompletionState | null;
   }): TerminalSession {
+    // A completion may have arrived before this snapshot (same socket batch as
+    // the list response). Merge by seq so neither side loses a newer completion.
+    const stashed = pendingCompletionsById.get(input.info.id);
+    if (stashed) pendingCompletionsById.delete(input.info.id);
+    // An exit may have arrived before this snapshot in the same socket batch.
+    // The snapshot entry is stale: do not revive it as a live terminal.
+    const stashedExit = pendingExitsById.get(input.info.id);
+    if (stashedExit) pendingExitsById.delete(input.info.id);
+    const listed = newerCompletion(input.lastCommandFinished, stashed) ?? null;
     const existing = recordsById.get(input.info.id);
     if (existing) {
       existing.info = cloneTerminalInfo(input.info);
       existing.state = input.state;
+      existing.lastCommandFinished = newerCompletion(listed, existing.lastCommandFinished) ?? null;
+      if (stashedExit) deliverTerminalExit(existing, stashedExit);
       return existing.session;
     }
 
@@ -257,6 +300,7 @@ export function createWorkerTerminalManager(
       info: cloneTerminalInfo(input.info),
       state: input.state,
       activity: input.info.activity,
+      lastCommandFinished: listed,
       replayPreamble: "",
       exitInfo: null,
       messageListeners: new Set(),
@@ -314,6 +358,9 @@ export function createWorkerTerminalManager(
         return () => {
           record.commandFinishedListeners.delete(listener);
         };
+      },
+      getLastCommandFinished(): TerminalCommandCompletionState | null {
+        return record.lastCommandFinished;
       },
       onTitleChange(listener: (title?: string) => void): () => void {
         record.titleChangeListeners.add(listener);
@@ -397,6 +444,7 @@ export function createWorkerTerminalManager(
     const terminalIds = terminalIdsByCwd.get(record.info.cwd) ?? new Set<string>();
     terminalIds.add(record.info.id);
     terminalIdsByCwd.set(record.info.cwd, terminalIds);
+    if (stashedExit) deliverTerminalExit(record, stashedExit);
     return session;
   }
 
@@ -407,6 +455,7 @@ export function createWorkerTerminalManager(
     }
     recordsById.delete(terminalId);
     terminalActivityTokenById.delete(terminalId);
+    pendingCompletionsById.delete(terminalId);
     const terminalIds = terminalIdsByCwd.get(record.info.cwd);
     if (terminalIds) {
       terminalIds.delete(terminalId);
@@ -431,20 +480,14 @@ export function createWorkerTerminalManager(
     }
   }
 
-  function handleTerminalExitEvent(
-    message: Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }>,
-  ): void {
-    const record = recordsById.get(message.terminalId);
-    if (!record) {
-      return;
-    }
-    record.exitInfo = message.info;
+  function deliverTerminalExit(record: WorkerTerminalRecord, info: TerminalExitInfo): void {
+    record.exitInfo = info;
     for (const listener of Array.from(record.exitListeners)) {
-      listener(message.info);
+      listener(info);
     }
     record.exitListeners.clear();
     const previousBucket = deriveTerminalActivityStatusBucket(record.activity);
-    const removedRecord = removeRecord(message.terminalId);
+    const removedRecord = removeRecord(record.info.id);
     if (previousBucket !== null && removedRecord) {
       emitTerminalWorkspaceContributionChanged({
         terminalId: removedRecord.info.id,
@@ -456,6 +499,21 @@ export function createWorkerTerminalManager(
       cwd: record.info.cwd,
       terminals: listTerminalItemsForCwd(record.info.cwd),
     });
+  }
+
+  function handleTerminalExitEvent(
+    message: Extract<TerminalWorkerToParentMessage, { type: "terminalExit" }>,
+  ): void {
+    const record = recordsById.get(message.terminalId);
+    if (!record) {
+      // The list snapshot has not been registered yet (a list response and an
+      // exit in the same socket batch dispatch synchronously, before the
+      // adoption continuation runs). Retain the tombstone instead of dropping
+      // it, so the snapshot cannot revive the exited terminal.
+      pendingExitsById.set(message.terminalId, message.info);
+      return;
+    }
+    deliverTerminalExit(record, message.info);
   }
 
   function handleTerminalTitleChangeEvent(
@@ -490,10 +548,32 @@ export function createWorkerTerminalManager(
   ): void {
     const record = recordsById.get(message.terminalId);
     if (!record) {
+      // The list snapshot has not been registered yet (a list response and a
+      // completion in the same socket batch dispatch synchronously, before the
+      // adoption continuation runs). Retain by seq instead of dropping, so
+      // adoption still reconciles the completion.
+      if (typeof message.info.seq === "number") {
+        const retained = newerCompletion(
+          { seq: message.info.seq, exitCode: message.info.exitCode },
+          pendingCompletionsById.get(message.terminalId),
+        );
+        if (retained) pendingCompletionsById.set(message.terminalId, retained);
+      }
       return;
     }
+    // Workers older than protocol 6 send no seq; their completions still reach
+    // listeners, but the mirror stays unknown and restore trusts the journal. A
+    // stale duplicate must not overwrite a newer retained completion.
+    if (typeof message.info.seq === "number") {
+      record.lastCommandFinished =
+        newerCompletion(
+          { seq: message.info.seq, exitCode: message.info.exitCode },
+          record.lastCommandFinished,
+        ) ?? record.lastCommandFinished;
+    }
+    const info: TerminalCommandFinishedInfo = { exitCode: message.info.exitCode };
     for (const listener of Array.from(record.commandFinishedListeners)) {
-      listener(message.info);
+      listener(info);
     }
   }
 
@@ -722,6 +802,8 @@ export function createWorkerTerminalManager(
     for (const terminalId of Array.from(recordsById.keys())) {
       removeRecord(terminalId);
     }
+    pendingCompletionsById.clear();
+    pendingExitsById.clear();
   }
 
   function disconnectWorker(): Promise<void> {
@@ -766,7 +848,11 @@ export function createWorkerTerminalManager(
     }
     for (const item of listed) {
       const info = asRequiredWorkerTerminalInfo(item.terminal);
-      registerRecord({ info, state: item.state });
+      registerRecord({
+        info,
+        state: item.state,
+        lastCommandFinished: item.lastCommandFinished ?? null,
+      });
       const record = recordsById.get(info.id);
       if (record) {
         record.replayPreamble = item.replayPreamble;
@@ -776,6 +862,12 @@ export function createWorkerTerminalManager(
         terminalActivityTokenById.set(info.id, item.activityToken);
       }
       cwds.add(info.cwd);
+    }
+    for (const terminalId of Array.from(pendingCompletionsById.keys())) {
+      if (!liveIds.has(terminalId)) pendingCompletionsById.delete(terminalId);
+    }
+    for (const terminalId of Array.from(pendingExitsById.keys())) {
+      if (!liveIds.has(terminalId)) pendingExitsById.delete(terminalId);
     }
     for (const cwd of cwds) {
       emitTerminalsChanged({ cwd, terminals: listTerminalItemsForCwd(cwd) });
