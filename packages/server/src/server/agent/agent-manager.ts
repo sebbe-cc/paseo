@@ -3156,6 +3156,24 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Hand a prompt to the provider session for a boundary start without
+   * touching the daemon's active run (pa-r6a9i). A busy provider holds the
+   * prompt in its foreground-turn queue and drains it when the turn ends;
+   * an idle provider starts it at once. Never cancels, steers, or replaces:
+   * callers use this only after confirming an in-flight run, so the active
+   * turn survives. Providers without a foreground-turn queue reject a busy
+   * start, and that error propagates to the caller.
+   */
+  async queueAgentPrompt(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
+    const agent = this.requireSessionAgent(agentId);
+    return agent.session.startTurn(prompt, options);
+  }
+
   async steerAgentRun(
     agentId: string,
     prompt: AgentPromptInput,
