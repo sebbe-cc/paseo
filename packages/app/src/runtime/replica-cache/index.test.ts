@@ -345,6 +345,36 @@ describe("ReplicaCache", () => {
     expect((await reader.readWorkspace(SERVER_ID, workspace.id))?.workspace).toEqual(workspace);
   });
 
+  it.each([
+    {
+      name: "populated",
+      base: {
+        ref: "refs/remotes/origin/feature/work",
+        forkSha: "b".repeat(40),
+        source: "stored" as const,
+        missing: false,
+      },
+    },
+    { name: "null", base: null },
+  ])("round-trips gitRuntime.base when it is $name", async ({ base }) => {
+    const storage = new MemoryStorage();
+    const writer = createCache(storage);
+    const baseline = directory();
+    const workspace = normalizeWorkspaceDescriptor({
+      ...workspacePayload(),
+      gitRuntime: {
+        currentBranch: "feature/work",
+        base,
+      },
+    });
+    baseline.workspaces.set(workspace.id, workspace);
+    commitDirectory(writer, SERVER_ID, baseline);
+    await writer.flush();
+    const reader = createCache(storage);
+    expect((await reader.readDirectory(SERVER_ID)).workspaces.get(workspace.id)).toEqual(workspace);
+    expect((await reader.readWorkspace(SERVER_ID, workspace.id))?.workspace).toEqual(workspace);
+  });
+
   it.each(["createdAt", "lastUserMessageAt"])(
     "refetches workspaces cached without %s",
     async (field) => {
