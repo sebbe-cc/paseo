@@ -111,6 +111,43 @@ export interface PaseoClientConfig {
 
 export type PaseoWorkspace = WorkspaceDescriptorPayload;
 export type PaseoAgent = AgentSnapshotPayload;
+
+/**
+ * A workspace's one base: what every view compares the checkout against.
+ * The daemon resolves it (pa-9av7 model): `ref` is fully qualified
+ * (`refs/remotes/<remote>/<b>` for a published base, `refs/heads/<b>` for a
+ * local one) or null for a workspace cut from a raw commit; `forkSha` is the
+ * commit the comparison starts from; `missing` means the stored ref no longer
+ * exists and views compare against `forkSha` instead. Older daemons omit the
+ * field; read it with {@link workspaceBaseOf}, never by direct access.
+ */
+export interface PaseoWorkspaceBase {
+  ref: string | null;
+  forkSha: string | null;
+  source: "stored" | "default" | "none";
+  missing: boolean;
+}
+
+/**
+ * Read a workspace entry's base as resolved by the daemon. Returns null when
+ * the daemon did not report one (older daemon, or non-git workspace), so
+ * callers fall back to their own default instead of guessing the branch.
+ * Malformed payloads also read as null; the entry itself stays usable.
+ */
+export function workspaceBaseOf(
+  workspace: PaseoWorkspace | null | undefined,
+): PaseoWorkspaceBase | null {
+  const gitRuntime = workspace?.gitRuntime;
+  if (!gitRuntime || typeof gitRuntime !== "object") return null;
+  const base = (gitRuntime as { base?: unknown }).base;
+  if (!base || typeof base !== "object") return null;
+  const { ref, forkSha, source, missing } = base as Record<string, unknown>;
+  if (ref !== null && typeof ref !== "string") return null;
+  if (forkSha !== null && typeof forkSha !== "string") return null;
+  if (source !== "stored" && source !== "default" && source !== "none") return null;
+  if (typeof missing !== "boolean") return null;
+  return { ref, forkSha, source, missing };
+}
 export type PaseoAgentListOptions = FetchAgentsOptions;
 export type PaseoProject = WorkspaceProjectDescriptorPayload;
 export type PaseoProjectListOptions = Omit<ProjectListRequestMessage, "type" | "requestId"> & {
@@ -212,6 +249,12 @@ export interface PaseoWorkspaceActions {
     }
   >;
   list(options?: PaseoWorkspaceListOptions): Promise<PaseoWorkspaceListResult>;
+  /**
+   * Fetch one workspace by id, or null when no visible workspace has it.
+   * Pages through the daemon listing, so a background workspace resolves too
+   * on hosts that support them. The returned entry carries the daemon's
+   * resolved base (see {@link workspaceBaseOf}) once the daemon reports it.
+   */
   get(workspaceId: string, requestId?: string): Promise<PaseoWorkspace | null>;
   ref(workspace: string | PaseoWorkspace): PaseoWorkspaceHandle;
   open(
@@ -727,6 +770,29 @@ export function createPaseoApi(
     return { ...(await subscription.ready), subscription };
   }
 
+  async function getWorkspace(
+    id: string,
+    options?: { requestId?: string },
+  ): Promise<PaseoWorkspace | null> {
+    // A get addresses one workspace by id, so a background one resolves too
+    // on hosts that support them — the same filter the handle refresh uses.
+    const filter = daemonClient.supportsBackgroundWorkspaces() ? { includeBackground: true } : {};
+    let cursor: string | undefined;
+    let requestId = options?.requestId;
+    do {
+      const result = await daemonClient.fetchWorkspaces({
+        requestId,
+        filter,
+        page: { limit: 200, ...(cursor ? { cursor } : {}) },
+      });
+      const match = result.entries.find((entry) => entry.id === id);
+      if (match) return match;
+      cursor = result.pageInfo.nextCursor ?? undefined;
+      requestId = undefined;
+    } while (cursor);
+    return null;
+  }
+
   return {
     dispose,
     hosts: createHostActions(daemonClient, { own, signal: lifetime.signal, api: createPaseoApi }),
@@ -742,7 +808,7 @@ export function createPaseoApi(
     },
     workspaces: {
       list: listWorkspaces,
-      get: (workspaceId, requestId) => createWorkspaceHandle(workspaceId).refresh({ requestId }),
+      get: (workspaceId, requestId) => getWorkspace(workspaceId, { requestId }),
       ref: (workspace) => createWorkspaceHandle(workspace),
       open: (input, requestId) =>
         openWorkspace(daemonClient, createWorkspaceHandle, input, requestId),
