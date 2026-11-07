@@ -1126,7 +1126,19 @@ export async function createPaseoDaemon(
       !record.workspaceId || !(await workspaceRegistry?.get(record.workspaceId))?.archivedAt,
     dispatch: (agentId, prompt) =>
       sendPromptToAgent({ agentId, prompt, agentManager, agentStorage, logger, unarchive: false }),
-    report: (agentId, err) => logger.error({ agentId, err }, "Agent restart recovery failed"),
+    report: (agentId, err) => {
+      logger.error({ agentId, err }, "Agent restart recovery failed");
+      // The agent was never registered, so there is no live session to carry
+      // the failure: persist it as error attention on the stored record (the
+      // provider handle is preserved) so it surfaces in the client instead of
+      // failing silently into the daemon log.
+      void agentManager.markStoredAgentError(agentId, err).catch((flagError) => {
+        logger.error(
+          { agentId, err: flagError },
+          "Failed to flag restart recovery failure on stored agent",
+        );
+      });
+    },
   });
   await restartRecovery.prepareStartup();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
