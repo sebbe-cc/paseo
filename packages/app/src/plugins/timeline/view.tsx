@@ -1,3 +1,5 @@
+import { useAgent } from "@getpaseo/plugin/client";
+import { InlineDecorationScopeProvider } from "../inline-decorators";
 import { PluginClientStateProvider } from "@getpaseo/plugin/client/host";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -23,7 +25,11 @@ function TimelineItemUnavailable() {
 
 function parseRendererData(
   renderer:
-    | { schema: { safeParse(value: unknown): { success: boolean; data?: unknown } } }
+    | {
+        schema: {
+          safeParse(value: unknown): { success: boolean; data?: unknown };
+        };
+      }
     | undefined,
   data: unknown,
 ) {
@@ -83,10 +89,30 @@ function PluginTimelineItemBody({
     <SurfaceErrorBoundary installation={plugin} resetKey={item.data} Surface={Component}>
       <PluginInstallationProvider plugin={plugin}>
         <PluginClientStateProvider source={stateSource}>
-          <Component {...props} />
+          <DecoratedTimelineItem agentId={agentId} serverId={serverId}>
+            <Component {...props} />
+          </DecoratedTimelineItem>
         </PluginClientStateProvider>
       </PluginInstallationProvider>
     </SurfaceErrorBoundary>
+  );
+}
+
+// The state provider supplies the agent's current workspace on the selected host.
+function DecoratedTimelineItem({
+  agentId,
+  serverId,
+  children,
+}: {
+  agentId: string;
+  serverId: string;
+  children: React.ReactNode;
+}) {
+  const workspaceId = useAgent(agentId, (agent) => agent?.workspaceId ?? null);
+  return (
+    <InlineDecorationScopeProvider serverId={serverId} workspaceId={workspaceId} agentId={agentId}>
+      {children}
+    </InlineDecorationScopeProvider>
   );
 }
 
