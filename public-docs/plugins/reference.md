@@ -73,16 +73,17 @@ The required root manifest is `paseo-plugin.json`:
 }
 ```
 
-| Field          | Required | Behavior                                                                                                                                     |
-| -------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`           | Yes      | Default installation ID.                                                                                                                     |
-| `name`         | No       | Non-empty display name for the registry and website; independent of the installation ID.                                                     |
-| `icon`         | No       | Relative path to a PNG inside the plugin package.                                                                                            |
-| `media`        | No       | Array of image or video paths inside the package, or HTTPS URLs. An empty array is valid.                                                    |
-| `description`  | No       | Non-empty summary shown below the plugin ID in **Settings → Plugins**.                                                                       |
-| `translations` | No       | Listing text in other languages, read by the registry and ignored by Paseo. See [other languages](/docs/plugins/publishing#other-languages). |
-| `requirements` | No       | Supported Paseo versions, described below.                                                                                                   |
-| `build`        | No       | Preparation commands, described in the CLI reference.                                                                                        |
+| Field              | Required | Behavior                                                                                                                                     |
+| ------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`               | Yes      | Default installation ID.                                                                                                                     |
+| `name`             | No       | Non-empty display name for the registry and website; independent of the installation ID.                                                     |
+| `icon`             | No       | Relative path to a PNG inside the plugin package.                                                                                            |
+| `media`            | No       | Array of image or video paths inside the package, or HTTPS URLs. An empty array is valid.                                                    |
+| `description`      | No       | Non-empty summary shown below the plugin ID in **Settings → Plugins**.                                                                       |
+| `translations`     | No       | Listing text in other languages, read by the registry and ignored by Paseo. See [other languages](/docs/plugins/publishing#other-languages). |
+| `requirements`     | No       | Supported Paseo versions, described below.                                                                                                   |
+| `build`            | No       | Preparation commands, described in the CLI reference.                                                                                        |
+| `runtimeExternals` | No       | Server dependencies left out of the daemon bundle, described under [server runtime](#server-runtime).                                        |
 
 Paths are relative to `paseo-plugin.json`, use forward slashes, and cannot contain `..`
 segments. Registry listings for visual plugins require an interface image even though `media` is
@@ -425,6 +426,24 @@ Paseo provides `@getpaseo/plugin`, `@getpaseo/plugin/server`,
 contributions run in a daemon subprocess with Node access to the host machine. Keep filesystem,
 process, credential, and other machine-local work under `server/`. A plugin without
 `index.server.ts` starts no subprocess.
+
+The daemon bundles server dependencies with esbuild, so every package a dependency requires must
+resolve at install time, even one it only requires lazily for an optional feature. List such
+packages in `runtimeExternals` to leave them out of the bundle:
+
+```json
+{
+  "id": "workflows",
+  "requirements": { "paseo": ">=0.14.0" },
+  "runtimeExternals": ["@opentelemetry/*", "winston", "@dbos-inc/dbos-enterprise"]
+}
+```
+
+Each entry is an npm package name, which also covers its subpaths, or `@scope/*` for every package
+in a scope. The subprocess requires listed packages from the plugin's own `node_modules`; one the
+plugin does not install fails its `require` with Node's usual `MODULE_NOT_FOUND`, only when the
+code reaches it. Paseo host modules (`@getpaseo/*`, `zod`) cannot be listed. The client bundle
+ignores `runtimeExternals`.
 
 ### Providers
 
