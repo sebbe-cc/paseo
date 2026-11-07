@@ -8,7 +8,9 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const hostClient = vi.hoisted(() => ({ invokePluginRpc: async () => null }));
-const selectedHost = vi.hoisted(() => ({ client: null as DaemonClient | null }));
+const selectedHost = vi.hoisted(() => ({
+  client: null as DaemonClient | null,
+}));
 vi.mock("@/runtime/host-runtime", () => ({
   useHostRuntimeClient: () => selectedHost.client ?? (hostClient as unknown as DaemonClient),
   useHosts: () => [{ serverId: "host-1", label: "Local" }],
@@ -118,10 +120,52 @@ afterEach(() => {
 });
 
 describe("PluginTimelineItemView", () => {
+  it("applies host decorators inside a plugin timeline renderer", async () => {
+    pluginRegistry.installCatalog(
+      "host-1",
+      [
+        {
+          id: "reports",
+          requirements: { paseo: `>=${appPackage.version}` },
+          clientBundle: `(function(require) {
+          const React = require("react");
+          const { DecoratedText } = require("@getpaseo/plugin/client/ui");
+          return { default(plugin) {
+            plugin.addTimelineRenderer({ kind: "test-report", version: 1,
+              schema: { safeParse(data) { return { success: true, data }; } },
+              Component() { return React.createElement(DecoratedText, null, "pa-123"); }
+            });
+            plugin.addInlineDecorator({ id: "bead", pattern: /pa-[0-9]+/g,
+              resolve() { return { label: "pa-123 · klar" }; }, onPress() {} });
+            return () => {};
+          } };
+        })`,
+        },
+      ],
+      { client: daemonClient, audio },
+    );
+    const container = document.createElement("div");
+    containers.push(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <PluginTimelineItemView serverId="host-1" agentId="agent-1" item={timelineItem} />,
+      ),
+    );
+    expect(container.querySelector('[role="button"]')?.textContent).toBe("pa-123 · klar");
+  });
+
   it("validates and renders the matching plugin component", async () => {
     pluginRegistry.installCatalog(
       "host-1",
-      [{ id: "reports", requirements: { paseo: `>=${appPackage.version}` }, clientBundle: bundle }],
+      [
+        {
+          id: "reports",
+          requirements: { paseo: `>=${appPackage.version}` },
+          clientBundle: bundle,
+        },
+      ],
       {
         client: daemonClient,
         audio,
@@ -304,7 +348,10 @@ it("a renderer releases its observation on the plugin's client when it crashes, 
   })`;
   const survivor = client.observeEvents(["project.update"]);
   const updates: unknown[] = [];
-  survivor.subscribe({ snapshot: () => {}, update: (message) => updates.push(message) });
+  survivor.subscribe({
+    snapshot: () => {},
+    update: (message) => updates.push(message),
+  });
   await survivor.ready;
   pluginRegistry.installCatalog(
     "host-1",
@@ -339,7 +386,11 @@ it("a renderer releases its observation on the plugin's client when it crashes, 
     expect(released.some((id) => initialIds.has(id))).toBe(true);
     deliver({
       type: "project.update",
-      payload: { subscriptionId: survivor.subscriptionId, kind: "remove", projectId: "still-live" },
+      payload: {
+        subscriptionId: survivor.subscriptionId,
+        kind: "remove",
+        projectId: "still-live",
+      },
     });
     expect(updates).toHaveLength(1);
     await render(recoveredTimelineItem);
