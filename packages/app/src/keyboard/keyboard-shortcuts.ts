@@ -50,7 +50,13 @@ export interface KeyboardShortcutHelpRow {
   noteKey?: string;
 }
 
-export type ShortcutSectionId = "general" | "workspaces" | "tabs-panes" | "layout" | "agent-input";
+export type ShortcutSectionId =
+  | "general"
+  | "workspaces"
+  | "tabs-panes"
+  | "layout"
+  | "agent-input"
+  | "lists";
 
 export interface KeyboardShortcutHelpSection {
   id: ShortcutSectionId;
@@ -132,6 +138,7 @@ const SHORTCUT_HELP_SECTION_ORDER: readonly ShortcutSectionId[] = [
   "tabs-panes",
   "layout",
   "agent-input",
+  "lists",
 ];
 
 const SHORTCUT_HELP_SECTION_TITLES: Record<ShortcutSectionId, string> = {
@@ -140,6 +147,7 @@ const SHORTCUT_HELP_SECTION_TITLES: Record<ShortcutSectionId, string> = {
   "tabs-panes": "Tabs & Panes",
   layout: "Layout",
   "agent-input": "Agent Input",
+  lists: "Timeline & lists",
 };
 
 const SHORTCUT_HELP_SECTION_LABEL_KEYS: Record<ShortcutSectionId, string> = {
@@ -148,6 +156,8 @@ const SHORTCUT_HELP_SECTION_LABEL_KEYS: Record<ShortcutSectionId, string> = {
   "tabs-panes": "settings.shortcuts.sections.tabsPanes",
   layout: "settings.shortcuts.sections.layout",
   "agent-input": "settings.shortcuts.sections.agentInput",
+  // Fork-only rows have no upstream i18n keys, so their English text is the key.
+  lists: "Timeline & lists",
 };
 
 // Rows render in this order rather than in binding-definition order, so the shortcut someone opens
@@ -201,6 +211,18 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
     "dictation-toggle",
     "agent-interrupt",
     "voice-mute-toggle",
+  ],
+  lists: [
+    "list-next",
+    "list-prev",
+    "list-first",
+    "list-last",
+    "list-prompt-prev",
+    "list-prompt-next",
+    "list-open",
+    "list-expand",
+    "list-collapse",
+    "list-insert",
   ],
 };
 
@@ -890,7 +912,7 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "shortcuts.dialog.toggle",
     combo: "Shift+?",
     repeat: false,
-    when: { focusScope: "other" },
+    when: { focusScope: ["other", "list"] },
     help: {
       id: "show-shortcuts",
       section: "general",
@@ -1140,13 +1162,134 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     id: "agent-interrupt",
     action: "agent.interrupt",
     combo: "Escape",
-    when: { commandCenter: false, focusScope: ["message-input", "other"] },
+    when: { commandCenter: false, focusScope: ["message-input", "other", "list"] },
     preventDefault: false,
     stopPropagation: false,
     help: {
       id: "agent-interrupt",
       section: "agent-input",
       label: "Interrupt agent",
+    },
+  },
+  // --- Timeline & lists (fork) ---
+  // Bare keys, so only a focused list gets them. Before dictation-confirm: the first Enter match wins.
+  {
+    id: "list-next",
+    action: "list.next",
+    combo: "J",
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-next",
+      section: "lists",
+      label: "Next block or row",
+      note: "In the timeline, the sidebar and the Explorer",
+    },
+  },
+  {
+    id: "list-prev",
+    action: "list.prev",
+    combo: "K",
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-prev",
+      section: "lists",
+      label: "Previous block or row",
+    },
+  },
+  {
+    id: "list-first",
+    action: "list.first",
+    combo: "G G",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-first",
+      section: "lists",
+      label: "First block or row",
+    },
+  },
+  {
+    id: "list-last",
+    action: "list.last",
+    combo: "Shift+G",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-last",
+      section: "lists",
+      label: "Last block or row",
+    },
+  },
+  {
+    id: "list-prompt-prev",
+    action: "list.prompt.prev",
+    combo: "Shift+[",
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-prompt-prev",
+      section: "lists",
+      label: "Previous prompt",
+      defaultDisplayKeys: ["{"],
+    },
+  },
+  {
+    id: "list-prompt-next",
+    action: "list.prompt.next",
+    combo: "Shift+]",
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-prompt-next",
+      section: "lists",
+      label: "Next prompt",
+      defaultDisplayKeys: ["}"],
+    },
+  },
+  {
+    id: "list-open",
+    action: "list.open",
+    combo: "Enter",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-open",
+      section: "lists",
+      label: "Open row or expand block",
+    },
+  },
+  {
+    id: "list-expand",
+    action: "list.expand",
+    combo: "L",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-expand",
+      section: "lists",
+      label: "Expand",
+    },
+  },
+  {
+    id: "list-collapse",
+    action: "list.collapse",
+    combo: "H",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-collapse",
+      section: "lists",
+      label: "Collapse",
+    },
+  },
+  {
+    id: "list-insert",
+    action: "list.insert",
+    combo: "I",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "list" },
+    help: {
+      id: "list-insert",
+      section: "lists",
+      label: "Back to the message input",
     },
   },
   {
@@ -1162,7 +1305,7 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "message-input.action",
     combo: "Space",
     repeat: false,
-    when: { commandCenter: false, focusScope: "other" },
+    when: { commandCenter: false, focusScope: ["other", "list"] },
     payload: { type: "message-input", kind: "voice-mute-toggle" },
     help: {
       id: "voice-mute-toggle",

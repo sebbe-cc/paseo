@@ -203,7 +203,8 @@ import {
   getPanelInstanceAttributes,
   useModifiedPanelTabIds,
 } from "@/panels/panel-instance-attributes";
-import { findAdjacentPane } from "@/utils/split-navigation";
+import { findAdjacentPane, type PaneDirection } from "@/utils/split-navigation";
+import { moveFocus } from "@/keyboard/focus-regions";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
@@ -531,8 +532,6 @@ function WorkspaceHeaderTitleBar({
     </View>
   );
 }
-
-type PaneDirection = "left" | "right" | "up" | "down";
 
 function parsePaneDirection(actionId: string): PaneDirection | null {
   const direction = actionId.split(".").pop();
@@ -2682,7 +2681,9 @@ function WorkspaceScreenContent({
 
       if (action.id.startsWith("workspace.pane.focus.")) {
         const direction = parsePaneDirection(action.id);
-        if (direction) {
+        if (direction && isWeb) {
+          moveFocus(direction);
+        } else if (direction) {
           const adjacentPaneId = findAdjacentPane(workspaceLayout.root, focusedPane.id, direction);
           if (adjacentPaneId) {
             focusWorkspacePane(persistenceKey, adjacentPaneId);
