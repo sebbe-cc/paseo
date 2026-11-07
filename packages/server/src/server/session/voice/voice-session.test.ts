@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import type { VoiceSpeakHandler } from "../../voice-types.js";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import pino from "pino";
 import { describe, expect, test, vi } from "vitest";
 
@@ -324,5 +324,145 @@ describe("VoiceSession streaming transcription", () => {
     );
 
     await voiceSession.cleanup();
+  });
+});
+
+describe("plugin voice", () => {
+  function fixture() {
+    const host = createFakeHost();
+    const interrupt = vi.spyOn(host, "interruptAgentIfRunning");
+    const reload = vi.spyOn(host, "reloadAgentSession");
+    const close = vi.fn(async () => {});
+    const appendAudio = vi.fn();
+    let emit: (event: import("@getpaseo/plugin/server").VoiceProviderEvent) => void = () => {};
+    const start = vi.fn(async (_selection, context) => {
+      emit = context.emit;
+      return { close, appendAudio };
+    });
+    const voice = new VoiceSession({
+      host,
+      sessionId: "plugin-test",
+      logger: pino({ level: "silent" }),
+      stt: null,
+      tts: null,
+      voice: {
+        plugin: {
+          getSelection: () => ({ pluginId: "test", providerId: "live" }),
+          host: { hasVoiceProvider: () => true, startVoiceProvider: start },
+        },
+      },
+    });
+    return {
+      host,
+      voice,
+      start,
+      close,
+      appendAudio,
+      reload,
+      interrupt,
+      emit: (event: import("@getpaseo/plugin/server").VoiceProviderEvent) => emit(event),
+    };
+  }
+
+  test("routes PCM through the plugin without STT, TTS or agent reload, and speech leaves the job running", async () => {
+    const f = fixture();
+    await f.voice.handleSetVoiceMode(true, VOICE_AGENT_ID, "start");
+    expect(f.voice.isActiveForAgent(VOICE_AGENT_ID)).toBe(true);
+    await f.voice.handleAudioChunk({
+      type: "voice_audio_chunk",
+      audio: "AAABAA==",
+      format: "audio/pcm;rate=16000;bits=16",
+    });
+    expect(f.appendAudio).toHaveBeenCalledWith("AAABAA==");
+    f.emit({ type: "speech", isSpeaking: true });
+    f.emit({ type: "transcript", role: "user", text: "keep working" });
+    f.emit({
+      type: "audio",
+      audio: "AAABAA==",
+      utteranceId: "u",
+      chunkIndex: 0,
+      isLastChunk: true,
+    });
+    expect(f.interrupt).not.toHaveBeenCalled();
+    expect(f.reload).not.toHaveBeenCalled();
+    expect(f.host.spokenInput).toEqual([]);
+    expect(f.host.emitted).toContainEqual(
+      expect.objectContaining({
+        type: "audio_output",
+        payload: expect.objectContaining({ format: "pcm" }),
+      }),
+    );
+    await f.voice.handleAbort();
+    expect(f.interrupt).toHaveBeenCalledWith(VOICE_AGENT_ID);
+    await f.voice.cleanup();
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.reload).not.toHaveBeenCalled();
+  });
+
+  test("switching agents closes the old provider and ignores its late events", async () => {
+    const f = fixture();
+    await f.voice.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    const oldEmit = f.start.mock.calls[0][1].emit;
+    await f.voice.handleSetVoiceMode(true, "22222222-2222-4222-8222-222222222222");
+    const count = f.host.emitted.length;
+    oldEmit({ type: "speech", isSpeaking: true });
+    expect(f.host.emitted).toHaveLength(count);
+    expect(f.close).toHaveBeenCalledTimes(1);
+    await f.voice.cleanup();
+    expect(f.close).toHaveBeenCalledTimes(2);
+  });
+
+  test("unload releases demand, reports session end and stops input", async () => {
+    const f = fixture();
+    await f.voice.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    f.emit({ type: "closed", error: "Plugin stopped" });
+    expect(f.voice.hasDemand).toBe(false);
+    expect(f.voice.isActiveForAgent(VOICE_AGENT_ID)).toBe(false);
+    expect(f.host.emitted).toContainEqual({
+      type: "voice_input_state",
+      payload: { isSpeaking: false, sessionEnded: true, error: "Plugin stopped" },
+    });
+    await f.voice.cleanup();
+    expect(f.close).toHaveBeenCalledTimes(1);
+  });
+
+  test("disconnect during bootstrap aborts the provider and closes a late session", async () => {
+    const f = fixture();
+    let finish:
+      | ((value: { close: typeof f.close; appendAudio: typeof f.appendAudio }) => void)
+      | undefined;
+    f.start.mockImplementationOnce(async (_selection, context) => {
+      expect(context.signal.aborted).toBe(false);
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const starting = f.voice.handleSetVoiceMode(true, VOICE_AGENT_ID, "start");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    f.voice.cancel();
+    expect(f.start.mock.calls[0][1].signal.aborted).toBe(true);
+    finish!({ close: f.close, appendAudio: f.appendAudio });
+    await starting;
+    await f.voice.cleanup();
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.host.emitted).toEqual([]);
+  });
+
+  test("stop interrupts pending bootstrap before the transition queue drains", async () => {
+    const f = fixture();
+    f.start.mockImplementationOnce(async (_selection, context) => {
+      await once(context.signal, "abort");
+      return { close: f.close, appendAudio: f.appendAudio };
+    });
+    const starting = f.voice.handleSetVoiceMode(true, VOICE_AGENT_ID, "start");
+    await vi.waitFor(() => expect(f.start).toHaveBeenCalled());
+    const stopping = f.voice.handleSetVoiceMode(false, undefined, "stop");
+    expect(f.start.mock.calls[0][1].signal.aborted).toBe(true);
+    await starting;
+    await stopping;
+    expect(f.voice.hasDemand).toBe(false);
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.interrupt).not.toHaveBeenCalled();
+    await f.voice.cleanup();
   });
 });
