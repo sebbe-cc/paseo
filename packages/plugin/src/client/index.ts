@@ -56,6 +56,7 @@ export type {
   PluginCommandCenterItemContribution,
   PluginClientSlashCommandContribution,
   SettingsState,
+  PluginSettingsSnapshot,
 } from "./contracts.js";
 export type {
   PluginButton,
