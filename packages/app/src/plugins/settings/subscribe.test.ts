@@ -85,6 +85,9 @@ describe("app-lifetime settings subscriptions", () => {
     h.queryClient.clear();
   });
   it("releases the observer if the initial consumer throws", () => {
+    function failConsumer(): never {
+      throw new Error("consumer failed");
+    }
     const queryClient = new QueryClient();
     const lifetime = new AbortController();
     expect(() =>
@@ -95,9 +98,7 @@ describe("app-lifetime settings subscriptions", () => {
           signal: lifetime.signal,
           read: async () => ({ status: "ready", revision: "1", values: { enabled: true } }),
         },
-        () => {
-          throw new Error("consumer failed");
-        },
+        failConsumer,
       ),
     ).toThrow("consumer failed");
     expect(queryClient.getQueryCache().getAll()[0].getObserversCount()).toBe(0);
