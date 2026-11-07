@@ -273,6 +273,68 @@ test("Changes opens All changes for a clean checkout", async ({ page }) => {
   await expect(panel.getByTestId("diff-file-0")).toHaveAccessibleName("committed-only.ts, +1, -0");
 });
 
+test("Changes explains a missing base and its saved fork fallback", async ({ page }, testInfo) => {
+  const repo = await createTempGitRepo("changes-missing-base-", {
+    files: [{ path: "tracked.ts", content: "export const tracked = true;\n" }],
+  });
+  const client = await connectSeedClient();
+  cleanupTasks.push({
+    run: async () => {
+      await client.close();
+      await repo.cleanup();
+    },
+  });
+  const git = (args: string[]) =>
+    execFileSync("git", args, { cwd: repo.path, encoding: "utf8" }).trim();
+  const ref = "refs/heads/epic/deleted-base";
+  const forkSha = git(["rev-parse", "HEAD"]);
+  git(["branch", "epic/deleted-base"]);
+  git(["checkout", "-b", "feature"]);
+  await writeFile(path.join(repo.path, "workspace-only.ts"), "export const workspace = true;\n");
+  git(["add", "workspace-only.ts"]);
+  git(["-c", "commit.gpgsign=false", "commit", "-m", "Workspace change"]);
+  git(["checkout", "epic/deleted-base"]);
+  await writeFile(path.join(repo.path, "base-only.ts"), "export const base = true;\n");
+  git(["add", "base-only.ts"]);
+  git(["-c", "commit.gpgsign=false", "commit", "-m", "Base advance"]);
+  git(["checkout", "feature"]);
+  git(["-c", "commit.gpgsign=false", "merge", "--no-edit", "epic/deleted-base"]);
+  await mkdir(path.join(repo.path, ".git", "paseo"), { recursive: true });
+  await writeFile(
+    path.join(repo.path, ".git", "paseo", "worktree.json"),
+    JSON.stringify({
+      version: 3,
+      baseRefName: "epic/deleted-base",
+      baseRef: ref,
+      forkSha,
+    }),
+  );
+  git(["update-ref", "-d", ref]);
+  const created = await client.createWorkspace({ source: { kind: "directory", path: repo.path } });
+  if (!created.workspace)
+    throw new Error(created.error ?? "Failed to create missing-base workspace");
+  const workspace = { id: created.workspace.id, repoPath: repo.path };
+  await openWorkspaceChangesSurface(page, workspace);
+  const warning = page.getByTestId("changes-missing-base-warning").filter({ visible: true });
+  await expect(warning.first()).toHaveText(
+    `Base ${ref} no longer exists. Comparing against the saved fork point.`,
+  );
+  const panel = page.getByTestId("working-diff-panel").filter({ visible: true });
+  await expect(diffHeaderForPath(panel, "workspace-only.ts")).toBeVisible();
+  await expect(diffHeaderForPath(panel, "base-only.ts")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("missing-base-desktop.png") });
+  await selectChangesComparison(page, "Uncommitted");
+  await expect(warning).toHaveCount(0);
+  await selectChangesComparison(page, "Committed");
+  await expect(warning.first()).toBeVisible();
+  const compact = await openCompactChanges(page, workspace);
+  await expect(compact.getByTestId("changes-missing-base-warning")).toContainText(ref);
+  await expect(compact.getByTestId("changes-missing-base-warning")).toContainText(
+    "saved fork point",
+  );
+  await page.screenshot({ path: testInfo.outputPath("missing-base-compact.png") });
+});
+
 test("All changes combines committed and pending edits and preserves an unfinished review", async ({
   page,
   context,
