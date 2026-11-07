@@ -98,3 +98,43 @@ it("owns provider registration, abort during bootstrap, and exactly-once cleanup
   expect(close).toHaveBeenCalledTimes(1);
   await api.dispose();
 });
+
+it("runs dictation commands in order and closes a session once", async () => {
+  const { PluginDictationWorker } = await import("./dictation-worker.js");
+  const { createPaseoApi } = await import("@getpaseo/client");
+  const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
+  const { vi } = await import("vitest");
+  const api = createPaseoApi(
+    new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "dictation-worker-test" }),
+  );
+  const worker = new PluginDictationWorker();
+  const close = vi.fn();
+  const heard: string[] = [];
+  let agentId: string | undefined;
+  worker.register({
+    id: "live",
+    label: "Live",
+    async start(context) {
+      agentId = context.agentId;
+      return {
+        appendAudio: (audio) => void heard.push(audio),
+        commit: async () => heard.splice(0).join("+"),
+        close,
+      };
+    },
+  });
+  expect(worker.catalog()).toEqual([{ id: "live", label: "Live" }]);
+  const chat = "11111111-1111-4111-8111-111111111111";
+  await worker.request("s", { type: "start", providerId: "live", agentId: chat }, api, "/tmp");
+  expect(agentId).toBe(chat);
+  await worker.request("s", { type: "audio", audio: "a" }, api, "/tmp");
+  await worker.request("s", { type: "audio", audio: "b" }, api, "/tmp");
+  await expect(worker.request("s", { type: "commit" }, api, "/tmp")).resolves.toEqual({
+    text: "a+b",
+  });
+  await worker.request("s", { type: "close" }, api, "/tmp");
+  await expect(worker.request("s", { type: "commit" }, api, "/tmp")).rejects.toThrow("closed");
+  await worker.shutdown();
+  expect(close).toHaveBeenCalledTimes(1);
+  await api.dispose();
+});
