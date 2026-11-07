@@ -104,6 +104,7 @@ function requireScreenTitle(screenId: string, title: unknown): PluginScreenTitle
 
 export type PluginClientRuntime = Pick<
   PluginClientContext,
+  | "subscribeSettings"
   | "i18n"
   | "hid"
   | "clientContext"
@@ -264,6 +265,30 @@ export function runPluginClientBundle(
       };
       removals.add(remove);
       return remove;
+    },
+    subscribeHosts(listener) {
+      if (stopped) return () => {};
+      const remove = runtime.hosts.subscribe(() => {
+        if (!stopped) listener(runtime.hosts.getSnapshot());
+      });
+      removals.add(remove);
+      listener(runtime.hosts.getSnapshot());
+      return () => {
+        remove();
+        removals.delete(remove);
+      };
+    },
+    subscribeSettings(definition, listener) {
+      if (stopped) return () => {};
+      if (!runtime.subscribeSettings) throw new Error("Settings subscriptions are unavailable");
+      const remove = runtime.subscribeSettings(definition, (snapshot) => {
+        if (!stopped) listener(snapshot);
+      });
+      removals.add(remove);
+      return () => {
+        remove();
+        removals.delete(remove);
+      };
     },
     addSettingsScreen(contribution) {
       const screenId = requireId(contribution.id, "settings screen id");
