@@ -1290,3 +1290,34 @@ describe("workspace message schemas", () => {
     expect(newDirectory.source.kind).toBe("directory");
   });
 });
+
+test("workspace bases are optional and retain qualified refs and missing-base state", () => {
+  const workspace = {
+    id: "owned-worktree",
+    projectId: "project",
+    projectDisplayName: "repo",
+    projectRootPath: "/repo",
+    workspaceDirectory: "/repo/feature",
+    projectKind: "git",
+    workspaceKind: "worktree",
+    name: "feature",
+    status: "done",
+    activityAt: null,
+    scripts: [],
+  };
+  expect(WorkspaceDescriptorPayloadSchema.parse(workspace).base).toBeUndefined();
+  const base = {
+    ref: "refs/remotes/upstream/release",
+    forkSha: "a".repeat(40),
+    source: "stored",
+    missing: true,
+  };
+  expect(WorkspaceDescriptorPayloadSchema.parse({ ...workspace, base }).base).toEqual(base);
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({
+      ...workspace,
+      base: null,
+      baseError: "Base ref not found",
+    }),
+  ).toMatchObject({ base: null, baseError: "Base ref not found" });
+});

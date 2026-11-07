@@ -1,3 +1,4 @@
+import { runShowCommand } from "./show.js";
 import { Command } from "commander";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
@@ -64,6 +65,13 @@ export function createWorkspaceCommand(): Command {
       .description("Archive a workspace and everything it owns")
       .argument("<workspace-id>", "Workspace id"),
   ).action(withOutput(runArchiveCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("show")
+      .description("Show a workspace and its comparison base")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runShowCommand));
 
   return workspace;
 }
