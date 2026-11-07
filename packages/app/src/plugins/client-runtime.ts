@@ -1,3 +1,5 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { subscribePluginSettings } from "./settings/subscribe";
 import { createPlayAudio, type AudioEngine } from "@/audio";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { createPluginHosts } from "./hosts";
@@ -25,6 +27,16 @@ export function createPluginClientRuntime(
   return {
     ...capabilities,
     i18n: installation.i18n,
+    subscribeSettings: (definition, listener) =>
+      subscribePluginSettings(
+        {
+          definition,
+          queryClient: installation.queryClient,
+          read: () => capabilities.rpc(settingsRpc(definition.id).read, {}),
+          signal: installation.lifetime.signal,
+        },
+        listener,
+      ),
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
     hosts: createPluginHosts(getHostRuntimeStore(), installation.lifetime.signal),
     addComposerPill(contribution) {

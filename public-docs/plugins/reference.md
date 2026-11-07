@@ -2551,3 +2551,21 @@ Use `paseo plugin ls` to read the current status and error.
 | Edited code does not appear                                           | Run `npm run typecheck`, then `paseo plugin reload <id>`.                                                                                          |
 | Reload fails                                                          | Read `paseo plugin ls` and `paseo plugin logs <id>`, fix the source error, then reload; Paseo does not restore the previous bundle.                |
 | Plugin exits unexpectedly                                             | Read `paseo plugin logs <id>` for retained initialization, cleanup, stderr, and final crash output.                                                |
+
+### App-lifetime host and settings subscriptions (fork)
+
+Client entries can call `client.subscribeHosts(listener)` and
+`client.subscribeSettings(definition, listener)` without mounting a screen or sidebar item.
+Both emit current state immediately and return an idempotent remover. Paseo also removes
+subscriptions if entry setup fails or the plugin unloads. These optional methods are absent
+on older clients: check for them before enabling a feature that needs live app inputs.
+
+The host callback receives the same `readonly PluginHostSummary[]` as `useHosts()`;
+connection changes, additions, removals, and label changes all notify it. Continue to borrow
+APIs with `getPaseoClient(serverId)`; offline hosts are never redirected.
+
+The settings callback receives `PluginSettingsSnapshot<Schema>`: `loading`, `error`,
+`invalid`, or `ready` with validated `values` and `revision`. It observes the installation
+host's settings, shares the screen's replica cache, and follows saved settings and reconnect
+invalidations even when every plugin surface is unmounted. Editing still uses `useSettings`.
+Return the removers from entry cleanup when the subscriptions are no longer needed.
