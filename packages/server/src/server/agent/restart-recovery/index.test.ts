@@ -127,7 +127,8 @@ test("opt-out consumes pending recovery and excludes archived, private, owned an
 // bootstrap wiring persists that failure as stored error attention (the
 // provider handle is preserved) and dispatches the stored state, instead of
 // failing silently into the daemon log or starting a fresh empty Pi session
-// (pa-h9i2).
+// (pa-h9i2). Pre-existing unread attention on the record is replaced by the
+// current recovery error rather than suppressing it.
 test("startup recovery surfaces a missing Pi session file as stored error attention without launching a replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "restart-recovery-pi-missing-"));
   const logger = createTestLogger();
@@ -145,6 +146,10 @@ test("startup recovery surfaces a missing Pi session file as stored error attent
     const missing = join(root, "pi-sessions", "gone.jsonl");
     const agentId = randomUUID();
     const now = new Date().toISOString();
+    // The record already carries unread finished attention (preserved across
+    // restart): the missing-session recovery error must still replace it
+    // instead of being suppressed by the pre-existing flag.
+    const staleAttentionAt = new Date(Date.now() - 60_000).toISOString();
     await storage.upsert(
       parseStoredAgentRecord({
         id: agentId,
@@ -153,6 +158,10 @@ test("startup recovery surfaces a missing Pi session file as stored error attent
         createdAt: now,
         updatedAt: now,
         lastStatus: "running",
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp: staleAttentionAt,
+        lastError: "previous finished attention",
         config: { model: "openrouter/model-a" },
         persistence: {
           provider: "pi",
@@ -220,6 +229,8 @@ test("startup recovery surfaces a missing Pi session file as stored error attent
       lastError: expect.stringContaining("session file is missing"),
     });
     expect(String(after?.lastError)).toContain(missing);
+    // The stale finished attention was replaced, not kept.
+    expect(after?.attentionTimestamp).not.toBe(staleAttentionAt);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       id: agentId,
