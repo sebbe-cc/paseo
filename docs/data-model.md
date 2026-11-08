@@ -40,8 +40,9 @@ point. Legacy metadata without a recoverable branch or fork point produces an ex
 Without stored metadata, only `refs/remotes/origin/HEAD` selects the default; local branches
 are never implicit defaults. Change the base with `paseo workspace set-base` (RPC
 `workspace.base.set`, MCP `set_workspace_base`); it writes `worktree.json` v3 and mirrors the
-qualified ref to `workspaces.json`. Daemon startup migrates legacy bases (bare names, shas,
-pruned remote refs) to qualified refs with fork points.
+qualified ref to `workspaces.json`. Daemon startup migrates legacy bases (bare names, shas
+with unambiguous branch evidence, pruned remote refs with a local namesake) to qualified refs
+with fork points; anything unresolvable is left for `set-base`.
 
 Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries.
 

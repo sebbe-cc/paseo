@@ -19,8 +19,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-function initRepo(dir: string, defaultBranch: string): void {
-  git(dir, "init", "-b", defaultBranch);
+function commitEmpty(dir: string, message: string): void {
   git(
     dir,
     "-c",
@@ -30,8 +29,13 @@ function initRepo(dir: string, defaultBranch: string): void {
     "commit",
     "--allow-empty",
     "-m",
-    "init",
+    message,
   );
+}
+
+function initRepo(dir: string, defaultBranch: string): void {
+  git(dir, "init", "-b", defaultBranch);
+  commitEmpty(dir, "init");
 }
 
 describe("migrateWorkspaceBases", () => {
@@ -95,15 +99,98 @@ describe("migrateWorkspaceBases", () => {
     }
   });
 
-  test("maps a stored sha to the repo default and skips null and directory workspaces", async () => {
+  test("recovers a fork sha to its local branch and keeps the stored commit", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-sha-"));
+    try {
+      initRepo(repo, "main");
+      const mainSha = git(repo, "rev-parse", "HEAD");
+      git(repo, "update-ref", "refs/remotes/origin/main", mainSha);
+      git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+      // A local fork/epic branch on its own history, distinct from origin/main.
+      git(repo, "checkout", "-b", "epic-work");
+      commitEmpty(repo, "epic commit");
+      const epicSha = git(repo, "rev-parse", "HEAD");
+      expect(epicSha).not.toBe(mainSha);
+      await writePaseoWorktreeMetadata(repo, { baseRefName: epicSha, baseRef: epicSha });
+      await addWorkspace("wks_sha", repo, epicSha);
+
+      const result = await migrateWorkspaceBases({
+        workspaceRegistry: registry,
+        logger: createTestLogger(),
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.migrated).toBe(1);
+
+      const record = await registry.get("wks_sha");
+      expect(record?.baseBranch).toBe("refs/heads/epic-work");
+      const metadata = await readPaseoWorktreeMetadata(repo);
+      expect(metadata?.version).toBe(3);
+      expect(metadata?.baseRef).toBe("refs/heads/epic-work");
+      // The stored commit is retained as the fork point, not recomputed.
+      expect(metadata && "forkSha" in metadata ? metadata.forkSha : null).toBe(epicSha);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("leaves an ambiguous sha unchanged with a set-base diagnostic", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-ambiguous-"));
+    try {
+      initRepo(repo, "main");
+      const sha = git(repo, "rev-parse", "HEAD");
+      git(repo, "branch", "epic-a");
+      git(repo, "branch", "epic-b");
+      await writePaseoWorktreeMetadata(repo, { baseRefName: sha, baseRef: sha });
+      await addWorkspace("wks_ambiguous", repo, sha);
+
+      const result = await migrateWorkspaceBases({
+        workspaceRegistry: registry,
+        logger: createTestLogger(),
+      });
+      expect(result.migrated).toBe(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.workspaceId).toBe("wks_ambiguous");
+      expect(result.errors[0]?.error).toMatch(/set-base/);
+
+      // Explicit identity is preserved, not replaced with the repo default.
+      const record = await registry.get("wks_ambiguous");
+      expect(record?.baseBranch).toBe(sha);
+      const metadata = await readPaseoWorktreeMetadata(repo);
+      expect(metadata?.version).toBe(1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("leaves a deleted non-default base unchanged while origin/HEAD exists", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-deleted-"));
     try {
       initRepo(repo, "main");
       git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
       git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
-      const sha = git(repo, "rev-parse", "HEAD");
-      await writePaseoWorktreeMetadata(repo, { baseRefName: sha, baseRef: sha });
-      await addWorkspace("wks_sha", repo, sha);
+      const stored = "refs/remotes/origin/feature/epic";
+      await writePaseoWorktreeMetadata(repo, { baseRefName: "epic", baseRef: stored });
+      await addWorkspace("wks_deleted", repo, stored);
+
+      const result = await migrateWorkspaceBases({
+        workspaceRegistry: registry,
+        logger: createTestLogger(),
+      });
+      expect(result.migrated).toBe(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.workspaceId).toBe("wks_deleted");
+
+      const record = await registry.get("wks_deleted");
+      expect(record?.baseBranch).toBe(stored);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("skips null and directory workspaces", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-skip-"));
+    try {
+      initRepo(repo, "main");
       await addWorkspace("wks_null", repo, null);
       await registry.upsert(
         createPersistedWorkspaceRecord({
@@ -122,12 +209,9 @@ describe("migrateWorkspaceBases", () => {
         logger: createTestLogger(),
       });
       expect(result.errors).toEqual([]);
+      expect(result.migrated).toBe(0);
 
-      const record = await registry.get("wks_sha");
-      expect(record?.baseBranch).toBe("refs/remotes/origin/main");
-      const metadata = await readPaseoWorktreeMetadata(repo);
-      expect(metadata?.version).toBe(3);
-      expect(metadata?.baseRef).toBe("refs/remotes/origin/main");
+      expect((await registry.get("wks_null"))?.baseBranch).toBeNull();
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

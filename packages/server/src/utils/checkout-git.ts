@@ -1659,6 +1659,35 @@ export async function setWorkspaceBase(
   return { ref, forkSha, source: "stored", missing: false };
 }
 
+// Migration path for legacy SHA bases: the caller inferred the branch from
+// ref evidence and keeps the stored commit as the fork point instead of
+// recomputing it, so an explicit fork/local base is never reassigned to an
+// unrelated branch.
+export async function setWorkspaceBaseWithForkSha(
+  cwd: string,
+  requestedRef: string,
+  forkSha: string,
+  context?: CheckoutContext,
+): Promise<WorkspaceBase> {
+  const ref = assertQualifiedBaseRef(requestedRef);
+  const sha = forkSha.trim();
+  if (!/^[0-9a-f]{40,64}$/i.test(sha)) {
+    throw new Error(`Invalid fork commit: ${forkSha}`);
+  }
+  const root = await getWorktreeRoot(cwd, context);
+  if (!root) {
+    throw new Error(`Not a git repository: ${cwd}`);
+  }
+  if (!(await doesGitRefExist(root, ref, context))) {
+    throw new Error(`Base ref not found: ${ref}`);
+  }
+  if (!(await doesGitCommitExist(root, sha, context))) {
+    throw new Error(`Fork commit not found: ${sha}`);
+  }
+  await setPaseoWorktreeBase(root, { baseRef: ref, forkSha: sha });
+  return { ref, forkSha: sha, source: "stored", missing: false };
+}
+
 async function doesGitCommitExist(
   cwd: string,
   sha: string,
