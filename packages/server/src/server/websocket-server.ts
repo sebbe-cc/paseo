@@ -2021,6 +2021,8 @@ export class VoiceAssistantWebSocketServer {
         workspaceSetupRun: true,
         workspaceSetupObservation: true,
         workspaceSortTimes: true,
+        // COMPAT(workspaceBaseSet): added in v0.15.0 for workspace.set-base; remove gate after 2027-05-04.
+        workspaceBaseSet: true,
         // COMPAT(providersSnapshot): keep optional until all clients rely on snapshot flow.
         providersSnapshot: true,
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.

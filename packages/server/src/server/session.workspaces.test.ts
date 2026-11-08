@@ -8528,6 +8528,137 @@ test("workspace.title.set.request returns accepted=false when workspace is not f
   expect(response?.payload.error).toBeTruthy();
 });
 
+test("workspace.base.set.request stores a qualified base and mirrors it to the registry", async () => {
+  const repoDir = mkdtempSync(path.join(tmpdir(), "paseo-base-set-"));
+  const emitted: SessionOutboundMessage[] = [];
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+      ],
+      { cwd: repoDir },
+    );
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repoDir });
+    const session = asTestSession(
+      createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
+    );
+    const workspace = createPersistedWorkspaceRecord({
+      workspaceId: "ws-base-1",
+      projectId: "proj-1",
+      cwd: realpathSync(repoDir),
+      kind: "local_checkout",
+      displayName: "main",
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    });
+    const workspaces = new Map([[workspace.workspaceId, workspace]]);
+    const project = createPersistedProjectRecord({
+      projectId: "proj-1",
+      rootPath: realpathSync(repoDir),
+      kind: "git",
+      displayName: "repo",
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    });
+    session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
+    session.projectRegistry.list = async () => [project];
+    session.workspaceRegistry.list = async () => Array.from(workspaces.values());
+    session.workspaceRegistry.get = async (id: string) => workspaces.get(id) ?? null;
+    session.workspaceRegistry.update = async (id, updater) => {
+      const existing = workspaces.get(id);
+      if (!existing) return null;
+      const updated = updater(existing);
+      workspaces.set(id, updated);
+      return updated;
+    };
+    await session.handleMessage({
+      type: "fetch_workspaces_request",
+      requestId: "sub-workspaces",
+      subscribe: { subscriptionId: "sub-workspaces" },
+    });
+
+    await session.handleMessage({
+      type: "workspace.base.set.request",
+      workspaceId: workspace.workspaceId,
+      baseRef: "refs/remotes/origin/main",
+      requestId: "req-base-1",
+    });
+
+    const response = findByType(emitted, "workspace.base.set.response");
+    expect(response?.payload).toMatchObject({
+      requestId: "req-base-1",
+      workspaceId: workspace.workspaceId,
+      accepted: true,
+      error: null,
+    });
+    expect(response?.payload.base).toMatchObject({
+      ref: "refs/remotes/origin/main",
+      source: "stored",
+      missing: false,
+    });
+    expect(response?.payload.base?.forkSha).toMatch(/^[0-9a-f]{40}$/i);
+    expect(workspaces.get(workspace.workspaceId)?.baseBranch).toBe("refs/remotes/origin/main");
+    expect(findByType(emitted, "workspace_update")?.payload).toMatchObject({
+      kind: "upsert",
+      workspace: { id: "ws-base-1" },
+    });
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("workspace.base.set.request rejects unknown workspaces, directories and bare names", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
+  );
+  session.workspaceRegistry.get = async (id: string) =>
+    id === "ws-dir"
+      ? createPersistedWorkspaceRecord({
+          workspaceId: "ws-dir",
+          projectId: "proj-1",
+          cwd: "/tmp/repo",
+          kind: "directory",
+          displayName: "dir",
+          createdAt: "2026-03-01T12:00:00.000Z",
+          updatedAt: "2026-03-01T12:00:00.000Z",
+        })
+      : null;
+  session.workspaceRegistry.update = async () => null;
+
+  await session.handleMessage({
+    type: "workspace.base.set.request",
+    workspaceId: "does-not-exist",
+    baseRef: "refs/remotes/origin/main",
+    requestId: "req-base-missing",
+  });
+  expect(findByType(emitted, "workspace.base.set.response")?.payload).toMatchObject({
+    requestId: "req-base-missing",
+    accepted: false,
+  });
+
+  emitted.length = 0;
+  await session.handleMessage({
+    type: "workspace.base.set.request",
+    workspaceId: "ws-dir",
+    baseRef: "refs/remotes/origin/main",
+    requestId: "req-base-dir",
+  });
+  expect(findByType(emitted, "workspace.base.set.response")?.payload).toMatchObject({
+    requestId: "req-base-dir",
+    accepted: false,
+  });
+});
+
 async function createSessionWithTerminalManager(options: {
   workspaces: PersistedWorkspaceRecord[];
   projects: PersistedProjectRecord[];

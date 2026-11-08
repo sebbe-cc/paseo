@@ -4,12 +4,71 @@ import {
   RecentProviderSessionDescriptorPayloadSchema,
   SessionInboundMessageSchema,
   SessionOutboundMessageSchema,
+  WorkspaceBaseSetRequestSchema,
+  WorkspaceBaseSetResponseSchema,
   WorkspaceCreateRequestSchema,
   WorkspaceDescriptorPayloadSchema,
   WorkspaceScriptPayloadSchema,
 } from "./messages.js";
 
 describe("workspace message schemas", () => {
+  test("parses workspace.base.set request and response", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "workspace.base.set.request",
+        workspaceId: "wks_0123456789abcdef",
+        baseRef: "refs/remotes/origin/main",
+        requestId: "req-base-set",
+      }),
+    ).toEqual({
+      type: "workspace.base.set.request",
+      workspaceId: "wks_0123456789abcdef",
+      baseRef: "refs/remotes/origin/main",
+      requestId: "req-base-set",
+    });
+    expect(
+      WorkspaceBaseSetRequestSchema.parse({
+        type: "workspace.base.set.request",
+        workspaceId: "wks_0123456789abcdef",
+        baseRef: "refs/heads/my-epic",
+        requestId: "req-base-set",
+      }),
+    ).toMatchObject({ baseRef: "refs/heads/my-epic" });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace.base.set.response",
+        payload: {
+          requestId: "req-base-set",
+          workspaceId: "wks_0123456789abcdef",
+          accepted: true,
+          base: {
+            ref: "refs/remotes/origin/main",
+            forkSha: "0123456789abcdef0123456789abcdef01234567",
+            source: "stored",
+            missing: false,
+          },
+          error: null,
+        },
+      }),
+    ).toMatchObject({
+      type: "workspace.base.set.response",
+      payload: { accepted: true, error: null },
+    });
+    expect(
+      WorkspaceBaseSetResponseSchema.parse({
+        type: "workspace.base.set.response",
+        payload: {
+          requestId: "req-base-set",
+          workspaceId: "wks_0123456789abcdef",
+          accepted: false,
+          base: null,
+          error: "Workspace not found",
+        },
+      }).payload.accepted,
+    ).toBe(false);
+  });
+
   test("parses mark-unread request and response", () => {
     expect(
       SessionInboundMessageSchema.parse({

@@ -1,4 +1,4 @@
-import { resolveWorkspaceBase } from "../utils/checkout-git.js";
+import { resolveWorkspaceBase, setWorkspaceBase } from "../utils/checkout-git.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -3092,6 +3092,8 @@ export class Session {
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
       case "workspace.pin.set.request":
         return this.handleWorkspacePinSetRequest(msg.workspaceId, msg.pinned, msg.requestId);
+      case "workspace.base.set.request":
+        return this.handleWorkspaceBaseSetRequest(msg.workspaceId, msg.baseRef, msg.requestId);
       default:
         return undefined;
     }
@@ -3982,6 +3984,61 @@ export class Session {
         },
       });
       emitResponse(false, null, getErrorMessageOr(error, "Failed to pin workspace"));
+    }
+  }
+
+  private async handleWorkspaceBaseSetRequest(
+    workspaceId: string,
+    baseRef: string,
+    requestId: string,
+  ): Promise<void> {
+    const logContext = { workspaceId, baseRef, requestId };
+    this.sessionLogger.info(logContext, "session: workspace.base.set.request");
+    const emitResponse = (
+      accepted: boolean,
+      base: import("@getpaseo/protocol/messages").WorkspaceBase | null,
+      error: string | null,
+    ) => {
+      this.emit({
+        type: "workspace.base.set.response",
+        payload: { requestId, workspaceId, accepted, base, error },
+      });
+    };
+
+    try {
+      const existing = await this.workspaceRegistry.get(workspaceId);
+      if (!existing) {
+        emitResponse(false, null, "Workspace not found");
+        return;
+      }
+      if (existing.kind === "directory") {
+        emitResponse(false, null, "Workspace is not a git workspace");
+        return;
+      }
+      const base = await setWorkspaceBase(existing.cwd, baseRef);
+      const updatedAt = new Date().toISOString();
+      await this.workspaceRegistry.update(workspaceId, (record) => ({
+        ...record,
+        baseBranch: base.ref,
+        updatedAt,
+      }));
+      emitResponse(true, base, null);
+      await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
+    } catch (error) {
+      this.sessionLogger.error(
+        { ...logContext, err: error },
+        "session: workspace.base.set.request error",
+      );
+      this.emit({
+        type: "activity_log",
+        payload: {
+          id: uuidv4(),
+          timestamp: new Date(),
+          type: "error",
+          content: `Failed to set workspace base: ${getErrorMessage(error)}`,
+        },
+      });
+      emitResponse(false, null, getErrorMessageOr(error, "Failed to set workspace base"));
     }
   }
 

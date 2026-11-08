@@ -1037,6 +1037,13 @@ export const WorkspacePinSetRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const WorkspaceBaseSetRequestSchema = z.object({
+  type: z.literal("workspace.base.set.request"),
+  workspaceId: z.string(),
+  baseRef: z.string(),
+  requestId: z.string(),
+});
+
 export const WorkspaceLabelColorSchema = z.enum(WORKSPACE_LABEL_COLORS);
 export const WorkspaceLabelDefinitionSchema = z.object({
   name: z.string(),
@@ -3306,6 +3313,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProjectRemoveRequestSchema,
   WorkspaceTitleSetRequestSchema,
   WorkspacePinSetRequestSchema,
+  WorkspaceBaseSetRequestSchema,
   WorkspaceLabelListRequestSchema,
   WorkspaceLabelAssignmentSetRequestSchema,
   WorkspaceLabelUpdateRequestSchema,
@@ -3800,6 +3808,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerSubagentNesting: z.boolean().optional(),
         // COMPAT(workspacePinning): added in v0.1.107, remove gate after 2027-01-12.
         workspacePinning: z.boolean().optional(),
+        // COMPAT(workspaceBaseSet): added in v0.15.0 for workspace.set-base; remove gate after 2027-05-04.
+        workspaceBaseSet: z.boolean().optional(),
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
         workspaceMarkUnread: z.boolean().optional(),
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
@@ -4079,6 +4089,19 @@ export const WorkspaceBaseSchema = z.object({
 });
 
 export type WorkspaceBase = z.infer<typeof WorkspaceBaseSchema>;
+
+export const WorkspaceBaseSetResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  workspaceId: z.string(),
+  accepted: z.boolean(),
+  base: WorkspaceBaseSchema.nullable(),
+  error: z.string().nullable(),
+});
+
+export const WorkspaceBaseSetResponseSchema = z.object({
+  type: z.literal("workspace.base.set.response"),
+  payload: WorkspaceBaseSetResponsePayloadSchema,
+});
 
 const WorkspaceGitRuntimePayloadSchema = z
   .object({
@@ -7148,6 +7171,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProjectRemoveResponseSchema,
   WorkspaceTitleSetResponseSchema,
   WorkspacePinSetResponseSchema,
+  WorkspaceBaseSetResponseSchema,
   WorkspaceRecoveryInspectResponseSchema,
   WorkspaceRecoveryRestoreResponseSchema,
   WaitForFinishResponseMessageSchema,
@@ -7356,6 +7380,8 @@ export type WorkspaceTitleSetResponsePayload = z.infer<
 >;
 export type WorkspacePinSetResponse = z.infer<typeof WorkspacePinSetResponseSchema>;
 export type WorkspacePinSetResponsePayload = z.infer<typeof WorkspacePinSetResponsePayloadSchema>;
+export type WorkspaceBaseSetResponse = z.infer<typeof WorkspaceBaseSetResponseSchema>;
+export type WorkspaceBaseSetResponsePayload = z.infer<typeof WorkspaceBaseSetResponsePayloadSchema>;
 export type WorkspaceRecoveryState = z.infer<typeof WorkspaceRecoveryStateSchema>;
 export type WorkspaceRecoveryInspectResponse = z.infer<
   typeof WorkspaceRecoveryInspectResponseSchema

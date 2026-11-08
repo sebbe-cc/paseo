@@ -3513,6 +3513,26 @@ export class DaemonClient {
     return { pinnedAt: payload.pinnedAt };
   }
 
+  async setWorkspaceBase(
+    workspaceId: string,
+    baseRef: string,
+    requestId?: string,
+  ): Promise<{ base: import("@getpaseo/protocol/messages").WorkspaceBase | null }> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "workspace.base.set.request",
+        workspaceId,
+        baseRef,
+      },
+      responseType: "workspace.base.set.response",
+    });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "setWorkspaceBase rejected");
+    }
+    return { base: payload.base };
+  }
+
   async inspectWorkspaceRecovery(
     workspaceId: string,
     requestId?: string,

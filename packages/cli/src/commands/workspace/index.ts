@@ -6,6 +6,7 @@ import { runArchiveCommand } from "./archive.js";
 import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
+import { runSetBaseCommand } from "./set-base.js";
 import { runSetupCommand } from "./setup.js";
 
 export function createWorkspaceCommand(): Command {
@@ -72,6 +73,17 @@ export function createWorkspaceCommand(): Command {
       .description("Show a workspace and its comparison base")
       .argument("<workspace-id>", "Workspace id"),
   ).action(withOutput(runShowCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("set-base")
+      .description("Set a workspace's comparison base to a qualified git ref")
+      .argument("<workspace-id>", "Workspace id")
+      .argument(
+        "<ref>",
+        "Qualified base ref (refs/heads/<branch> or refs/remotes/<remote>/<branch>)",
+      ),
+  ).action(withOutput(runSetBaseCommand));
 
   return workspace;
 }

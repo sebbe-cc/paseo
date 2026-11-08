@@ -262,6 +262,75 @@ export async function writePaseoWorktreeMetadata(
   });
 }
 
+export function assertQualifiedBaseRef(ref: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed) {
+    throw new Error("Base branch is required");
+  }
+  if (trimmed === "HEAD" || trimmed.includes("..") || trimmed.includes("@{")) {
+    throw new Error(`Invalid base branch: ${ref}`);
+  }
+  if (/^[0-9a-f]{40,64}$/i.test(trimmed)) {
+    throw new Error(`Workspace base is a commit (${trimmed}); set a qualified branch base`);
+  }
+  if (!trimmed.startsWith("refs/heads/") && !trimmed.startsWith("refs/remotes/")) {
+    throw new Error(
+      `Workspace base must be a qualified ref (refs/heads/<branch> or refs/remotes/<remote>/<branch>), got: ${ref}`,
+    );
+  }
+  return trimmed;
+}
+
+export async function setPaseoWorktreeBase(
+  worktreeRoot: string,
+  options: {
+    baseRef: string;
+    forkSha: string;
+  },
+): Promise<PaseoWorktreeMetadata> {
+  return mutateMetadata(worktreeRoot, async (root) => {
+    const baseRef = assertQualifiedBaseRef(options.baseRef);
+    const forkSha = options.forkSha.trim();
+    if (!/^[0-9a-f]{40,64}$/i.test(forkSha)) {
+      throw new Error(`Invalid fork commit: ${options.forkSha}`);
+    }
+    const baseRefName = normalizeBaseRefName(baseRef);
+    assertValidBaseRef(baseRefName);
+
+    const current = await readMetadataFile(root);
+    let preserved: {
+      changeRequestLookupTarget?: PaseoWorktreeChangeRequestHint;
+      runtime?: { worktreePort: number };
+      firstAgentBranchAutoName?:
+        | { status: "pending"; placeholderBranchName: string }
+        | { status: "attempted"; placeholderBranchName: string; attemptedAt: string };
+    } = {};
+    if (current && current.version !== 1) {
+      if (current.changeRequestLookupTarget) {
+        preserved.changeRequestLookupTarget = current.changeRequestLookupTarget;
+      }
+      if (current.runtime) {
+        preserved.runtime = current.runtime;
+      }
+      if (current.firstAgentBranchAutoName) {
+        preserved.firstAgentBranchAutoName = current.firstAgentBranchAutoName;
+      }
+    } else if (current?.changeRequestLookupTarget) {
+      preserved = { changeRequestLookupTarget: current.changeRequestLookupTarget };
+    }
+
+    const next = PaseoWorktreeMetadataV3Schema.parse({
+      ...preserved,
+      version: 3,
+      baseRefName,
+      baseRef,
+      forkSha,
+    });
+    await writePaseoWorktreeMetadataFile(root, next);
+    return next;
+  });
+}
+
 export async function writePaseoWorktreeRuntimeMetadata(
   worktreeRoot: string,
   options: { worktreePort: number },

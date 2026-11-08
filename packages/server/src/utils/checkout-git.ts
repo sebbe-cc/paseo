@@ -45,6 +45,7 @@ import { readGitFileContents } from "./git-file-contents.js";
 import { unquoteGitPath } from "./git-quoted-path.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "./worktree.js";
 import {
+  assertQualifiedBaseRef,
   branchNameFromRef,
   findPaseoWorktreeRootForCwd,
   hasPaseoWorktreeMetadata,
@@ -52,6 +53,7 @@ import {
   type PaseoWorktreeMetadata,
   readPaseoWorktreeMetadata,
   rebindPaseoWorktreeChangeRequestHint,
+  setPaseoWorktreeBase,
 } from "./worktree-metadata.js";
 const READ_ONLY_GIT_ENV = {
   GIT_OPTIONAL_LOCKS: "0",
@@ -1634,6 +1636,27 @@ async function qualifyLegacyBaseRef(
     if (await doesGitRefExist(cwd, candidate, context)) return candidate;
   }
   throw new Error(`Base ref not found: ${ref}; no saved fork point is available`);
+}
+
+export async function setWorkspaceBase(
+  cwd: string,
+  requestedRef: string,
+  context?: CheckoutContext,
+): Promise<WorkspaceBase> {
+  const ref = assertQualifiedBaseRef(requestedRef);
+  const root = await getWorktreeRoot(cwd, context);
+  if (!root) {
+    throw new Error(`Not a git repository: ${cwd}`);
+  }
+  if (!(await doesGitRefExist(root, ref, context))) {
+    throw new Error(`Base ref not found: ${ref}`);
+  }
+  const forkSha = await tryResolveMergeBase(root, ref);
+  if (!forkSha) {
+    throw new Error(`Cannot resolve fork point for base ${ref}`);
+  }
+  await setPaseoWorktreeBase(root, { baseRef: ref, forkSha });
+  return { ref, forkSha, source: "stored", missing: false };
 }
 
 async function doesGitCommitExist(

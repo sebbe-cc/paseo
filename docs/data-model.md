@@ -38,7 +38,10 @@ Consumers read `base` through the workspace API or `paseo workspace show --json`
 infer it from a branch display name. `missing: true` means the comparison uses the saved fork
 point. Legacy metadata without a recoverable branch or fork point produces an explicit error.
 Without stored metadata, only `refs/remotes/origin/HEAD` selects the default; local branches
-are never implicit defaults.
+are never implicit defaults. Change the base with `paseo workspace set-base` (RPC
+`workspace.base.set`, MCP `set_workspace_base`); it writes `worktree.json` v3 and mirrors the
+qualified ref to `workspaces.json`. Daemon startup migrates legacy bases (bare names, shas,
+pruned remote refs) to qualified refs with fork points.
 
 Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries.
 

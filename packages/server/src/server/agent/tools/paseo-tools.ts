@@ -2365,6 +2365,74 @@ function createToolCatalog(
   );
 
   registerTool(
+    "set_workspace_base",
+    {
+      title: "Set workspace base",
+      description:
+        "Set a workspace's comparison base to a qualified git ref. Works for worktrees Paseo did not create and local checkouts. Use a fully qualified ref: refs/remotes/<remote>/<branch> for published bases, refs/heads/<branch> for local ones.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Workspace id to set the base for. Omit to use your current workspace."),
+        baseRef: z
+          .string()
+          .trim()
+          .min(1, "baseRef is required")
+          .describe("Qualified base ref (refs/heads/<branch> or refs/remotes/<remote>/<branch>)."),
+      },
+      outputSchema: {
+        success: z.boolean(),
+        workspaceId: z.string(),
+        baseRef: z.string(),
+        forkSha: z.string().nullable(),
+      },
+    },
+    async ({ workspaceId: requestedWorkspaceId, baseRef }) => {
+      if (!options.workspaceRegistry) {
+        throw new Error("Workspace registry is required to set workspace bases");
+      }
+      if (!options.emitWorkspaceUpdatesForWorkspaceIds) {
+        throw new Error("Workspace update emitter is required to set workspace bases");
+      }
+
+      const workspaceId = resolveWorkspaceIdForRename(requestedWorkspaceId);
+      const existing = await options.workspaceRegistry.get(workspaceId);
+      if (!existing) {
+        throw new PaseoToolInputError(`Workspace ${workspaceId} not found`);
+      }
+      if (existing.archivedAt) {
+        throw new PaseoToolInputError(`Workspace ${workspaceId} is archived`);
+      }
+      if (existing.kind === "directory") {
+        throw new PaseoToolInputError(`Workspace ${workspaceId} is not a git workspace`);
+      }
+
+      const { setWorkspaceBase } = await import("../../../utils/checkout-git.js");
+      const base = await setWorkspaceBase(existing.cwd, baseRef);
+
+      await options.workspaceRegistry.upsert({
+        ...existing,
+        baseBranch: base.ref,
+        updatedAt: new Date().toISOString(),
+      });
+      await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
+
+      return {
+        content: [],
+        structuredContent: ensureValidJson({
+          success: true,
+          workspaceId,
+          baseRef: base.ref,
+          forkSha: base.forkSha,
+        }),
+      };
+    },
+  );
+
+  registerTool(
     "list_workspace_scripts",
     {
       title: "List workspace scripts",
