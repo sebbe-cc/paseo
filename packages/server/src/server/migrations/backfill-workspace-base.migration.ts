@@ -55,17 +55,34 @@ async function gitCommitExists(cwd: string, sha: string): Promise<boolean> {
 }
 
 // Branch refs pointing exactly at a commit, limited to branch namespaces so
-// tags and other refs never contribute branch identity.
+// tags and other refs never contribute branch identity. Symbolic aliases such
+// as refs/remotes/origin/HEAD are excluded via %(symref): they carry no branch
+// identity of their own and would otherwise read as a second branch ("HEAD").
 async function gitBranchRefsPointingAt(cwd: string, sha: string): Promise<string[]> {
   try {
     const { stdout } = await runGitCommand(
-      ["for-each-ref", "--format=%(refname)", "--points-at", sha, "refs/heads", "refs/remotes"],
+      [
+        "for-each-ref",
+        "--format=%(refname) %(symref)",
+        "--points-at",
+        sha,
+        "refs/heads",
+        "refs/remotes",
+      ],
       { cwd, timeout: 30_000 },
     );
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("refs/heads/") || line.startsWith("refs/remotes/"));
+    const refs: string[] = [];
+    for (const line of stdout.split("\n")) {
+      const parts = line
+        .trim()
+        .split(/\s+/)
+        .filter((part) => part.length > 0);
+      // A second field means the ref is symbolic; only concrete refs count.
+      if (parts.length !== 1) continue;
+      const ref = parts[0];
+      if (ref.startsWith("refs/heads/") || ref.startsWith("refs/remotes/")) refs.push(ref);
+    }
+    return refs;
   } catch {
     return [];
   }

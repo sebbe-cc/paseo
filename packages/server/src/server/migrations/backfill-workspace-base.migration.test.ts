@@ -133,6 +133,34 @@ describe("migrateWorkspaceBases", () => {
     }
   });
 
+  test("migrates a default-branch sha despite the origin/HEAD alias", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-default-sha-"));
+    try {
+      initRepo(repo, "main");
+      const sha = git(repo, "rev-parse", "HEAD");
+      git(repo, "update-ref", "refs/remotes/origin/main", sha);
+      git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+      await writePaseoWorktreeMetadata(repo, { baseRefName: sha, baseRef: sha });
+      await addWorkspace("wks_default_sha", repo, sha);
+
+      const result = await migrateWorkspaceBases({
+        workspaceRegistry: registry,
+        logger: createTestLogger(),
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.migrated).toBe(1);
+
+      const record = await registry.get("wks_default_sha");
+      expect(record?.baseBranch).toBe("refs/remotes/origin/main");
+      const metadata = await readPaseoWorktreeMetadata(repo);
+      expect(metadata?.version).toBe(3);
+      expect(metadata?.baseRef).toBe("refs/remotes/origin/main");
+      expect(metadata && "forkSha" in metadata ? metadata.forkSha : null).toBe(sha);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test("leaves an ambiguous sha unchanged with a set-base diagnostic", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "paseo-base-ambiguous-"));
     try {
