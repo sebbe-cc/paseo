@@ -391,6 +391,19 @@ async function readMetadataFile(worktreeRoot: string): Promise<PaseoWorktreeMeta
   }
 }
 
+/** Reads the metadata from a worktree's git admin dir (`<common>/worktrees/<name>` or the common dir). */
+export async function readPaseoWorktreeMetadataFromGitDir(
+  gitDir: string,
+): Promise<PaseoWorktreeMetadata | null> {
+  const metadataPath = join(gitDir, "paseo", "worktree.json");
+  try {
+    return PaseoWorktreeMetadataSchema.parse(JSON.parse(await readBoundedFile(metadataPath)));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 // O_NONBLOCK lets us reject FIFOs by kind without hanging in open(). A fixed read also
 // caps a regular file that grows between stat and read; readFile's whole-file loop does not.
 async function readBoundedFile(path: string): Promise<string> {
