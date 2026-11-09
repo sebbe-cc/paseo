@@ -195,4 +195,43 @@ describe("plugin panel tab identity", () => {
     expect(workspace).toBe("plugin_workspace_6_review_7_details");
     expect(agent).toBe("plugin_agent_6_review_7_details_7_agent-1");
   });
+
+  it("preserves params through normalization", () => {
+    expect(
+      normalizeWorkspaceTabTarget({
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-1" },
+      }),
+    ).toEqual({
+      kind: "plugin",
+      pluginId: "review",
+      panelId: "summary",
+      context: "workspace",
+      params: { artifactId: "artifact-1" },
+    });
+  });
+
+  it("treats different params as different targets with the same stable id", () => {
+    const first = {
+      kind: "plugin",
+      pluginId: "review",
+      panelId: "summary",
+      context: "workspace",
+      params: { artifactId: "artifact-1" },
+    } as const;
+    const second = {
+      kind: "plugin",
+      pluginId: "review",
+      panelId: "summary",
+      context: "workspace",
+      params: { artifactId: "artifact-2" },
+    } as const;
+
+    expect(workspaceTabTargetsEqual(first, second)).toBe(false);
+    expect(workspaceTabTargetsEqual(first, { ...first })).toBe(true);
+    expect(buildDeterministicWorkspaceTabId(first)).toBe(buildDeterministicWorkspaceTabId(second));
+  });
 });

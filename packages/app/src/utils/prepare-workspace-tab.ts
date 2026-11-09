@@ -8,13 +8,14 @@ export interface PrepareWorkspaceTabInput {
   target: WorkspaceTabTarget;
   pin?: boolean;
   placement?: WorkspaceTabPlacement;
+  newTab?: boolean;
 }
 
 export interface PrepareWorkspaceTabDeps {
   openTab: (input: {
     workspaceKey: string;
     target: WorkspaceTabTarget;
-    intent: "reveal";
+    intent: "reveal" | "new";
     pin?: boolean;
     placement?: WorkspaceTabPlacement;
   }) => string | null;
@@ -41,7 +42,7 @@ export function prepareWorkspaceTab(
   deps.openTab({
     workspaceKey: key,
     target,
-    intent: "reveal",
+    intent: input.newTab === true ? "new" : "reveal",
     pin: input.pin === true && target.kind === "agent",
     placement: input.placement,
   });

@@ -5,6 +5,7 @@ import type {
   PluginTab,
 } from "@getpaseo/plugin/client";
 import type { PluginTheme } from "@getpaseo/plugin";
+import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { PluginClientStateProvider } from "@getpaseo/plugin/client/host";
 import { CircleAlert } from "lucide-react-native";
 import { useMemo, useState } from "react";
@@ -83,7 +84,7 @@ function PluginPanelBody({ theme }: { theme: PluginTheme }) {
     const props: PluginWorkspacePanelProps = {
       // COMPAT(pluginPanelFlatProps): added in v0.13.0, remove after 2027-04-23
       context: "workspace",
-      params: {},
+      params: (target.params ?? {}) as PluginWorkspacePanelProps["params"],
       revision: panelRevision ?? 0,
       tab,
       theme,
@@ -96,10 +97,14 @@ function PluginPanelBody({ theme }: { theme: PluginTheme }) {
     Surface = Component;
     panel = <Component {...props} />;
   } else if (agentExists && target.context === "agent") {
+    const customParams =
+      target.params !== null && typeof target.params === "object" && !Array.isArray(target.params)
+        ? (target.params as Record<string, JsonValue>)
+        : {};
     const props: PluginAgentPanelProps = {
       // COMPAT(pluginPanelFlatProps): added in v0.13.0, remove after 2027-04-23
       context: "agent",
-      params: { agentId: target.agentId },
+      params: { ...customParams, agentId: target.agentId },
       revision: panelRevision ?? 0,
       tab,
       theme,

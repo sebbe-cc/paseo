@@ -2091,6 +2091,148 @@ describe("workspace-layout-store actions", () => {
     ]);
   });
 
+  it("updates an existing plugin panel tab when opening the same panel with new params", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+
+    const firstTabId = store.openTab({
+      workspaceKey,
+      target: {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+      },
+      intent: "reveal",
+    });
+    const revisionAfterFirst =
+      workspaceLayoutStore.getState().panelRevisionByWorkspace[workspaceKey]?.[firstTabId ?? ""] ??
+      0;
+    const secondTabId = store.openTab({
+      workspaceKey,
+      target: {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-1" },
+      },
+      intent: "reveal",
+    });
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+
+    expect(firstTabId).toBe("plugin_workspace_6_review_7_summary");
+    expect(secondTabId).toBe(firstTabId);
+    expect(collectContentTabs(layout.root)).toEqual([
+      {
+        tabId: "plugin_workspace_6_review_7_summary",
+        target: {
+          kind: "plugin",
+          pluginId: "review",
+          panelId: "summary",
+          context: "workspace",
+          params: { artifactId: "artifact-1" },
+        },
+        createdAt: expect.any(Number),
+      },
+    ]);
+    expect(
+      workspaceLayoutStore.getState().panelRevisionByWorkspace[workspaceKey]?.[firstTabId ?? ""],
+    ).toBe(revisionAfterFirst + 1);
+  });
+
+  it("opens a new plugin panel tab for the same panel when newTab intent is used", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+
+    const firstTabId = store.openTab({
+      workspaceKey,
+      target: {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-1" },
+      },
+      intent: "new",
+    });
+    const secondTabId = store.openTab({
+      workspaceKey,
+      target: {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-2" },
+      },
+      intent: "new",
+    });
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const pluginTabs = collectContentTabs(layout.root).filter(
+      (tab) => tab.target.kind === "plugin",
+    );
+
+    expect(firstTabId).not.toBe(secondTabId);
+    expect(pluginTabs).toHaveLength(2);
+    expect(pluginTabs.map((tab) => tab.target)).toEqual([
+      {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-1" },
+      },
+      {
+        kind: "plugin",
+        pluginId: "review",
+        panelId: "summary",
+        context: "workspace",
+        params: { artifactId: "artifact-2" },
+      },
+    ]);
+  });
+
+  it("restores plugin panel params from persisted layout", async () => {
+    const workspaceTarget = {
+      kind: "plugin",
+      pluginId: "review",
+      panelId: "summary",
+      context: "workspace",
+      params: { artifactId: "artifact-1" },
+    };
+    await AsyncStorage.setItem(
+      "workspace-layout-state",
+      JSON.stringify({
+        state: {
+          layoutByWorkspace: {
+            workspace: {
+              root: {
+                kind: "pane",
+                pane: {
+                  id: "main",
+                  tabIds: ["params-panel"],
+                  focusedTabId: "params-panel",
+                  tabs: [{ tabId: "params-panel", target: workspaceTarget, createdAt: 1 }],
+                },
+              },
+              focusedPaneId: "main",
+            },
+          },
+          splitSizesByWorkspace: {},
+        },
+        version: 1,
+      }),
+    );
+    const restored = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+
+    await restored.persist.rehydrate();
+
+    const layout = restored.getState().layoutByWorkspace.workspace;
+    expect(layout && collectContentTabs(layout.root).map((tab) => tab.target)).toEqual([
+      workspaceTarget,
+    ]);
+  });
+
   it("openTab background intent inserts a tab without stealing focus", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();
