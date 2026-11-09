@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
+import { createProjectContainerCommand } from "./container/index.js";
 import { runCreateCommand } from "./create.js";
 import { runDeleteCommand } from "./delete.js";
 import { runLsCommand } from "./ls.js";
@@ -36,6 +37,8 @@ export function createProjectCommand(): Command {
       .description("Delete a project and its workspaces")
       .argument("<project-id>", "Project id"),
   ).action(withOutput(runDeleteCommand));
+
+  project.addCommand(createProjectContainerCommand());
 
   return project;
 }
