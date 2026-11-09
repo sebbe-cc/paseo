@@ -4,7 +4,7 @@ import { getCommandCenterIcon } from "@/command-center/icon";
 import { pluginIconComponent } from "../icons";
 import { resolvePluginPanelOpenLocation } from "../workspace-panels/locations";
 import type { InstalledPlugin } from "../types";
-import { createPluginCapabilities, type PluginNavigation } from "../actions";
+import { createPluginCapabilities, panelNavigationTail, type PluginNavigation } from "../actions";
 
 export interface PluginCommandCenterSource {
   plugins: readonly InstalledPlugin[];
@@ -49,8 +49,7 @@ export function buildPluginCommandCenterContributions(
                   plugin.id,
                   panelId,
                   location,
-                  options?.params,
-                  options?.newTab,
+                  ...panelNavigationTail(options),
                 );
               },
             });
@@ -67,24 +66,12 @@ export function buildPluginCommandCenterContributions(
               const panel = plugin.workspacePanels.find((candidate) => candidate.id === panelId);
               if (!panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
               const location = resolvePluginPanelOpenLocation(panel, options?.location);
+              const tail = panelNavigationTail(options);
               if (panel.context === "workspace") {
-                source.navigation.openWorkspacePanel(
-                  plugin.id,
-                  panelId,
-                  location,
-                  options?.params,
-                  options?.newTab,
-                );
+                source.navigation.openWorkspacePanel(plugin.id, panelId, location, ...tail);
                 return;
               }
-              source.navigation.openAgentPanel(
-                plugin.id,
-                panelId,
-                agent.id,
-                location,
-                options?.params,
-                options?.newTab,
-              );
+              source.navigation.openAgentPanel(plugin.id, panelId, agent.id, location, ...tail);
             },
           });
         } catch (error) {
