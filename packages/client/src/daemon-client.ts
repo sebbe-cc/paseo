@@ -4379,7 +4379,7 @@ export class DaemonClient {
     return this.sendSessionMessageStrict({ type: "voice_audio_chunk", audio, format, isLast });
   }
 
-  async startDictationStream(dictationId: string, format: string): Promise<void> {
+  async startDictationStream(dictationId: string, format: string, agentId?: string): Promise<void> {
     const ack = this.waitForWithCancel(
       (msg) => {
         if (msg.type !== "dictation_stream_ack") {
@@ -4421,6 +4421,7 @@ export class DaemonClient {
         type: "dictation_stream_start",
         dictationId,
         format,
+        ...(agentId ? { agentId } : {}),
       });
       const response = Promise.race([ackPromise, errorPromise]);
       await Promise.race([response, sent.then(() => response)]);

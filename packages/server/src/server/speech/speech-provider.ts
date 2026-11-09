@@ -55,6 +55,8 @@ export interface SpeechToTextProvider {
     logger: pino.Logger;
     language?: string;
     prompt?: string;
+    /** The agent chat being dictated into, when the client sent it. */
+    agentId?: string;
   }): StreamingTranscriptionSession;
 }
 

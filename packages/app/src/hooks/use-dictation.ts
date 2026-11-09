@@ -25,7 +25,12 @@ export function useDictation(options: UseDictationOptions): UseDictationResult {
     canStart,
     canConfirm,
     enableDuration = false,
+    agentId,
   } = options;
+  const agentIdRef = useRef(agentId);
+  useEffect(() => {
+    agentIdRef.current = agentId;
+  }, [agentId]);
 
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -82,6 +87,7 @@ export function useDictation(options: UseDictationOptions): UseDictationResult {
       client,
       format: PCM_DICTATION_FORMAT,
       createDictationId: generateMessageId,
+      getAgentId: () => agentIdRef.current,
     });
   }
   useEffect(() => {
