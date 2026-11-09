@@ -27,6 +27,10 @@ files:
 asarUnpack:
   - dist/daemon/node-entrypoint-runner.js
   - node_modules/@getpaseo/server/dist/server/terminal/shell-integration/**/*
+  # node-hid loads its N-API prebuild via dlopen, which cannot read
+  # inside the asar archive (pa-yi0bsm).
+  - node_modules/node-hid/prebuilds/**/*
+
 extraResources:
   # Preserve physical compiler inputs, including .d.ts files omitted from packaged node_modules.
   - from: ../server/dist/server/builtin-plugins
