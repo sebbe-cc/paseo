@@ -1,6 +1,7 @@
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
+  supportsSubsessions,
   type ProviderConnection,
   type ProviderEvent,
   type ProviderInput,
@@ -27,9 +28,14 @@ const capabilities = [
   "session.persistence",
   "permission",
   "session.list",
+  "session.subsession",
 ] as const;
 
 export function createMuseProvider(usage: Usage): ProviderRegistration {
+  // Whether the last connected daemon offered session.subsession. Unknown
+  // until the first connect; a daemon that never offers it cannot project
+  // Muse's parallel subagents and workflows as Paseo child sessions.
+  let subsessionOffered: boolean | undefined;
   return {
     id: "muse",
     label: "Muse Code",
@@ -42,12 +48,22 @@ export function createMuseProvider(usage: Usage): ProviderRegistration {
       if (!launch)
         return { available: false, diagnostic: "Install Muse Code and ensure `muse` is on PATH." };
       usage.remember(launch);
-      return status(launch);
+      const result = await status(launch);
+      if (result.available && subsessionOffered === false)
+        return {
+          available: true,
+          diagnostic:
+            "Muse Code is available, but this Paseo daemon does not offer session.subsession: " +
+            "parallel subagents and workflows run without Paseo child sessions. " +
+            "Update Paseo to follow them as subagents.",
+        };
+      return result;
     },
     async connect(request) {
       if (!request.versions.includes(1))
         throw new MuseError("protocol", "Provider protocol version 1 is required");
       usage.remember(requireLaunch(request.launch));
+      subsessionOffered = supportsSubsessions(request.capabilities);
       return connect(
         requireLaunch(request.launch),
         negotiateProviderCapabilities(request.capabilities, capabilities),

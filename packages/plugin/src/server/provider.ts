@@ -621,6 +621,19 @@ export function isProviderCapability(capability: string): capability is Provider
   return new Set<string>(PROVIDER_CAPABILITIES).has(capability);
 }
 
+/**
+ * Whether the negotiated connection supports provider child sessions.
+ * A provider that projects its own native child sessions (subagents,
+ * workflows) as `session.opened` events with a `parentSessionId` must
+ * negotiate `session.subsession`; the daemon fails the whole connection
+ * when a parent without it reports a child. Gate child projection on this
+ * predicate so an older daemon gets a plain timeline error on the parent
+ * instead of a dead connection.
+ */
+export function supportsSubsessions(negotiated: readonly string[]): boolean {
+  return negotiated.includes("session.subsession");
+}
+
 function requiredPromptCapabilities(prompt: ProviderPrompt): readonly ProviderCapability[] {
   const capabilities: ProviderCapability[] = [];
   if (prompt.delivery === "steer") capabilities.push("prompt.steer");
