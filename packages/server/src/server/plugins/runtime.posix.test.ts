@@ -2079,6 +2079,7 @@ export default function contribute(server) {
     label: "Takeover",
     input: { parseAsync: async (value) => value },
     replaces: ["codex"],
+    skipNativeFallback: true,
     discover: async () => [],
     fetch: async () => ({ status: "available", windows: [] }),
   });
@@ -2091,7 +2092,7 @@ export default function contribute(server) {
   try {
     await runtime.startPlugin("takeover-meta", directory);
     expect(runtime.getUsageSourceRegistrations("takeover-meta")).toMatchObject([
-      { id: "takeover-meta", replaces: ["codex"] },
+      { id: "takeover-meta", replaces: ["codex"], skipNativeFallback: true },
     ]);
     expect(runtime.getDisabledUsageSources("takeover-meta")).toEqual(["kimi"]);
   } finally {
