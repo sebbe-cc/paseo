@@ -91,6 +91,7 @@ async function harness(
     persistence?: Extract<ProviderInput, { type: "session.open" }>["persistence"],
     mode = "onRequest",
     model: string | null = "meta/muse-spark-1.3",
+    sessionEnv: Record<string, string> = {},
   ) {
     await send({
       type: "session.open",
@@ -99,7 +100,7 @@ async function harness(
       config: {
         cwd: root,
         providerOptions,
-        env: {},
+        env: sessionEnv,
         settings: {},
         mcpServers: {},
         persist: true,
@@ -1494,6 +1495,134 @@ test("resuming a session reapplies its provider options to the new host", async 
     ["serve", "--sandbox-network", "restricted"],
   ]);
   expect(frames.some((f) => f.method === "session/resume")).toBe(true);
+});
+const DAEMON_SESSION_ENV = { PASEO_MUSE_DAEMON: "1" };
+function hostArgs(frames: { event?: string; args?: string[] }[]): string[] {
+  const started = frames.find((f) => f.event === "hostStarted");
+  if (!started?.args) throw new Error("Expected a hostStarted record");
+  return started.args;
+}
+test("a daemon session joins the shared host and keeps the default sandbox posture", async () => {
+  const h = await harness();
+  expect(
+    await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
+  ).toMatchObject({ type: "session.ready" });
+  expect(hostArgs(await h.recorded())).toEqual([
+    "serve",
+    "--sandbox-network",
+    "proxy-only",
+    "--disable-sandbox",
+    "--trust-workspace",
+    "--join",
+  ]);
+});
+test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
+  const h = await harness();
+  await h.open(undefined, "onRequest", "meta/muse-spark-1.3", { PASEO_MUSE_DAEMON: "0" });
+  expect(hostArgs(await h.recorded())).not.toContain("--join");
+});
+test("a daemon-joined session runs the thinking path end to end", async () => {
+  const h = await harness();
+  expect(
+    await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
+  ).toMatchObject({ type: "session.ready" });
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const frames = await h.recorded();
+  expect(frames.find((frame) => frame.method === "turn/start").params).toMatchObject({
+    reasoningEffort: "high",
+  });
+  expect(h.events.findLast((event) => event.type === "session.persistence")).toMatchObject({
+    persistence: { version: 1, data: { model: "meta/muse-spark-1.3", thinkingOption: "high" } },
+  });
+  expect(
+    h.events.filter((event) => event.type === "timeline.item" && event.item.type === "reasoning"),
+  ).not.toEqual([]);
+});
+for (const variant of ["tool", "dedicated", "workflow"]) {
+  test(`${variant} subagent opens the supplied child on a daemon-joined host`, async () => {
+    const h = await harness("subagent", { MUSE_TEST_CHILD: variant });
+    expect(
+      await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
+    ).toMatchObject({ type: "session.ready" });
+    expect(hostArgs(await h.recorded())).toContain("--join");
+    await h.prompt();
+    expect(
+      await h.wait((e) => e.type === "session.opened" && e.sessionId === "fixture-child"),
+    ).toMatchObject({ parentSessionId: "paseo-session", restoration: "parent" });
+    expect(
+      await h.wait(
+        (e) =>
+          e.type === "timeline.item" &&
+          e.sessionId === "fixture-child" &&
+          e.item.type === "assistant_message",
+      ),
+    ).toMatchObject({ item: { text: "SUBAGENT_PHASE0_OK" } });
+    await h.wait((e) => e.type === "session.turn" && e.state === "completed");
+  });
+}
+for (const kind of ["overloaded", "backpressured"]) {
+  test(`a ${kind} daemon refusal at start falls back to an own host process`, async () => {
+    const h = await harness("text-reasoning", {
+      MUSE_TEST_REFUSE_JOIN: "1",
+      MUSE_TEST_REFUSE_KIND: kind,
+    });
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(
+        await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
+      ).toMatchObject({ type: "session.ready" });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    expect(writes.join("")).toContain("Muse daemon refused session paseo-session");
+    const starts = (await h.recorded()).filter((f) => f.event === "hostStarted");
+    expect(starts).toHaveLength(2);
+    expect(starts[0].args).toContain("--join");
+    expect(starts[1].args).not.toContain("--join");
+    await h.prompt();
+    await h.wait((event) => event.type === "session.turn" && event.state === "completed");
+  });
+}
+test("a daemon-joined session resumes inline history after its host restarts", async () => {
+  const original = await harness();
+  const historyPath = path.join(original.root, "native-history.ndjson");
+  original.launch.env.MUSE_TEST_HISTORY = historyPath;
+  await original.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV);
+  await original.prompt();
+  await original.wait((event) => event.type === "session.turn" && event.state === "completed");
+  const messages = [
+    ...new Map(
+      original.events
+        .filter((event) => event.type === "timeline.item")
+        .map((event) => event.item)
+        .filter((item) => item.type === "user_message" || item.type === "assistant_message")
+        .map((item) => [item.id, item] as const),
+    ).values(),
+  ];
+  const saved = original.events.findLast((event) => event.type === "session.persistence");
+  if (!saved || saved.type !== "session.persistence") throw new Error("Expected persistence");
+  await original.connection.close();
+  const reopened = await harness("text-reasoning", { MUSE_TEST_HISTORY: historyPath });
+  expect(
+    await reopened.open(saved.persistence, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
+  ).toMatchObject({ type: "session.ready" });
+  expect(hostArgs(await reopened.recorded())).toContain("--join");
+  expect(reopened.events.filter((event) => event.type === "session.turn")).toEqual([]);
+  const restored = reopened.events
+    .filter((event) => event.type === "timeline.item")
+    .map((event) => event.item)
+    .filter((item) => item.type === "user_message" || item.type === "assistant_message");
+  expect(restored.map((item) => ({ type: item.type, text: item.text }))).toEqual(
+    messages.map((item) => ({ type: item.type, text: item.text })),
+  );
+  await reopened.prompt();
+  await reopened.wait((event) => event.type === "session.turn" && event.state === "completed");
 });
 test("an uncorrelated MSP parse error keeps the provider diagnostic", async () => {
   const h = await harness("text-reasoning", { MUSE_TEST_NULL_ERROR_ID: "1" });
