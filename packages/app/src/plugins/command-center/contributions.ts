@@ -45,7 +45,13 @@ export function buildPluginCommandCenterContributions(
                 );
                 if (!panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
                 const location = resolvePluginPanelOpenLocation(panel, options?.location);
-                source.navigation.openWorkspacePanel(plugin.id, panelId, location);
+                source.navigation.openWorkspacePanel(
+                  plugin.id,
+                  panelId,
+                  location,
+                  options?.params,
+                  options?.newTab,
+                );
               },
             });
             return;
@@ -62,10 +68,23 @@ export function buildPluginCommandCenterContributions(
               if (!panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
               const location = resolvePluginPanelOpenLocation(panel, options?.location);
               if (panel.context === "workspace") {
-                source.navigation.openWorkspacePanel(plugin.id, panelId, location);
+                source.navigation.openWorkspacePanel(
+                  plugin.id,
+                  panelId,
+                  location,
+                  options?.params,
+                  options?.newTab,
+                );
                 return;
               }
-              source.navigation.openAgentPanel(plugin.id, panelId, agent.id, location);
+              source.navigation.openAgentPanel(
+                plugin.id,
+                panelId,
+                agent.id,
+                location,
+                options?.params,
+                options?.newTab,
+              );
             },
           });
         } catch (error) {
