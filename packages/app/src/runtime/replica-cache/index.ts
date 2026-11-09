@@ -293,6 +293,9 @@ const WorkspaceGitRuntimeSchema = z
     aheadBehind: z.strictObject({ ahead: z.number(), behind: z.number() }).nullable().optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    // Same resolved comparison base the daemon projects onto the wire
+    // gitRuntime (pa-9av7.6); older cached rows without it still parse.
+    base: WorkspaceBaseSchema.nullable().optional(),
   })
   .nullable()
   .optional();

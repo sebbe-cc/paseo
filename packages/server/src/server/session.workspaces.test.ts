@@ -7212,6 +7212,7 @@ test("fetch_workspaces_response reads runtime fields from passive workspace git 
         aheadBehind: { ahead: 3, behind: 1 },
         aheadOfOrigin: 3,
         behindOfOrigin: 1,
+        base: null,
       },
       githubRuntime: {
         featuresEnabled: true,
@@ -7225,6 +7226,89 @@ test("fetch_workspaces_response reads runtime fields from passive workspace git 
         },
         error: null,
       },
+    }),
+  ]);
+});
+
+test("fetch_workspaces_response projects the resolved base onto gitRuntime", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const resolvedBase = {
+    ref: "refs/remotes/origin/feature/heads-6460-hid-pos-scanner-26.2.2",
+    forkSha: "abc1234def5678abc1234def5678abc1234def56",
+    source: "stored" as const,
+    missing: true,
+  };
+  const runtimeSnapshot = createWorkspaceRuntimeSnapshot(REPO_CWD, {
+    git: {
+      currentBranch: "feature/work",
+      base: resolvedBase,
+    },
+  });
+  const getRuntimeSnapshotForFetch = vi.fn(() => runtimeSnapshot);
+  const workspaceGitService = createNoopWorkspaceGitService();
+  const workspaceRuntimeStore = createWorkspaceRuntimeStore();
+  workspaceRuntimeStore.get = getRuntimeSnapshotForFetch;
+  workspaceGitService.registerWorkspace = vi.fn(() => ({
+    unsubscribe: () => {},
+  }));
+
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      workspaceGitService,
+      workspaceRuntimeStore,
+    }),
+  );
+  const project = createPersistedProjectRecord({
+    projectId: "proj-runtime-base",
+    rootPath: REPO_CWD,
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-runtime-base",
+    projectId: project.projectId,
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+
+  session.emit = (message) => {
+    if (isSessionOutboundMessage(message)) emitted.push(message);
+  };
+  session.listAgentPayloads = async () => [];
+  session.projectRegistry.list = async () => [project];
+  session.workspaceRegistry.list = async () => [workspace];
+  session.buildProjectPlacement = async (cwd: string) => ({
+    projectKey: cwd,
+    projectName: "repo",
+    checkout: {
+      cwd,
+      isGit: true,
+      currentBranch: runtimeSnapshot.git.currentBranch,
+      remoteUrl: runtimeSnapshot.git.remoteUrl,
+      worktreeRoot: cwd,
+      isPaseoOwnedWorktree: false,
+      mainRepoRoot: null,
+    },
+  });
+
+  await session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "req-fetch-workspaces-base",
+  });
+
+  const response = emitted.find((message) => message.type === "fetch_workspaces_response") as
+    | { type: "fetch_workspaces_response"; payload: Record<string, unknown> }
+    | undefined;
+
+  expect(response?.payload.entries).toEqual([
+    expect.objectContaining({
+      id: "ws-runtime-base",
+      gitRuntime: expect.objectContaining({ base: resolvedBase }),
     }),
   ]);
 });

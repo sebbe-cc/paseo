@@ -1320,4 +1320,20 @@ test("workspace bases are optional and retain qualified refs and missing-base st
       baseError: "Base ref not found",
     }),
   ).toMatchObject({ base: null, baseError: "Base ref not found" });
+  // The same base is projected onto gitRuntime so plugin-API readers see it
+  // on the entry they already hold; older payloads without it still parse.
+  const gitRuntime = { currentBranch: "feature/work" };
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({ ...workspace, gitRuntime }).gitRuntime,
+  ).toMatchObject({ currentBranch: "feature/work" });
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({ ...workspace, gitRuntime: { ...gitRuntime, base } })
+      .gitRuntime,
+  ).toMatchObject({ base });
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({
+      ...workspace,
+      gitRuntime: { ...gitRuntime, base: null },
+    }).gitRuntime,
+  ).toMatchObject({ base: null });
 });
