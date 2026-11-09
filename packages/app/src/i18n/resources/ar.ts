@@ -930,6 +930,7 @@ export const ar: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "لم يعد الأساس {{ref}} موجودًا. تتم المقارنة مع نقطة التفرّع المحفوظة.",
         openChangesTab: "فتح علامة تبويب التغييرات",
         openDiffTab: "فتح علامة تبويب الفرق",
         closeChangesTab: "إغلاق علامة تبويب التغييرات",

@@ -947,6 +947,7 @@ export const ru: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "База {{ref}} больше не существует. Сравнение с сохранённой точкой ветвления.",
         openChangesTab: "Открыть вкладку «Изменения»",
         openDiffTab: "Открыть вкладку «Дифф»",
         closeChangesTab: "Закрыть вкладку «Изменения»",

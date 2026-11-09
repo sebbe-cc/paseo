@@ -938,6 +938,7 @@ export const en = {
         },
       },
       diff: {
+        missingBase: "Base {{ref}} no longer exists. Comparing against the saved fork point.",
         openChangesTab: "Open Changes tab",
         openDiffTab: "Open Diff tab",
         closeChangesTab: "Close Changes tab",

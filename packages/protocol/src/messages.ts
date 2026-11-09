@@ -4131,6 +4131,15 @@ export const WorkspaceScriptPayloadSchema = z.object({
   terminalId: z.string().nullable().optional().default(null),
 });
 
+export const WorkspaceBaseSchema = z.object({
+  ref: z.string(),
+  forkSha: z.string().nullable(),
+  source: z.enum(["stored", "default"]),
+  missing: z.boolean(),
+});
+
+export type WorkspaceBase = z.infer<typeof WorkspaceBaseSchema>;
+
 const WorkspaceGitRuntimePayloadSchema = z
   .object({
     currentBranch: z.string().nullable().optional(),
@@ -4198,6 +4207,8 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
 
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
+    base: WorkspaceBaseSchema.nullable().optional(),
+    baseError: z.string().optional(),
     id: z.string(),
     projectId: z.string(),
     projectDisplayName: z.string(),
@@ -5415,6 +5426,7 @@ const AheadBehindSchema = z.object({
 });
 
 const CheckoutStatusCommonSchema = z.object({
+  base: WorkspaceBaseSchema.nullable().optional(),
   cwd: z.string(),
   error: CheckoutErrorSchema.nullable(),
   requestId: z.string(),

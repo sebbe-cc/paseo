@@ -329,6 +329,13 @@ describe("ReplicaCache", () => {
       ...workspacePayload(),
       createdAt: "2026-07-18T08:00:00.000Z",
       lastUserMessageAt: "2026-07-18T09:00:00.000Z",
+      base: {
+        ref: "refs/remotes/upstream/epic",
+        forkSha: "a".repeat(40),
+        source: "stored",
+        missing: true,
+      },
+      baseError: "Legacy base needs an explicit branch",
     });
     baseline.workspaces.set(workspace.id, workspace);
     commitDirectory(writer, SERVER_ID, baseline);

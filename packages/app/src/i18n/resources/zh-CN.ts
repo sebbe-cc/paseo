@@ -922,6 +922,7 @@ export const zhCN: TranslationResources = {
         },
       },
       diff: {
+        missingBase: "基准 {{ref}} 已不存在。正在与已保存的分叉点比较。",
         openChangesTab: "打开“更改”标签页",
         openDiffTab: "打开 Diff 标签页",
         closeChangesTab: "关闭“更改”标签页",

@@ -1409,9 +1409,23 @@ export const createWorktree = async ({
       });
     }
 
+    const selectedBase = sourcePlan.metadataBaseRef ?? sourcePlan.metadataBaseRefName;
+    const { stdout: fullBaseOut } = await runGitCommand(
+      ["rev-parse", "--symbolic-full-name", selectedBase],
+      { cwd },
+    );
+    const fullBase = fullBaseOut.trim();
+    const { stdout: forkOut } = await runGitCommand(["merge-base", selectedBase, "HEAD"], {
+      cwd: worktreePath,
+    });
+    // COMPAT(workspaceBaseV3): added in v0.15.0; remove after 2027-05-04 with SHA-based creation callers.
+    // A revision-only caller has no branch identity to persist; its migration requires caller input.
     await writePaseoWorktreeMetadata(worktreePath, {
       baseRefName: sourcePlan.metadataBaseRefName,
-      ...(sourcePlan.metadataBaseRef ? { baseRef: sourcePlan.metadataBaseRef } : {}),
+      baseRef: fullBase || sourcePlan.metadataBaseRef,
+      ...(fullBase.startsWith("refs/heads/") || fullBase.startsWith("refs/remotes/")
+        ? { forkSha: forkOut.trim() }
+        : {}),
       ...(sourcePlan.changeRequestLookupTarget
         ? { changeRequestLookupTarget: sourcePlan.changeRequestLookupTarget }
         : {}),
@@ -1422,7 +1436,7 @@ export const createWorktree = async ({
     return {
       branchName: sourcePlan.branchName,
       worktreePath,
-      comparisonBaseRef: sourcePlan.metadataBaseRef ?? sourcePlan.metadataBaseRefName,
+      comparisonBaseRef: fullBase || selectedBase,
     };
   } catch (error) {
     if (
@@ -1829,7 +1843,16 @@ function normalizeRequiredBaseBranch(baseBranch: string): string {
 async function resolveCheckoutBranchBaseRef(cwd: string, branchName: string): Promise<string> {
   const defaultBranch = await resolveRepositoryDefaultBranch(cwd);
   if (defaultBranch) {
-    return defaultBranch;
+    const available = await runGitCommand(["show-ref", "--verify", "--quiet", defaultBranch], {
+      cwd,
+      acceptExitCodes: [0, 1],
+    });
+    if (available.exitCode === 0) return defaultBranch;
+  }
+  // COMPAT(worktreeCreationDefault): added in v0.15.0; remove after 2027-05-04 when creation supplies its own qualified base.
+  // Preserve local-only creation policy here; comparison readers use only the persisted ref.
+  for (const localDefault of ["main", "master"]) {
+    if (await localBranchExists(cwd, localDefault)) return `refs/heads/${localDefault}`;
   }
   const currentBranch = await getCurrentBranch(cwd);
   return currentBranch && currentBranch !== branchName ? currentBranch : branchName;

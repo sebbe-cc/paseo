@@ -3,8 +3,23 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { listCheckoutCommits } from "./checkout-git.js";
-import { writePaseoWorktreeMetadata } from "./worktree-metadata.js";
+import {
+  getCheckoutDiff,
+  getCheckoutSnapshotFacts,
+  getCheckoutRefDerivedState,
+  getCheckoutStatus,
+  getCheckoutShortstat,
+  mergeFromBase,
+  resolveWorkspaceBase,
+  listCheckoutCommits,
+} from "./checkout-git.js";
+import {
+  readPaseoWorktreeMetadata,
+  writePaseoWorktreeRuntimeMetadata,
+  writePaseoWorktreeFirstAgentBranchAutoNameMetadata,
+  markPaseoWorktreeFirstAgentBranchAutoNameAttempted,
+  writePaseoWorktreeMetadata,
+} from "./worktree-metadata.js";
 
 const tempDirs: string[] = [];
 
@@ -84,6 +99,16 @@ function initRepoOnMain(): { repoDir: string; tempDir: string } {
   git(["config", "user.email", "test@test.com"], repoDir);
   git(["config", "user.name", "Test User"], repoDir);
   commitFile(repoDir, "README.md", "base\n", "initial");
+  // These history fixtures choose a local base explicitly; implicit defaults require origin/HEAD.
+  mkdirSync(join(repoDir, ".git", "paseo"));
+  writeFileSync(
+    join(repoDir, ".git", "paseo", "worktree.json"),
+    JSON.stringify({
+      version: 1,
+      baseRefName: "main",
+      baseRef: "refs/heads/main",
+    }),
+  );
   return { repoDir, tempDir };
 }
 
@@ -131,7 +156,7 @@ describe("listCheckoutCommits", () => {
 
     const { baseRef, commits } = await listCheckoutCommits({ cwd: repoDir });
 
-    expect(baseRef).toBe("main");
+    expect(baseRef).toBe("refs/heads/main");
     expect(commits).toHaveLength(3);
     expect(commits[0]?.subject).toBe("Add bar");
     expect(commits[1]?.subject).toBe("Add foo");
@@ -160,28 +185,17 @@ describe("listCheckoutCommits", () => {
   it("shows recent history on the base branch", async () => {
     const { repoDir } = initRepoOnMain();
     const { baseRef, commits } = await listCheckoutCommits({ cwd: repoDir });
-    expect(baseRef).toBeNull();
+    expect(baseRef).toBe("refs/heads/main");
     expect(commits.map((entry) => entry.subject)).toEqual(["initial"]);
     expect(commits[0]?.isOnBase).toBe(true);
   });
 
-  it("keeps recent history when the saved base branch no longer exists", async () => {
-    const { repoDir, tempDir } = initRepoOnMain();
-    const worktreesRoot = join(tempDir, "worktrees");
-    const worktreeDir = join(worktreesRoot, "repo-hash", "feature");
-    mkdirSync(join(worktreesRoot, "repo-hash"), { recursive: true });
-    git(["worktree", "add", "-b", "feature", worktreeDir], repoDir);
-    commitFile(worktreeDir, "feature.txt", "feature\n", "Feature work");
-    await writePaseoWorktreeMetadata(worktreeDir, { baseRefName: "deleted-base" });
-
-    const { baseRef, commits } = await listCheckoutCommits({
-      cwd: worktreeDir,
-      context: { worktreesRoot },
-    });
-
-    expect(baseRef).toBe("main");
-    expect(commits.map((entry) => entry.subject)).toEqual(["Feature work", "initial"]);
-    expect(commits.map((entry) => entry.isOnBase)).toEqual([false, true]);
+  it("reports a missing legacy base without substituting the repo default", async () => {
+    const { repoDir } = initRepoOnMain();
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: "deleted-base" });
+    await expect(listCheckoutCommits({ cwd: repoDir })).rejects.toThrow(
+      "Base ref not found: deleted-base",
+    );
   });
 
   it("marks all commits local-only when there is no remote", async () => {
@@ -192,7 +206,7 @@ describe("listCheckoutCommits", () => {
 
     const { baseRef, commits } = await listCheckoutCommits({ cwd: repoDir });
 
-    expect(baseRef).toBe("main");
+    expect(baseRef).toBe("refs/heads/main");
     expect(commits).toHaveLength(3);
     expect(commits.every((c) => c.isOnRemote === false)).toBe(true);
   });
@@ -347,5 +361,181 @@ describe("listCheckoutCommits", () => {
     expect(commits[1]?.files).toEqual([
       { path: "README.md", additions: 1, deletions: 0, status: "modified" },
     ]);
+  });
+});
+
+describe("one workspace comparison base", () => {
+  function sha(cwd: string, ref = "HEAD"): string {
+    return execFileSync("git", ["rev-parse", ref], { cwd, encoding: "utf8" }).trim();
+  }
+
+  it("uses origin/HEAD rather than a stale local default in every reader and merge-from-base", async () => {
+    const { repoDir } = initRepoOnMain();
+    const forkSha = sha(repoDir);
+    rmSync(join(repoDir, ".git", "paseo", "worktree.json"));
+    git(["checkout", "-b", "remote-main"], repoDir);
+    commitFile(repoDir, "remote.txt", "remote\n", "Remote base advance");
+    const remoteTip = sha(repoDir);
+    git(["update-ref", "refs/remotes/origin/main", remoteTip], repoDir);
+    git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], repoDir);
+    git(["checkout", "-b", "feature", forkSha], repoDir);
+    commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+    expect(await resolveWorkspaceBase(repoDir)).toEqual({
+      ref: "refs/remotes/origin/main",
+      forkSha,
+      source: "default",
+      missing: false,
+    });
+    expect(await getCheckoutStatus(repoDir)).toMatchObject({
+      baseRef: "refs/remotes/origin/main",
+      aheadBehind: { ahead: 1, behind: 1 },
+    });
+    expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).toContain("feature.txt");
+    expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).not.toContain("remote.txt");
+    expect(await getCheckoutShortstat(repoDir)).toEqual({ additions: 1, deletions: 0 });
+    expect(
+      (await listCheckoutCommits({ cwd: repoDir })).commits.map((c) => [c.subject, c.isOnBase]),
+    ).toEqual([
+      ["Feature work", false],
+      ["initial", true],
+    ]);
+    await mergeFromBase(repoDir);
+    expect(
+      execFileSync("git", ["merge-base", "--is-ancestor", remoteTip, "HEAD"], { cwd: repoDir })
+        .length,
+    ).toBe(0);
+    expect(sha(repoDir, "refs/heads/main")).toBe(forkSha);
+  });
+
+  it.each(["refs/heads/epic/sprint", "refs/remotes/upstream/release/stable"])(
+    "preserves exact base %s across all comparisons",
+    async (ref) => {
+      const { repoDir } = initRepoOnMain();
+      const forkSha = sha(repoDir);
+      git(["update-ref", ref, forkSha], repoDir);
+      git(["checkout", "-b", "feature"], repoDir);
+      await writePaseoWorktreeMetadata(repoDir, { baseRefName: ref, baseRef: ref, forkSha });
+      commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+      // A competing origin ref must never replace the explicitly chosen stream.
+      git(["update-ref", "refs/remotes/origin/epic/sprint", "HEAD"], repoDir);
+      expect(await resolveWorkspaceBase(repoDir)).toEqual({
+        ref,
+        forkSha,
+        source: "stored",
+        missing: false,
+      });
+      expect(await getCheckoutStatus(repoDir)).toMatchObject({
+        baseRef: ref,
+        aheadBehind: { ahead: 1, behind: 0 },
+      });
+      expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).toContain("feature.txt");
+      expect(await getCheckoutShortstat(repoDir)).toEqual({ additions: 1, deletions: 0 });
+      expect((await listCheckoutCommits({ cwd: repoDir })).baseRef).toBe(ref);
+      await mergeFromBase(repoDir);
+      expect(sha(repoDir, ref)).toBe(forkSha);
+    },
+  );
+
+  it("uses the persisted fork point when a qualified base disappears", async () => {
+    const { repoDir } = initRepoOnMain();
+    const forkSha = sha(repoDir);
+    const ref = "refs/remotes/upstream/epic";
+    git(["update-ref", ref, forkSha], repoDir);
+    git(["checkout", "-b", "feature"], repoDir);
+    await writePaseoWorktreeMetadata(repoDir, { baseRefName: ref, baseRef: ref, forkSha });
+    await writePaseoWorktreeRuntimeMetadata(repoDir, { worktreePort: 12345 });
+    await writePaseoWorktreeFirstAgentBranchAutoNameMetadata(repoDir, {
+      placeholderBranchName: "feature",
+    });
+    await markPaseoWorktreeFirstAgentBranchAutoNameAttempted(repoDir, {
+      attemptedAt: "2026-11-04T00:00:00.000Z",
+    });
+    expect(await readPaseoWorktreeMetadata(repoDir)).toMatchObject({
+      version: 3,
+      baseRef: ref,
+      forkSha,
+      runtime: { worktreePort: 12345 },
+      firstAgentBranchAutoName: { status: "attempted" },
+    });
+    commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+    const facts = await getCheckoutSnapshotFacts(repoDir);
+    if (!facts.isGit) throw new Error("Expected a Git checkout");
+    git(["update-ref", "-d", ref], repoDir);
+    const derived = await getCheckoutRefDerivedState(
+      repoDir,
+      facts,
+      {
+        aheadBehind: { ahead: 1, behind: 0 },
+        diffStat: { additions: 1, deletions: 0 },
+      },
+      new Set([ref]),
+    );
+    expect(derived).toMatchObject({
+      base: { ref, forkSha, missing: true },
+      aheadBehind: { ahead: 1, behind: 0 },
+      diffStat: { additions: 1, deletions: 0 },
+    });
+    expect(await resolveWorkspaceBase(repoDir)).toEqual({
+      ref,
+      forkSha,
+      source: "stored",
+      missing: true,
+    });
+    expect(await getCheckoutStatus(repoDir)).toMatchObject({
+      baseRef: ref,
+      base: { missing: true },
+      aheadBehind: { ahead: 1, behind: 0 },
+    });
+    expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).toContain("feature.txt");
+    expect(await getCheckoutShortstat(repoDir)).toEqual({ additions: 1, deletions: 0 });
+    expect(
+      (await listCheckoutCommits({ cwd: repoDir })).commits.map((c) => [c.subject, c.isOnBase]),
+    ).toEqual([
+      ["Feature work", false],
+      ["initial", true],
+    ]);
+    await mergeFromBase(repoDir);
+  });
+
+  it("compares detached HEAD through the same base as a named checkout", async () => {
+    const { repoDir } = initRepoOnMain();
+    git(["checkout", "-b", "feature"], repoDir);
+    commitFile(repoDir, "feature.txt", "feature\n", "Feature work");
+    git(["checkout", "--detach", "HEAD"], repoDir);
+    expect(await getCheckoutStatus(repoDir)).toMatchObject({
+      currentBranch: null,
+      baseRef: "refs/heads/main",
+      aheadBehind: { ahead: 1, behind: 0 },
+    });
+    expect((await listCheckoutCommits({ cwd: repoDir })).commits.map((c) => c.subject)).toEqual([
+      "Feature work",
+      "initial",
+    ]);
+    expect((await getCheckoutDiff(repoDir, { mode: "all" })).diff).toContain("feature.txt");
+  });
+
+  it("rejects an unrelated base instead of using a direct diff or dropping base history", async () => {
+    const { repoDir } = initRepoOnMain();
+    git(["checkout", "--orphan", "unrelated"], repoDir);
+    git(["rm", "-rf", "."], repoDir);
+    commitFile(repoDir, "other.txt", "other\n", "Unrelated history");
+    await expect(getCheckoutDiff(repoDir, { mode: "all" })).rejects.toThrow(
+      "has no common ancestor with HEAD",
+    );
+    await expect(listCheckoutCommits({ cwd: repoDir })).rejects.toThrow(
+      "has no common ancestor with HEAD",
+    );
+  });
+
+  it("reports an unavailable implicit base instead of an empty diff", async () => {
+    const { repoDir } = initRepoOnMain();
+    rmSync(join(repoDir, ".git", "paseo", "worktree.json"));
+    expect(await resolveWorkspaceBase(repoDir)).toBeNull();
+    await expect(getCheckoutDiff(repoDir, { mode: "all" })).rejects.toThrow(
+      "Unable to determine workspace base",
+    );
+    await expect(listCheckoutCommits({ cwd: repoDir })).rejects.toThrow(
+      "Unable to determine workspace base",
+    );
   });
 });

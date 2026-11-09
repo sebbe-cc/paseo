@@ -49,9 +49,16 @@ const PaseoWorktreeMetadataV2Schema = z.object({
     .optional(),
 });
 
+const PaseoWorktreeMetadataV3Schema = PaseoWorktreeMetadataV2Schema.extend({
+  version: z.literal(3),
+  baseRef: z.string().regex(/^refs\/(heads|remotes)\/.+/),
+  forkSha: z.string().regex(/^[0-9a-f]{40,64}$/i),
+});
+
 const PaseoWorktreeMetadataSchema = z.union([
   PaseoWorktreeMetadataV1Schema,
   PaseoWorktreeMetadataV2Schema,
+  PaseoWorktreeMetadataV3Schema,
 ]);
 
 export type PaseoWorktreeMetadata = z.infer<typeof PaseoWorktreeMetadataSchema>;
@@ -226,6 +233,7 @@ export async function writePaseoWorktreeMetadata(
   options: {
     baseRefName: string;
     baseRef?: string;
+    forkSha?: string;
     changeRequestLookupTarget?: PaseoWorktreeChangeRequestHint;
   },
 ): Promise<void> {
@@ -245,7 +253,12 @@ export async function writePaseoWorktreeMetadata(
         ? { changeRequestLookupTarget: options.changeRequestLookupTarget }
         : {}),
     };
-    await writePaseoWorktreeMetadataFile(root, metadata);
+    await writePaseoWorktreeMetadataFile(
+      root,
+      options.forkSha
+        ? PaseoWorktreeMetadataV3Schema.parse({ ...metadata, version: 3, forkSha: options.forkSha })
+        : metadata,
+    );
   });
 }
 
@@ -264,8 +277,7 @@ export async function writePaseoWorktreeRuntimeMetadata(
     }
 
     const next: PaseoWorktreeMetadata = {
-      ...current,
-      version: 2,
+      ...(current.version === 1 ? { ...current, version: 2 as const } : current),
       runtime: {
         worktreePort: options.worktreePort,
       },
@@ -292,8 +304,7 @@ export async function writePaseoWorktreeFirstAgentBranchAutoNameMetadata(
     }
 
     await writePaseoWorktreeMetadataFile(root, {
-      ...current,
-      version: 2,
+      ...(current.version === 1 ? { ...current, version: 2 as const } : current),
       firstAgentBranchAutoName: {
         status: "pending",
         placeholderBranchName,
@@ -310,7 +321,7 @@ export async function markPaseoWorktreeFirstAgentBranchAutoNameAttempted(
     const current = await readMetadataFile(root);
     if (
       !current ||
-      current.version !== 2 ||
+      current.version === 1 ||
       current.firstAgentBranchAutoName?.status !== "pending"
     ) {
       return current;
@@ -417,7 +428,7 @@ export async function readPaseoWorktreeRuntimePort(worktreeRoot: string): Promis
   if (!metadata) {
     return null;
   }
-  if (metadata.version === 2 && metadata.runtime?.worktreePort) {
+  if (metadata.version !== 1 && metadata.runtime?.worktreePort) {
     return metadata.runtime.worktreePort;
   }
   return null;
