@@ -241,6 +241,17 @@ function createSshProxy(target: SshTransportTarget): Promise<TransportEndpoint> 
           child.kill();
         }
       });
+      // pipe() forwards no errors: a write into the stdin of an ssh that has gone away
+      // raises EPIPE, which crashes the process unless the stream has a listener.
+      for (const [name, stream] of [
+        ["stdin", child.stdin],
+        ["stdout", child.stdout],
+      ] as const) {
+        stream.on("error", (error) => {
+          console.warn(`Remote SSH proxy ${name} failed`, error);
+          acceptedSocket.destroy();
+        });
+      }
       acceptedSocket.pipe(child.stdin);
       child.stdout.pipe(acceptedSocket);
     });
