@@ -1172,6 +1172,13 @@ export class OmpAgentSession implements AgentSession {
     this.activeToolCalls.clear();
   }
 
+  async updatePaseoTools(): Promise<void> {
+    // The manager syncs the shared catalog object in place, so the router
+    // already sees the current definitions and executions. Re-register to push
+    // the updated tool list to the runtime.
+    if (!this.closed) await this.hostTools?.register();
+  }
+
   async canStopRuntime(): Promise<boolean> {
     if (
       this.closed ||
