@@ -1107,7 +1107,8 @@ const x = 1;
     expect(status).toMatchObject({
       isGit: true,
       isPaseoOwnedWorktree: true,
-      baseRef: "refs/heads/main",
+      // Creation prefers the published base (02b049f9f), so the stored base is origin/main.
+      baseRef: "refs/remotes/origin/main",
       aheadBehind: { ahead: 0, behind: 0 },
       aheadOfOrigin: null,
     });
@@ -1132,7 +1133,8 @@ const x = 1;
       isGit: true,
       hasRemote: true,
       isPaseoOwnedWorktree: true,
-      baseRef: "refs/heads/main",
+      // Creation prefers the published base (02b049f9f), so the stored base is origin/main.
+      baseRef: "refs/remotes/origin/main",
       aheadBehind: { ahead: 1, behind: 0 },
       aheadOfOrigin: null,
     });
