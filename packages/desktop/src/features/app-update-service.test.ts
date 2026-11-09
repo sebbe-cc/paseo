@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createAppUpdateService,
+  isValidUpdaterVersion,
   type AppUpdateInstallRequest,
   type AppUpdateRuntime,
   type AppUpdateRuntimeConfiguration,
@@ -840,5 +841,82 @@ describe("app update service", () => {
       date: "2026-04-28T00:00:00.000Z",
       errorMessage: null,
     });
+  });
+});
+
+describe("invalid installed versions (pa-mthssm)", () => {
+  const brokenInstalled = "0.14.0-desvio.20261029192938.0660291";
+
+  it("rejects digit-only shas with a leading zero, accepts the g-prefixed form", () => {
+    expect(isValidUpdaterVersion(brokenInstalled)).toBe(false);
+    expect(isValidUpdaterVersion("0.14.0-desvio.20261029192938.g0660291")).toBe(true);
+    expect(isValidUpdaterVersion("0.14.0-desvio.20261029192938.gc755425")).toBe(true);
+    expect(isValidUpdaterVersion("0.14.0")).toBe(true);
+    expect(isValidUpdaterVersion("0.14.0+desvio.0660291")).toBe(true);
+    expect(isValidUpdaterVersion("not a version")).toBe(false);
+  });
+
+  it("returns a clear error instead of crashing the invoke call", async () => {
+    let configureCalls = 0;
+    let checkCalls = 0;
+    const runtime: AppUpdateRuntime = {
+      configure: () => {
+        configureCalls += 1;
+      },
+      checkForUpdates: async () => {
+        checkCalls += 1;
+        return null;
+      },
+      downloadUpdate: async () => undefined,
+      quitAndInstall: () => undefined,
+    };
+    const service = createAppUpdateService({
+      runtime,
+      isPackaged: () => true,
+      now: () => Date.parse("2026-04-28T12:00:00.000Z"),
+      bucket: async () => 0.99,
+    });
+
+    const result = await service.checkForAppUpdate({
+      currentVersion: brokenInstalled,
+      releaseChannel: "stable",
+      intent: "manual",
+    });
+
+    expect(configureCalls).toBe(0);
+    expect(checkCalls).toBe(0);
+    expect(result.hasUpdate).toBe(false);
+    expect(result.readyToInstall).toBe(false);
+    expect(result.errorMessage).toContain("not a valid semver version");
+    expect(result.errorMessage).toContain("install it manually");
+  });
+
+  it("survives a throwing runtime configure (electron-updater singleton)", async () => {
+    const constructorError = new Error(
+      `App version is not a valid semver version: "${brokenInstalled}"`,
+    );
+    const runtime: AppUpdateRuntime = {
+      configure: () => {
+        throw constructorError;
+      },
+      checkForUpdates: async () => null,
+      downloadUpdate: async () => undefined,
+      quitAndInstall: () => undefined,
+    };
+    const service = createAppUpdateService({
+      runtime,
+      isPackaged: () => true,
+      now: () => Date.parse("2026-04-28T12:00:00.000Z"),
+      bucket: async () => 0.99,
+    });
+
+    const result = await service.checkForAppUpdate({
+      currentVersion: "0.14.0-desvio.20261029192938.g0660291",
+      releaseChannel: "stable",
+      intent: "manual",
+    });
+
+    expect(result.hasUpdate).toBe(false);
+    expect(result.errorMessage).toBe(constructorError.message);
   });
 });

@@ -131,6 +131,29 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// Whether electron-updater can read this version at all. It parses the
+// installed app version in its singleton constructor (first configure() call),
+// so an invalid version throws outside any awaited check (pa-mthssm:
+// 0.14.0-desvio.<ts>.0660291, a digit-only sha with a leading zero, which
+// semver forbids as a numeric prerelease identifier).
+export function isValidUpdaterVersion(version: string): boolean {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+.+)?$/.exec(
+    version.trim(),
+  );
+  if (!match) return false;
+  const identifiers = [match[1], match[2], match[3], ...(match[4] ? match[4].split(".") : [])];
+  // Numeric identifiers must not have leading zeros; "0" itself is fine.
+  return identifiers.every((id) => !/^\d+$/.test(id) || id === "0" || !id.startsWith("0"));
+}
+
+export function describeInvalidUpdaterVersion(version: string): string {
+  return (
+    `Installed version "${version}" is not a valid semver version, so it cannot be ` +
+    `checked or updated automatically. Download the latest release from ` +
+    `https://github.com/sebbe-cc/paseo/releases and install it manually.`
+  );
+}
+
 function buildDeferredInstallResult(currentVersion: string): AppUpdateInstallResult {
   return {
     installed: false,
@@ -254,10 +277,19 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       });
     }
 
-    return runCheckExclusively(async () => {
-      configureRuntime(releaseChannel, intent);
+    if (!isValidUpdaterVersion(currentVersion)) {
+      return buildCheckResult({
+        currentVersion,
+        hasUpdate: false,
+        readyToInstall: false,
+        errorMessage: describeInvalidUpdaterVersion(currentVersion),
+      });
+    }
 
+    return runCheckExclusively(async () => {
       try {
+        configureRuntime(releaseChannel, intent);
+
         const result = await deps.runtime.checkForUpdates();
         if (!result || !result.updateInfo) {
           clearUpdateState();
