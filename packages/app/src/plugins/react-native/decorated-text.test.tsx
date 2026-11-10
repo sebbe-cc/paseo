@@ -1,3 +1,5 @@
+import { createPaseoApi } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 /** @vitest-environment jsdom */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -19,6 +21,15 @@ vi.mock("../client-state/source", () => ({
 vi.mock("../icons", () => ({ Icon: () => null }));
 import { InlineDecorationScopeProvider } from "../inline-decorators";
 import { DecoratedText } from "./decorated-text";
+
+const testPaseo = () =>
+  createPaseoApi(
+    new DaemonClient({
+      url: "ws://127.0.0.1:1",
+      clientId: "plugin-decorator-test",
+      clientType: "cli",
+    }),
+  );
 
 const roots: ReturnType<typeof createRoot>[] = [];
 afterEach(() => {
@@ -51,6 +62,8 @@ function mount(scoped = true, inlineCode = false) {
   installed.push({
     id: "gascity",
     serverId: "local",
+    lifetime: new AbortController(),
+    paseo: testPaseo(),
     inlineDecorators: [decorator],
   } as InstalledPlugin);
   const container = document.createElement("div");
