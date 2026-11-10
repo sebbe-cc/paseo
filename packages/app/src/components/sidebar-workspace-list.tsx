@@ -155,6 +155,7 @@ import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
 import { bySizing } from "@/components/ui/control-geometry";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
@@ -826,6 +827,7 @@ function NewWorkspaceGhostRow({
       })}
       onPress={handlePress}
       style={rowStyle}
+      dataSet={NAV_ROW_DATASET}
       testID={`sidebar-project-new-workspace-row-${project.viewKey}`}
     >
       {({ hovered, pressed }) => (
@@ -851,6 +853,11 @@ function NewWorkspaceGhostRow({
       )}
     </Pressable>
   );
+}
+
+// A project row with a chevron is a j/k expand target; "collapse" means it is open now.
+function chevronExpanded(chevron: ProjectHeaderRowProps["chevron"]): boolean | undefined {
+  return chevron === null ? undefined : chevron === "collapse";
 }
 
 function ProjectHeaderRow({
@@ -1004,6 +1011,8 @@ function ProjectHeaderRow({
           onTouchMove={interaction.handleTouchMove}
           onPressOut={handleProjectPressOut}
           onPress={handlePress}
+          dataSet={NAV_ROW_DATASET}
+          aria-expanded={chevronExpanded(chevron)}
           testID={`sidebar-project-row-${project.viewKey}`}
         >
           {rowChildren}
@@ -1030,6 +1039,8 @@ function ProjectHeaderRow({
           onTouchMove={interaction.handleTouchMove}
           onPressOut={handleProjectPressOut}
           onPress={handlePress}
+          dataSet={NAV_ROW_DATASET}
+          aria-expanded={chevronExpanded(chevron)}
           testID={`sidebar-project-row-${project.viewKey}`}
         >
           {rowChildren}
@@ -1159,6 +1170,7 @@ function WorkspaceRowInner({
               openInFileManagerPath={workspace.workspaceDirectory}
               disabled={isArchiving}
               aria-selected={selected}
+              dataSet={NAV_ROW_DATASET}
               accessibilityRole="button"
               accessibilityState={accessibilityState}
               style={workspaceRowStyle}

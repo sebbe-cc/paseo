@@ -77,4 +77,18 @@ describe("resolveKeyboardFocusScope", () => {
     });
     expect(scope).toBe("editable");
   });
+
+  it("resolves list scope inside a keyboard list, but not for its text fields", () => {
+    const list = new FakeElement({ selectors: ["[data-keyboard-list]"] });
+    const row = new FakeElement();
+    row.parentElement = list;
+    const input = new FakeElement({ tagName: "input" });
+    input.parentElement = list;
+    const resolve = (target: FakeElement, commandCenterOpen = false) =>
+      resolveKeyboardFocusScope({ target: target as unknown as EventTarget, commandCenterOpen });
+
+    expect(resolve(row)).toBe("list");
+    expect(resolve(input)).toBe("editable");
+    expect(resolve(row, true)).toBe("command-center");
+  });
 });
