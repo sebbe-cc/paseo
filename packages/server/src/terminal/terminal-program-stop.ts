@@ -70,7 +70,9 @@ export function createTerminalProgramStopper(options: {
     for (const file of await listTerminalWorkerRecords(options.paseoHome)) {
       if ("error" in file || file.record.recordId !== options.recordId) continue;
       const program = file.record.terminals.find((entry) => entry.id === id);
-      if (!program) break;
+      // A program recorded without a birth time cannot be identified, and 0.16 never
+      // signals what it cannot identify (#8818): refuse like an unknown program.
+      if (!program || program.startedAt === null) break;
       const state: StopState = {
         program,
         tracked: new Map([[program.pid, program.startedAt]]),
