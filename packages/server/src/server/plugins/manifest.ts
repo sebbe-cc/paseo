@@ -1,7 +1,11 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { PluginIdSchema, PluginRequirementsSchema } from "@getpaseo/protocol/messages";
+import {
+  PluginCliSchema,
+  PluginIdSchema,
+  PluginRequirementsSchema,
+} from "@getpaseo/protocol/messages";
 import { validatePluginRequirements } from "@getpaseo/protocol/plugin-requirements";
 
 const MANIFEST_FILENAME = "paseo-plugin.json";
@@ -34,6 +38,7 @@ const PluginManifestSchema = z.object({
   // A misspelled requirement must not silently disable compatibility checks.
   requirements: PluginRequirementsSchema.strict().optional(),
   build: z.array(PluginBuildCommandSchema).min(1).optional(),
+  cli: PluginCliSchema.optional(),
 });
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
