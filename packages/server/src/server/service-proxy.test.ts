@@ -8,7 +8,6 @@ import express from "express";
 import { describe, expect, it } from "vitest";
 import pino from "pino";
 import { WebSocket, WebSocketServer } from "ws";
-import { once } from "node:events";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import {
   buildLocalServiceHostname,
