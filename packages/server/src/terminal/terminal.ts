@@ -72,6 +72,17 @@ export interface TerminalCommandFinishedInfo {
   exitCode: number | null;
 }
 
+/**
+ * The last foreground-command completion the terminal's worker has seen.
+ * `seq` counts every completion in that terminal since the worker started it,
+ * so a daemon can tell whether a completion happened after a journaled run began.
+ * The worker retains this across daemon restarts; adoption carries it over.
+ */
+export interface TerminalCommandCompletionState {
+  seq: number;
+  exitCode: number | null;
+}
+
 export type ClientMessage =
   | { type: "input"; data: string }
   | { type: "resize"; rows: number; cols: number }
@@ -98,6 +109,12 @@ export interface TerminalSession {
   subscribe(listener: (msg: ServerMessage) => void): () => void;
   onExit(listener: (info: TerminalExitInfo) => void): () => void;
   onCommandFinished(listener: (info: TerminalCommandFinishedInfo) => void): () => void;
+  /**
+   * The worker-retained last command completion, or null when none has been
+   * seen. Absent on managers that do not track it; then callers must trust
+   * their own journal instead of reconciling.
+   */
+  getLastCommandFinished?(): TerminalCommandCompletionState | null;
   onTitleChange(listener: (title?: string) => void): () => void;
   onActivityChange(listener: (transition: TerminalActivityTransition) => void): () => void;
   getSize(): { rows: number; cols: number };
