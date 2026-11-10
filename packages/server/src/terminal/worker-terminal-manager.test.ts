@@ -78,6 +78,10 @@ import { connectTerminalWorker } from "./terminal-worker-client.js";
 import { launchTerminalWorker, TerminalWorkerLaunchError } from "./terminal-worker-launch.js";
 import { currentBootId } from "../server/pid-lock.js";
 import { spawn } from "node:child_process";
+import { WorkspaceScriptRuntimeStore } from "../server/workspace-script-runtime-store.js";
+import { restoreWorkspaceScripts } from "../server/workspace-script-recovery.js";
+import { createServiceProxySubsystem } from "../server/service-proxy.js";
+import type { WorkspaceRegistry } from "../server/workspace-registry.js";
 
 type TerminalRow = TerminalState["grid"][number];
 
@@ -1666,19 +1670,19 @@ it.each([1, 4])(
     expect(manager.getTerminal(old.terminalId)).toBeUndefined();
     const workers = await workerRecords(paseoHome);
     expect(workers).toHaveLength(1);
-    expect(workers[0]!.protocolVersion).toBe(6);
+    expect(workers[0]!.protocolVersion).toBe(TERMINAL_WORKER_PROTOCOL_VERSION);
   },
 );
 
 it("leaves a worker from a newer Paseo running, reports it incompatible, and closes it on a kill stop", async () => {
   const paseoHome = createTemporaryHome();
-  const newer = await leaveWorkerWithTerminal(paseoHome, 7);
+  const newer = await leaveWorkerWithTerminal(paseoHome, TERMINAL_WORKER_PROTOCOL_VERSION + 1);
 
   manager = await startRealWorkerManager({ paseoHome });
 
   const unavailable = manager.getUnavailableError?.();
   expect(unavailable).toBeInstanceOf(TerminalWorkerIncompatibleError);
-  expect(unavailable?.message).toContain("worker protocol 7");
+  expect(unavailable?.message).toContain(`worker protocol ${TERMINAL_WORKER_PROTOCOL_VERSION + 1}`);
   await expect(manager.getTerminals(newer.cwd)).rejects.toBeInstanceOf(
     TerminalWorkerIncompatibleError,
   );
@@ -2907,3 +2911,232 @@ it.skipIf(!isPlatform("win32"))(
   },
   30000,
 );
+
+it("retains the last command completion in the worker across detach and adoption", async () => {
+  const paseoHome = createTemporaryHome();
+  manager = await startRealWorkerManager({ paseoHome });
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-completion-"));
+  temporaryDirs.push(cwd);
+  // A plain shell with no integration: the only completion is the one emitted below.
+  const session = await manager.createTerminal({
+    workspaceId: "ws-completion",
+    cwd,
+    command: "/bin/sh",
+    args: [],
+  });
+  session.send({ type: "input", data: "printf '\\033]633;D;7\\007'\r" });
+  await waitForCondition(() => session.getLastCommandFinished()?.seq === 1, 10000);
+  expect(session.getLastCommandFinished()).toEqual({ seq: 1, exitCode: 7 });
+  // The daemon lets go with --keep-terminals semantics; a new daemon adopts the
+  // same worker and must see the same retained completion.
+  await manager.detach();
+  manager = await startRealWorkerManager({ paseoHome });
+  expect(manager.getTerminal(session.id)?.getLastCommandFinished()).toEqual({
+    seq: 1,
+    exitCode: 7,
+  });
+});
+
+it("keeps a completion that lands in the same batch as the adoption snapshot", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const workspaceId = "ws-script-race";
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-script-race-"));
+  temporaryDirs.push(cwd);
+  const terminalId = "terminal-script-race";
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  // One socket batch: the stale snapshot first, then the completion it missed.
+  // Both dispatch synchronously; the adoption continuation runs after.
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal: {
+          id: terminalId,
+          name: "Shell",
+          cwd,
+          workspaceId,
+          activity: null,
+        },
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: null,
+      },
+    ],
+  });
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 1, exitCode: 3 },
+  });
+  await expect(adopting).resolves.toBe(1);
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 1,
+    exitCode: 3,
+  });
+  // Running restore against the adopted mirror must mark the journaled run
+  // stopped, so script start accepts a relaunch instead of staying running.
+  const logger = pino({ level: "silent" });
+  const store = await WorkspaceScriptRuntimeStore.open({
+    path: join(cwd, "runtime.json"),
+    logger,
+  });
+  const entry = {
+    workspaceId,
+    scriptName: "web",
+    type: "script" as const,
+    lifecycle: "running" as const,
+    terminalId,
+    exitCode: null as number | null,
+    cwd,
+    commandSeq: 0,
+  };
+  store.set(entry);
+  await store.flush();
+  const workspaces = {
+    get: async () => ({ workspaceId, cwd, branch: "main", archivedAt: null }),
+  } as unknown as Pick<WorkspaceRegistry, "get">;
+  await restoreWorkspaceScripts({
+    runtimeStore: store,
+    terminalManager: manager,
+    workspaceRegistry: workspaces,
+    serviceProxy: createServiceProxySubsystem({ logger }),
+    publicBaseUrl: "https://example.test",
+  });
+  expect(store.get(entry)).toMatchObject({ lifecycle: "stopped", exitCode: 3 });
+  expect(store.isRunning(entry)).toBe(false);
+});
+
+it("drops an exit that lands in the same batch as the adoption snapshot", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const workspaceId = "ws-script-exit-race";
+  const cwd = mkdtempSync(join(tmpdir(), "worker-terminal-manager-script-exit-race-"));
+  temporaryDirs.push(cwd);
+  const terminalId = "terminal-script-exit-race";
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  // One socket batch: the stale snapshot first, then the exit it missed.
+  // Both dispatch synchronously; the adoption continuation runs after.
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal: {
+          id: terminalId,
+          name: "Shell",
+          cwd,
+          workspaceId,
+          activity: null,
+        },
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: null,
+      },
+    ],
+  });
+  worker.emitWorkerMessage({
+    type: "terminalExit",
+    terminalId,
+    info: { exitCode: 1, signal: null, lastOutputLines: [] },
+  });
+  await expect(adopting).resolves.toBe(1);
+  // The stale list entry must not revive the exited terminal.
+  expect(manager.getTerminal(terminalId)).toBeUndefined();
+  // Running restore against the adopted mirror must mark the journaled service
+  // stopped and restartable, without retaining its proxy route.
+  const logger = pino({ level: "silent" });
+  const store = await WorkspaceScriptRuntimeStore.open({
+    path: join(cwd, "runtime.json"),
+    logger,
+  });
+  const entry = {
+    workspaceId,
+    scriptName: "web",
+    type: "service" as const,
+    lifecycle: "running" as const,
+    terminalId,
+    exitCode: null as number | null,
+    cwd,
+    port: 47931,
+    projectSlug: "test-project",
+    branchName: "main",
+  };
+  store.set(entry);
+  await store.flush();
+  const workspaces = {
+    get: async () => ({ workspaceId, cwd, branch: "main", archivedAt: null }),
+  } as unknown as Pick<WorkspaceRegistry, "get">;
+  const serviceProxy = createServiceProxySubsystem({ logger });
+  await restoreWorkspaceScripts({
+    runtimeStore: store,
+    terminalManager: manager,
+    workspaceRegistry: workspaces,
+    serviceProxy,
+    publicBaseUrl: "https://example.test",
+  });
+  expect(store.get(entry)).toMatchObject({ lifecycle: "stopped" });
+  expect(store.isRunning(entry)).toBe(false);
+  expect(serviceProxy.getWorkspaceHealthTargets(workspaceId)).toEqual([]);
+});
+
+it("adopts the newest completion when the snapshot and a live event disagree", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ worker, requestTimeoutMs: 5000 });
+  const terminalId = "terminal-race-newest";
+  const terminal = {
+    id: terminalId,
+    name: "Shell",
+    cwd: "/workspace",
+    workspaceId: "ws-race",
+    activity: null,
+  };
+  // The completion beats the snapshot into the daemon: stashed first, then the
+  // older snapshot registers. The newer completion must survive the merge.
+  const adopting = manager.adoptTerminals();
+  const request = worker.sentMessages.find((message) => message.type === "listTerminals");
+  if (!request) throw new Error("adoptTerminals did not send listTerminals");
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 3, exitCode: 1 },
+  });
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: true,
+    result: [
+      {
+        terminal,
+        state: createTerminalState(),
+        activityToken: null,
+        replayPreamble: "",
+        lastCommandFinished: { seq: 2, exitCode: 0 },
+      },
+    ],
+  });
+  await expect(adopting).resolves.toBe(1);
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 3,
+    exitCode: 1,
+  });
+  // A stale duplicate redelivery must not clobber the newer mirror.
+  worker.emitWorkerMessage({
+    type: "terminalCommandFinished",
+    terminalId,
+    info: { seq: 2, exitCode: 0 },
+  });
+  expect(manager.getTerminal(terminalId)?.getLastCommandFinished()).toEqual({
+    seq: 3,
+    exitCode: 1,
+  });
+});
