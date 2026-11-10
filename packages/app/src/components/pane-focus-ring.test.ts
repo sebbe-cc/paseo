@@ -1,17 +1,20 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import {
-  PANE_FOCUS_RING_TEST_ID,
-  resolvePaneFocusRingVisible,
-} from "./pane-focus-ring";
+import { PANE_FOCUS_RING_TEST_ID, resolvePaneFocusRingVisible } from "./pane-focus-ring";
 
 function readSource(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
 function rendersComponent(source: string, name: string): boolean {
-  const file = ts.createSourceFile("check.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile(
+    "check.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
   let found = false;
   function visit(node: ts.Node) {
     if (
@@ -57,12 +60,12 @@ describe("pane focus ring placement", () => {
   it("renders the ring in the explorer sidebar dock", () => {
     const source = readSource("../screens/workspace/explorer-sidebar.tsx");
     expect(rendersComponent(source, "PaneFocusRing")).toBe(true);
-    expect(source).toContain("testID=\"workspace-explorer-focus-ring\"");
+    expect(source).toContain('testID="workspace-explorer-focus-ring"');
   });
 
   it("threads real pane focus into the explorer dock instead of a hardcoded true", () => {
     const dockSource = readSource("../screens/workspace/explorer-sidebar.tsx");
-    expect(dockSource).toContain("isPaneFocused={isPaneFocused}");
+    expect(dockSource).toContain("isPaneFocused={!paneFocusSuspended && isPaneFocused}");
     expect(dockSource).not.toMatch(/isPaneFocused\s*\n/);
     const screenSource = readSource("../screens/workspace/workspace-screen.tsx");
     expect(screenSource).toContain("isExplorerPaneFocused");
