@@ -64,6 +64,22 @@ export type {
   PluginFileUrlState,
   PluginFileWriteOptions,
 } from "./file.js";
+export type {
+  PluginHidUsagePair,
+  PluginHidDeviceInfo,
+  PluginHidBrokerState,
+  PluginHidControlEvent,
+  PluginHidRawReport,
+  PluginHidBroker,
+  PluginDeviceOwner,
+  PluginHidCapability,
+} from "./hid.js";
+export type {
+  PluginClientPane,
+  PluginClientContextSnapshot,
+  PluginRouteTarget,
+  PluginClientContextCapability,
+} from "./client-context.js";
 export {
   PluginFileConflictError,
   PluginFileDeletedError,
