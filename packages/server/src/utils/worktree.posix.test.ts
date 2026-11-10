@@ -136,8 +136,10 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       expect(existsSync(metadataPath)).toBe(true);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({
-        version: 1,
+        version: 3,
         baseRefName: "main",
+        baseRef: "refs/heads/main",
+        forkSha: execFileSync("git", ["rev-parse", "main"], { cwd: repoDir }).toString().trim(),
         changeRequestLookupTarget: { headRef: "hello-world", localBranchName: "hello-world" },
       });
     });
@@ -266,7 +268,7 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       const metadataPath = await getPaseoWorktreeMetadataPath(result.worktreePath);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({
-        version: 1,
+        version: 3,
         baseRefName: "main",
         changeRequestLookupTarget: { headRef: "feature/x", localBranchName: "feature/x" },
       });
@@ -675,15 +677,22 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       execFileSync("git", ["update-ref", "-d", "refs/remotes/upstream/main"], {
         cwd: result.worktreePath,
       });
-      await expect(
-        getCheckoutDiff(result.worktreePath, { mode: "base", baseRef: "main" }, { paseoHome }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
-      await expect(
-        mergeFromBase(result.worktreePath, { baseRef: "main" }, { paseoHome }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
-      await expect(
-        listCheckoutCommits({ cwd: result.worktreePath, context: { paseoHome } }),
-      ).rejects.toThrow("Base ref not found: refs/remotes/upstream/main");
+      // pa-9av7: a deleted base compares against the fork point saved at creation.
+      const missingBaseDiff = await getCheckoutDiff(
+        result.worktreePath,
+        { mode: "base", baseRef: "main" },
+        { paseoHome },
+      );
+      expect(missingBaseDiff.diff).toContain("later.txt");
+      await expect(getCheckoutStatus(result.worktreePath, { paseoHome })).resolves.toMatchObject({
+        base: { ref: "refs/remotes/upstream/main", missing: true },
+      });
+      const missingBaseHistory = await listCheckoutCommits({
+        cwd: result.worktreePath,
+        context: { paseoHome },
+      });
+      expect(missingBaseHistory.baseRef).toMatch(/^[0-9a-f]{40}$/);
+      expect(missingBaseHistory.commits.some((commit) => !commit.isOnBase)).toBe(true);
     });
 
     it("records Git-valid characters in a remote base branch", async () => {

@@ -221,7 +221,10 @@ import {
   archiveWorkspaceContents,
 } from "./workspace-archive-service.js";
 import type { ServiceProxySubsystem } from "./service-proxy.js";
-import { renameCurrentBranch as renameCurrentBranchDefault } from "../utils/checkout-git.js";
+import {
+  renameCurrentBranch as renameCurrentBranchDefault,
+  resolveWorkspaceBase,
+} from "../utils/checkout-git.js";
 import {
   createGitMutationService,
   type GitMutationService,
@@ -6068,6 +6071,25 @@ export class Session {
     }
   }
 
+  private async describeWorkspaceBase(
+    workspace: PersistedWorkspaceRecord,
+  ): Promise<Pick<WorkspaceDescriptorPayload, "base" | "baseError">> {
+    if (workspace.kind === "directory") return { base: null };
+    // The observer snapshot already carries the base; resolve with git only before it exists.
+    const snapshot = this.workspaceRuntimeStore.get(workspace.cwd);
+    if (snapshot) return { base: snapshot.git.base ?? null };
+    try {
+      return {
+        base: await resolveWorkspaceBase(workspace.cwd, {
+          paseoHome: this.paseoHome,
+          worktreesRoot: this.worktreesRoot,
+        }),
+      };
+    } catch (error) {
+      return { base: null, baseError: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   private async describeWorkspaceRecord(
     workspace: PersistedWorkspaceRecord,
     projectRecord?: PersistedProjectRecord | null,
@@ -6088,6 +6110,7 @@ export class Session {
 
     return {
       id: workspace.workspaceId,
+      ...(await this.describeWorkspaceBase(workspace)),
       projectId: workspace.projectId,
       projectDisplayName: resolvedProjectRecord
         ? resolveProjectDisplayName(resolvedProjectRecord)
@@ -6181,6 +6204,7 @@ export class Session {
   ): Promise<WorkspaceDescriptorPayload> {
     const projectRecord = await this.projectRegistry.get(result.workspace.projectId);
     return {
+      ...(await this.describeWorkspaceBase(result.workspace)),
       id: result.workspace.workspaceId,
       projectId: result.workspace.projectId,
       projectDisplayName: projectRecord

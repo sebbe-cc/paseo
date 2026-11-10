@@ -984,6 +984,7 @@ export const ar: TranslationResources = {
         refresh: "ينعش",
         refreshState: "تحديث حالة git و{{brand}}",
         failedRefresh: "فشل تحديث حالة git.",
+        missingBase: "لم يعد الأساس {{ref}} موجودًا. تتم المقارنة مع نقطة التفرّع المحفوظة.",
         seeUncommittedChanges: "عرض التغييرات غير الملتزم بها",
         seeCommittedChanges: "عرض التغييرات الملتزم بها",
         checkingRepository: "فحص المستودع...",

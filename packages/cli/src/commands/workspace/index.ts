@@ -6,6 +6,7 @@ import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
 import { runSetupCommand } from "./setup.js";
+import { runShowCommand } from "./show.js";
 
 export function createWorkspaceCommand(): Command {
   const workspace = new Command("workspace").description("Manage workspaces");
@@ -64,6 +65,13 @@ export function createWorkspaceCommand(): Command {
       .description("Archive a workspace and everything it owns")
       .argument("<workspace-id>", "Workspace id"),
   ).action(withOutput(runArchiveCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("show")
+      .description("Show a workspace and its comparison base")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runShowCommand));
 
   return workspace;
 }

@@ -1010,6 +1010,8 @@ export const fr: TranslationResources = {
         refresh: "Actualiser",
         refreshState: "Actualiser l’état de git et de {{brand}}",
         failedRefresh: "Impossible d’actualiser l’état git.",
+        missingBase:
+          "La base {{ref}} n’existe plus. Comparaison avec le point de divergence enregistré.",
         seeUncommittedChanges: "Voir les modifications non commitées",
         seeCommittedChanges: "Voir les modifications commitées",
         checkingRepository: "Vérification du dépôt…",

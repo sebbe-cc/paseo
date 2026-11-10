@@ -976,6 +976,7 @@ export const zhCN: TranslationResources = {
         refresh: "刷新",
         refreshState: "刷新 git 和 {{brand}} 状态",
         failedRefresh: "刷新 git 状态失败。",
+        missingBase: "基准 {{ref}} 已不存在。正在与已保存的分叉点比较。",
         seeUncommittedChanges: "查看未 commit 的变更",
         seeCommittedChanges: "查看已 commit 的变更",
         checkingRepository: "正在检查 repository...",
