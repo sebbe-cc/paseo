@@ -105,6 +105,7 @@ export type PluginClientRuntime = Pick<
   PluginClientContext,
   | "i18n"
   | "playAudio"
+  | "clientActions"
   | "paseo"
   | "rpc"
   | "openSettings"

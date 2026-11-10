@@ -4,6 +4,7 @@ import type { ComponentType } from "react";
 import type { PluginPaseoApi } from "./reference-api.js";
 import type { AgentTimelineItem, JsonValue } from "@getpaseo/protocol/agent-types";
 import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
+import type { PluginClientActionsCapability } from "./client-actions.js";
 import type { PluginFile } from "./file.js";
 import type {
   PluginComposer,
@@ -208,6 +209,15 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
+  /**
+   * Trusted app actions (voice hold-to-talk, focused-panel scroll,
+   * joystick navigation). Present only on clients whose app
+   * implements it (desktop); undefined on older apps, browser and
+   * mobile, where the plugin reports "unsupported" and stays a
+   * no-op. App-owned with app lifetime: subscribe in contribute()
+   * and release in cleanup.
+   */
+  readonly clientActions?: PluginClientActionsCapability;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarView(contribution: PluginSidebarViewContribution<PluginText>): PluginCleanup;

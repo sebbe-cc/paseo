@@ -71,6 +71,14 @@ export {
   useFileText,
   useFileUrl,
 } from "./file.js";
+export type {
+  PluginClientActionsCapabilities,
+  PluginClientActionsCapability,
+  PluginClientActionsTarget,
+  PluginPanelNavigationTarget,
+  PluginPanelScrollAmount,
+  PluginPanelScrollDirection,
+} from "./client-actions.js";
 export { usePaseo } from "./paseo-context.js";
 export {
   useAgent,
