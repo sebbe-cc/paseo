@@ -31,7 +31,8 @@ export function createTerminalCommand(): Command {
       .description("Create a terminal")
       .option("--workspace <id>", "Workspace ID")
       .option("--cwd <path>", "Working directory")
-      .option("--name <name>", "Terminal name"),
+      .option("--name <name>", "Terminal name")
+      .option("--persistent", "Keep the terminal across daemon restarts (same PIDs)"),
   ).action(withOutput(runCreateCommand));
 
   addJsonAndDaemonHostOptions(
