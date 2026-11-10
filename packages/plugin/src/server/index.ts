@@ -39,11 +39,11 @@ export type { AgentToolDefinition, AgentToolResult, AgentToolContext } from "./a
 
 export { VoiceProviderEventSchema, VoiceProviderCommandSchema } from "./voice.js";
 export type {
-  VoiceProviderEvent,
-  VoiceProviderRegistration,
-  VoiceProviderSession,
-  VoiceProviderStartContext,
-  VoiceProviderSelection,
-  PluginVoiceHost,
-  VoiceProviderCommand,
+  VoiceProviderEvent, VoiceProviderRegistration, VoiceProviderSession,
+  VoiceProviderStartContext, VoiceProviderSelection, PluginVoiceHost, VoiceProviderCommand,
 } from "./voice.js";
+export { DictationProviderCommandSchema, DictationCommitResultSchema } from "./dictation.js";
+export type {
+  DictationProviderCommand, DictationProviderRegistration, DictationProviderSelection,
+  DictationProviderSession, DictationProviderStartContext, PluginDictationHost,
+} from "./dictation.js";
