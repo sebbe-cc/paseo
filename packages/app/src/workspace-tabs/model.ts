@@ -23,6 +23,7 @@ export type PluginWorkspaceTabTarget =
       pluginId: string;
       panelId: string;
       context: "workspace";
+      params?: JsonValue;
     }
   | {
       kind: "plugin";
@@ -30,6 +31,7 @@ export type PluginWorkspaceTabTarget =
       panelId: string;
       context: "agent";
       agentId: string;
+      params?: JsonValue;
     };
 
 export type WorkspaceTabTarget =
