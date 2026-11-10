@@ -1,3 +1,9 @@
+import type {
+  PluginVoiceHost,
+  VoiceProviderSelection,
+  VoiceProviderSession,
+  VoiceProviderEvent,
+} from "@getpaseo/plugin/server";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import type pino from "pino";
@@ -140,7 +146,9 @@ export interface VoiceSessionOptions {
   tts: Resolvable<TextToSpeechProvider | null>;
   stt: Resolvable<SpeechToTextProvider | null>;
   voice?: {
+    clientSupportsPluginVoice?: boolean;
     turnDetection?: Resolvable<TurnDetectionProvider | null>;
+    plugin?: { getSelection(): VoiceProviderSelection | null; host: PluginVoiceHost };
   };
   voiceBridge?: {
     registerVoiceSpeakHandler?: (agentId: string, handler: VoiceSpeakHandler) => void;
@@ -207,6 +215,11 @@ export class VoiceSession {
   private readonly unregisterVoiceCallerContext?: (agentId: string) => void;
   private readonly getSpeechReadiness?: () => SpeechReadinessSnapshot;
 
+  private readonly pluginVoice: NonNullable<VoiceSessionOptions["voice"]>["plugin"];
+  private readonly clientSupportsPluginVoice: boolean;
+  private pluginConnection: VoiceProviderSession | null = null;
+  private pluginAbort: AbortController | null = null;
+  private voiceModeTransition: Promise<void> = Promise.resolve();
   private voiceModeAgentId: string | null = null;
   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
 
@@ -220,6 +233,8 @@ export class VoiceSession {
     this.sttLanguage = sttLanguage ?? "en";
     this.abortController = new AbortController();
 
+    this.pluginVoice = voice?.plugin;
+    this.clientSupportsPluginVoice = voice?.clientSupportsPluginVoice !== false;
     this.resolveVoiceTurnDetection = toResolver(voice?.turnDetection ?? null);
     this.registerVoiceSpeakHandler = voiceBridge?.registerVoiceSpeakHandler;
     this.unregisterVoiceSpeakHandler = voiceBridge?.unregisterVoiceSpeakHandler;
@@ -351,13 +366,28 @@ export class VoiceSession {
   /**
    * Handle voice mode toggle
    */
-  async handleSetVoiceMode(enabled: boolean, agentId?: string, requestId?: string): Promise<void> {
+  handleSetVoiceMode(enabled: boolean, agentId?: string, requestId?: string): Promise<void> {
+    // Stop bootstrap promptly even while an earlier start owns the transition queue.
+    if (!enabled || (agentId && agentId !== this.voiceModeAgentId)) this.pluginAbort?.abort();
+    const transition = this.voiceModeTransition.then(() =>
+      this.setVoiceMode(enabled, agentId, requestId),
+    );
+    this.voiceModeTransition = transition.catch(() => undefined);
+    return transition;
+  }
+
+  private async setVoiceMode(
+    enabled: boolean,
+    agentId?: string,
+    requestId?: string,
+  ): Promise<void> {
     const startedAt = Date.now();
     try {
       this.sessionLogger.info(
         { enabled, requestedAgentId: agentId ?? null, requestId: requestId ?? null },
         "set_voice_mode started",
       );
+      if (await this.tryStartPluginVoice(enabled, agentId, requestId)) return;
       if (enabled) {
         const unavailable = this.resolveVoiceFeatureUnavailableContext("voice_mode");
         if (unavailable) {
@@ -480,6 +510,128 @@ export class VoiceSession {
     }
   }
 
+  private async tryStartPluginVoice(
+    enabled: boolean,
+    agentId?: string,
+    requestId?: string,
+  ): Promise<boolean> {
+    const selection = this.pluginVoice?.getSelection();
+    if (!enabled || !selection) return false;
+    // COMPAT(pluginVoiceProviders): added in fork v0.12.0; remove after 2027-04-20 once all clients handle sessionEnded.
+    if (!this.clientSupportsPluginVoice)
+      throw new Error("Update the Paseo app to use plugin voice providers.");
+    await this.startPluginVoice(
+      selection,
+      this.parseVoiceTargetAgentId(agentId ?? "", "set_voice_mode"),
+    );
+    if (requestId)
+      this.emit({
+        type: "set_voice_mode_response",
+        payload: {
+          requestId,
+          enabled: true,
+          agentId: this.voiceModeAgentId,
+          accepted: true,
+          error: null,
+        },
+      });
+    return true;
+  }
+
+  private async startPluginVoice(
+    selection: VoiceProviderSelection,
+    agentId: string,
+  ): Promise<void> {
+    if (!this.pluginVoice) throw new Error("Plugin voice is unavailable");
+    if (this.pluginConnection && this.voiceModeAgentId === agentId) return;
+    await this.disableVoiceModeForActiveAgent(true);
+    this.isVoiceMode = false;
+    await this.host.loadAgent(agentId);
+    if (this.closed) throw new Error("Voice source is closed");
+    const abort = new AbortController();
+    this.pluginAbort = abort;
+    this.voiceModeAgentId = agentId;
+    try {
+      const connection = await this.pluginVoice.host.startVoiceProvider(selection, {
+        agentId,
+        signal: abort.signal,
+        emit: (event) => {
+          if (!this.closed && this.pluginAbort === abort && !abort.signal.aborted)
+            this.handlePluginVoiceEvent(event);
+        },
+      });
+      if (this.closed || abort.signal.aborted) {
+        await connection.close();
+        throw new Error("Voice startup cancelled");
+      }
+      this.pluginConnection = connection;
+      this.isVoiceMode = true;
+    } catch (error) {
+      abort.abort();
+      if (this.pluginAbort === abort) {
+        this.pluginAbort = null;
+        this.voiceModeAgentId = null;
+      }
+      throw error;
+    }
+  }
+
+  private handlePluginVoiceEvent(event: VoiceProviderEvent): void {
+    switch (event.type) {
+      case "audio":
+        this.emit({
+          type: "audio_output",
+          payload: {
+            audio: event.audio,
+            format: "pcm",
+            id: uuidv4(),
+            isVoiceMode: true,
+            groupId: event.utteranceId,
+            chunkIndex: event.chunkIndex,
+            isLastChunk: event.isLastChunk,
+          },
+        });
+        return;
+      case "speech":
+        this.emit({ type: "voice_input_state", payload: { isSpeaking: event.isSpeaking } });
+        return;
+      case "transcript":
+        if (event.role === "user")
+          this.emit({
+            type: "transcription_result",
+            payload: { text: event.text, requestId: uuidv4() },
+          });
+        else
+          this.emit({
+            type: "activity_log",
+            payload: {
+              id: uuidv4(),
+              timestamp: new Date(),
+              type: "assistant",
+              content: event.text,
+            },
+          });
+        return;
+      case "closed":
+        this.endPluginVoice(event.error);
+    }
+  }
+
+  private endPluginVoice(reason?: string): void {
+    const connection = this.pluginConnection;
+    this.pluginConnection = null;
+    this.pluginAbort?.abort();
+    this.pluginAbort = null;
+    this.voiceModeAgentId = null;
+    this.isVoiceMode = false;
+    this.emit({
+      type: "voice_input_state",
+      payload: { isSpeaking: false, sessionEnded: true, ...(reason ? { error: reason } : {}) },
+    });
+    void Promise.resolve(connection?.close()).catch(() => undefined);
+    this.onIdle?.();
+  }
+
   private parseVoiceTargetAgentId(rawId: string, source: string): string {
     const parsed = AgentIdSchema.safeParse(rawId.trim());
     if (!parsed.success) {
@@ -528,6 +680,11 @@ export class VoiceSession {
   }
 
   private async disableVoiceModeForActiveAgent(restoreAgentConfig: boolean): Promise<void> {
+    const connection = this.pluginConnection;
+    this.pluginConnection = null;
+    this.pluginAbort?.abort();
+    this.pluginAbort = null;
+    if (connection) await Promise.resolve(connection.close()).catch(() => undefined);
     await this.stopVoiceTurnController();
 
     const agentId = this.voiceModeAgentId;
@@ -726,6 +883,7 @@ export class VoiceSession {
     msg: Extract<SessionInboundMessage, { type: "voice_audio_chunk" }>,
     chunkFormat: string,
   ): Promise<void> {
+    if (this.pluginConnection) return this.appendPluginAudio(msg);
     if (!this.voiceTurnController) {
       throw new Error("Voice mode is enabled but the voice turn controller is not running");
     }
@@ -751,6 +909,19 @@ export class VoiceSession {
       audioBase64: msg.audio,
       format: chunkFormat,
     });
+  }
+
+  private async appendPluginAudio(
+    msg: Extract<SessionInboundMessage, { type: "voice_audio_chunk" }>,
+  ): Promise<void> {
+    if (!this.pluginConnection) return;
+    try {
+      if (msg.format !== "audio/pcm;rate=16000;bits=16")
+        throw new Error("Plugin voice requires PCM16 at 16 kHz");
+      await this.pluginConnection.appendAudio(msg.audio);
+    } catch {
+      this.endPluginVoice("Voice audio transport failed");
+    }
   }
 
   async handleAudioChunk(
@@ -1319,6 +1490,7 @@ export class VoiceSession {
   cancel(): void {
     if (this.closed) return;
     this.closed = true;
+    this.pluginAbort?.abort();
     this.abortController.abort();
     this.clearBufferTimeout();
     this.pendingAudioSegments = [];
