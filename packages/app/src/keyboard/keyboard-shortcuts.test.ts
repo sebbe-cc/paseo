@@ -1393,7 +1393,7 @@ describe("direct new-tab target shortcuts", () => {
 
 describe("global voice shortcut", () => {
   it("is assignable globally without stealing the chat voice shortcut", () => {
-    const platform = { isMac: true, isDesktop: true };
+    const platform = { isMac: true, usesDesktopBindings: true };
     expect(resolveShortcutKeysForAction("global-voice-toggle", {}, platform)).toBeNull();
     expect(
       resolveShortcutKeysForAction(
