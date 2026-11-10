@@ -954,6 +954,7 @@ test("resume re-applies the saved effort to the host session", async () => {
       },
       "onRequest",
       "meta/muse-spark-1.3",
+      {},
       null,
     ),
   ).toEqual({
