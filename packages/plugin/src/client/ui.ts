@@ -134,7 +134,10 @@ export interface SettingsActionProps extends SettingsRowProps {
 /** @deprecated Use SettingsSection for plugin settings headings. */
 export declare const SettingsGroup: ComponentType<SettingsSectionProps>;
 export declare const SettingsSection: ComponentType<SettingsSectionProps>;
-export declare const SettingsCard: ComponentType<{ children: ReactNode; testID?: string }>;
+export declare const SettingsCard: ComponentType<{
+  children: ReactNode;
+  testID?: string;
+}>;
 export declare const SettingsRow: ComponentType<SettingsRowProps>;
 export declare const SettingsSwitch: ComponentType<SettingsSwitchProps>;
 export declare function SettingsSelect<Value extends string>(
@@ -177,7 +180,10 @@ export declare const SidebarSeparator: ComponentType;
 export declare const Loading: ComponentType;
 
 /** Render a local document URL in an isolated frame. */
-export declare const DocumentFrame: ComponentType<{ url: string; testID?: string }>;
+export declare const DocumentFrame: ComponentType<{
+  url: string;
+  testID?: string;
+}>;
 
 export interface MarkdownProps {
   children: string;
@@ -242,3 +248,12 @@ export declare const Toggle: ComponentType<ToggleProps>;
 export declare function Select<Value extends string>(props: SelectProps<Value>): ReactNode;
 export declare const Action: ComponentType<ActionProps>;
 export declare function Combobox<Item extends ComboboxItem>(props: ComboboxProps<Item>): ReactNode;
+
+/** Plain text using this timeline's registered inline decorators. Strings stay literal.
+ * Outside an agent timeline it renders ordinary Text. inlineCode honors opt-outs.
+ */
+export interface DecoratedTextProps extends Omit<TextProps, "children"> {
+  children: string;
+  inlineCode?: boolean;
+}
+export declare const DecoratedText: ComponentType<DecoratedTextProps>;
