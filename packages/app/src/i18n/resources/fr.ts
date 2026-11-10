@@ -956,6 +956,8 @@ export const fr: TranslationResources = {
         },
       },
       diff: {
+        missingBase:
+          "La base {{ref}} n’existe plus. Comparaison avec le point de divergence enregistré.",
         openChangesTab: "Ouvrir l’onglet Modifications",
         openDiffTab: "Ouvrir l’onglet Diff",
         closeChangesTab: "Fermer l’onglet Modifications",
