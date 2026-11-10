@@ -465,6 +465,7 @@ export interface PaseoAgentHandle {
    * running agent without sending a message.
    */
   cancel(): Promise<void>;
+  /**
    * Switches the agent's provider mode, mirroring `paseo agent mode`.
    * Returns the provider notice when the daemon reports one, else null.
    */
