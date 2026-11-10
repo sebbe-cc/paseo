@@ -5215,7 +5215,7 @@ describe("queued foreground turns", () => {
     );
     const internals = asInternals<ACPSessionInternals>(session);
     internals.sessionId = "session-1";
-    internals.connection = { prompt };
+    internals.connection = { prompt, signal: new AbortController().signal };
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
     return { session, internals, prompt, resolvers, events };
@@ -5283,7 +5283,7 @@ describe("queued foreground turns", () => {
       );
 
       const livePrompt = vi.fn(async () => ({ stopReason: "end_turn" }) as PromptResponse);
-      internals.connection = { prompt: livePrompt };
+      internals.connection = { prompt: livePrompt, signal: new AbortController().signal };
       for (const text of ["one", "two", "three"]) {
         const started = await session.startTurn(text);
         await vi.waitFor(() => {
