@@ -2820,6 +2820,46 @@ export class AgentManager {
     this.dispatchStoredAgentState(nextRecord);
   }
 
+  /**
+   * Flag a stored-only agent (no live session) with error attention, e.g. when
+   * automatic restart recovery fails before the agent could be registered. The
+   * record — including the provider persistence handle — is left untouched
+   * apart from attention/lastError, and the stored state is dispatched so the
+   * failure is visible to subscribers. A record that already requires
+   * attention (e.g. unread finished/permission attention preserved across
+   * restart) is still overwritten: the current recovery error replaces the
+   * stale reason so the missing context stays visible. Returns false when
+   * there is nothing to flag (unknown, internal, or archived agent) or when
+   * the identical error is already recorded.
+   */
+  async markStoredAgentError(agentId: string, error: unknown): Promise<boolean> {
+    const registry = this.requireRegistry();
+    const record = await registry.get(agentId);
+    if (!record || record.internal || record.archivedAt) {
+      return false;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      record.requiresAttention &&
+      record.attentionReason === "error" &&
+      record.lastError === message
+    ) {
+      return false;
+    }
+    const updatedAt = this.nextStoredUpdatedAt(record);
+    const nextRecord: StoredAgentRecord = {
+      ...record,
+      updatedAt,
+      requiresAttention: true,
+      attentionReason: "error",
+      attentionTimestamp: updatedAt,
+      lastError: message,
+    };
+    await registry.upsert(nextRecord);
+    this.dispatchStoredAgentState(nextRecord);
+    return true;
+  }
+
   async archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord> {
     return this.runLifecycleMutation(agentId, () =>
       this.archiveSnapshotUnlocked(agentId, archivedAt),
