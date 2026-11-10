@@ -69,7 +69,6 @@ import { CursorError } from "./pagination/cursor.js";
 import { SortablePager, type SortSpec } from "./pagination/sortable-pager.js";
 import { matchesAgentHistoryQuery } from "./agent-history-search.js";
 import type { SpeechToTextProvider, TextToSpeechProvider } from "./speech/speech-provider.js";
-import type { TurnDetectionProvider } from "./speech/turn-detection-provider.js";
 import {
   buildConfigOverrides,
   isStoredAgentProviderAvailable,
@@ -521,6 +520,8 @@ export interface SessionOptions {
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
   pluginRuntime?: {
+    hasVoiceProvider?: import("@getpaseo/plugin/server").PluginVoiceHost["hasVoiceProvider"];
+    startVoiceProvider?: import("@getpaseo/plugin/server").PluginVoiceHost["startVoiceProvider"];
     wait: import("./plugins/lifecycle/index.js").PluginLifecycle["wait"];
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
@@ -593,9 +594,7 @@ export interface SessionOptions {
   getDaemonTcpHost?: () => string | null;
   serviceProxyPublicBaseUrl?: string | null;
   resolveScriptHealth?: (hostname: string) => ScriptHealthState | null;
-  voice?: {
-    turnDetection?: Resolvable<TurnDetectionProvider | null>;
-  };
+  voice?: import("./session/voice/voice-session.js").VoiceSessionOptions["voice"];
   voiceBridge?: {
     registerVoiceSpeakHandler?: (agentId: string, handler: VoiceSpeakHandler) => void;
     unregisterVoiceSpeakHandler?: (agentId: string) => void;
@@ -1357,6 +1356,7 @@ export class Session {
       },
       this.delivery,
       () => this.refreshObservationProducers(),
+      (source) => this.supportsForSource(CLIENT_CAPS.pluginVoiceProviders, source),
     );
 
     this.sessionLogger.trace({}, "agent.session.lifecycle.created");
