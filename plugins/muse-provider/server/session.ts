@@ -241,10 +241,16 @@ export class Session {
     this.messages.set(id, prompt.clientMessageId);
     const input: TurnStartParams["input"] = [];
     const text: string[] = [];
+    // Muse's own servers send system context as <system-reminder source="…">;
+    // match that shape (attribute name and newlines) so the model treats the
+    // Paseo system prompt as its own reminder rather than foreign markup.
+    // config.systemPrompt already carries the composed prompt for create,
+    // resume and turn_prepare context (pa-89is1.4), so this one send-point
+    // covers all three.
     if (this.firstTurn && this.config.systemPrompt)
       input.push({
         type: "text",
-        text: `<system_instructions>\n${this.config.systemPrompt}\n</system_instructions>`,
+        text: `<system-reminder source="paseo-system-prompt">\n${this.config.systemPrompt}\n</system-reminder>`,
       });
     if (prompt.input.type === "command") {
       input.push(this.live().commands.input(prompt.input));
