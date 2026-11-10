@@ -256,8 +256,8 @@ const mainRow: BranchPickerDetail = {
 describe("buildPickerOptionData", () => {
   it("marks origin and keeps an ahead local main explicit", () => {
     const baseItem = defaultBasePickerItem({
-      currentBranch: "main",
-      upstreamRef: "refs/remotes/origin/main",
+      currentBranch: "feature/work",
+      base: { ref: "refs/remotes/origin/main", source: "default" },
     });
     const data = buildPickerOptionData({ branchDetails: [mainRow], prItems: [], baseItem });
 
@@ -265,10 +265,10 @@ describe("buildPickerOptionData", () => {
     expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/remotes/origin/main"));
   });
 
-  it("adds and disambiguates a fork upstream absent from branch suggestions", () => {
+  it("adds and disambiguates a fork base absent from branch suggestions", () => {
     const baseItem = defaultBasePickerItem({
       currentBranch: "main",
-      upstreamRef: "refs/remotes/upstream/main",
+      base: { ref: "refs/remotes/upstream/main", source: "default" },
     });
     const data = buildPickerOptionData({
       branchDetails: [{ ...mainRow, localAhead: 0, localBehind: 0 }],
@@ -280,16 +280,37 @@ describe("buildPickerOptionData", () => {
     expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/remotes/upstream/main"));
   });
 
-  it("marks a visible row on an old daemon when local and origin are in sync", () => {
-    const baseItem = defaultBasePickerItem({ currentBranch: "main" });
+  it("selects nothing on an old daemon that sends no base", () => {
+    const baseItem = defaultBasePickerItem({
+      currentBranch: "main",
+      upstreamRef: "refs/remotes/origin/main",
+    });
     const data = buildPickerOptionData({
       branchDetails: [{ ...mainRow, localAhead: 0, localBehind: 0 }],
       prItems: [],
       baseItem,
     });
 
-    expect(data.options.map((option) => option.label)).toEqual(["main (local)", "main"]);
-    expect(data.selectedOptionId).toBe(branchPickerOptionId("refs/heads/main"));
+    expect(baseItem).toBeNull();
+    expect(data.options.map((option) => option.label)).toEqual(["main"]);
+    expect(data.selectedOptionId).toBe("");
+  });
+
+  it("selects nothing for a stored comparison base, so creation uses the repo default", () => {
+    const baseItem = defaultBasePickerItem({
+      currentBranch: "item/work",
+      base: { ref: "refs/heads/epic-branch", source: "stored" },
+    });
+    const data = buildPickerOptionData({
+      branchDetails: [mainRow],
+      prItems: [],
+      baseItem,
+    });
+
+    expect(baseItem).toBeNull();
+    expect(data.selectedOptionId).toBe("");
+    // No explicit ref is submitted: the server resolves its repository default.
+    expect(pickerItemToCheckoutRequest(baseItem)).toBeUndefined();
   });
 
   it("keeps an explicit local selection marked", () => {
@@ -313,29 +334,72 @@ describe("buildPickerOptionData", () => {
 });
 
 describe("defaultBasePickerItem", () => {
-  it("uses origin when the current branch tracks origin", () => {
+  it("uses the daemon-resolved repo default even when the branch tracks its own upstream", () => {
     expect(
       defaultBasePickerItem({
-        currentBranch: "main",
-        upstreamRef: "refs/remotes/origin/main",
+        currentBranch: "feature/work",
+        upstreamRef: "refs/remotes/origin/feature/work",
+        base: { ref: "refs/remotes/origin/main", source: "default" },
       }),
     ).toMatchObject({ refName: "refs/remotes/origin/main", name: "main" });
   });
 
-  it("uses the exact non-origin upstream", () => {
+  it("uses the exact default ref verbatim", () => {
     expect(
       defaultBasePickerItem({
         currentBranch: "main",
-        upstreamRef: "refs/remotes/upstream/main",
+        base: { ref: "refs/remotes/upstream/main", source: "default" },
       }),
     ).toMatchObject({ refName: "refs/remotes/upstream/main", name: "main" });
   });
 
-  it("keeps old-daemon behavior local", () => {
-    expect(defaultBasePickerItem({ currentBranch: "main" })).toMatchObject({
-      refName: "refs/heads/main",
-      name: "main",
+  it("has no default for a stored local-only comparison base", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "item/work",
+        base: { ref: "refs/heads/epic-branch", source: "stored" },
+      }),
+    ).toBeNull();
+  });
+
+  it("has no default for a stored remote comparison base different from the repo default", () => {
+    const baseItem = defaultBasePickerItem({
+      currentBranch: "item/work",
+      upstreamRef: "refs/remotes/origin/item/work",
+      base: { ref: "refs/remotes/origin/release", source: "stored" },
     });
+    expect(baseItem).toBeNull();
+    // The creation sends no explicit ref, so the new workspace is based on the
+    // repository default (origin/main) rather than the source's release base.
+    expect(pickerItemToCheckoutRequest(baseItem)).toBeUndefined();
+  });
+
+  it("has no default without a source on the daemon base", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "feature/work",
+        base: { ref: "refs/remotes/origin/main" },
+      }),
+    ).toBeNull();
+  });
+
+  it("has no default without a daemon base, so the server resolves the repo default", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "feature/work",
+        upstreamRef: "refs/remotes/origin/feature/work",
+      }),
+    ).toBeNull();
+    expect(defaultBasePickerItem({ currentBranch: "main" })).toBeNull();
+  });
+
+  it("has no default for a missing base", () => {
+    expect(
+      defaultBasePickerItem({
+        currentBranch: "feature/work",
+        base: { ref: "refs/remotes/origin/main", source: "default", missing: true },
+      }),
+    ).toBeNull();
   });
 
   it("has no default for detached HEAD", () => {

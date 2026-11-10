@@ -128,6 +128,15 @@ export function buildBranchPickerItems(details: readonly BranchPickerDetail[]): 
 export interface BaseRefCheckoutStatus {
   currentBranch: string | null;
   upstreamRef?: string | null;
+  // The daemon-resolved workspace base (pa-9av7.1 wire contract): the stored
+  // comparison base for a Paseo-owned source (source "stored"), the repository
+  // default otherwise (source "default"). Only "default" may select a new
+  // workspace's base. Absent on daemons that predate it.
+  base?: {
+    ref: string;
+    source?: "stored" | "default" | null;
+    missing?: boolean | null;
+  } | null;
 }
 
 // Display only. The exact ref is what every request carries; this is just how a ref reads in
@@ -157,24 +166,21 @@ function refQualifier(refName: string): string | null {
 // row, the trigger label, and the created ref all read this; computing it twice is how the
 // picker once showed local main while branching off something else.
 //
-// The upstream wins when the branch has one, because branching off the local ref silently
-// carries unpushed commits into the new workspace. The daemon sends the resolved ref rather
-// than a remote name, so a fork tracking upstream/main branches from upstream/main.
+// The daemon owns the default: without an explicit pick the creation falls back to the
+// server's repo default. Only a repository-default base (source "default") may select
+// the default: a stored comparison base names what the source was cut from (an epic or
+// release branch), never what a new workspace branches off. A missing base (pruned or
+// deleted) has no ref to branch from; both fall back to the server default like a
+// daemon that sends no base at all.
 export function defaultBasePickerItem(status: BaseRefCheckoutStatus): PickerItem | null {
-  const currentBranch = status.currentBranch;
-  if (!currentBranch) return null;
-  // COMPAT(checkoutUpstreamRef): added in v0.2.6, remove after 2027-02-01 once the daemon
-  // floor sends upstreamRef. Daemons that predate it omit the field, which lands on the
-  // local ref — the base those daemons always used.
-  const refName = status.upstreamRef ?? `refs/heads/${currentBranch}`;
-  // The upstream branch can be named differently from the local one, so the row reads the
-  // ref rather than the branch the user happens to be on.
-  const name = branchNameFromRef(refName);
+  const baseRef = status.base?.ref?.trim();
+  if (!baseRef || status.base?.missing === true || status.base?.source !== "default") return null;
+  const name = branchNameFromRef(baseRef);
   return {
     kind: "branch",
     name,
-    refName,
-    accessibilityLabel: status.upstreamRef ? `${name}, upstream branch` : `${name}, local branch`,
+    refName: baseRef,
+    accessibilityLabel: `${name}, base branch`,
   };
 }
 
