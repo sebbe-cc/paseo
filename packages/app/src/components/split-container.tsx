@@ -632,6 +632,9 @@ function SplitNodeView({
   );
 }
 
+const PANE_DATASET = { focusRegion: "pane" };
+const FOCUSED_PANE_DATASET = { focusRegion: "pane", focusedPane: "true" };
+
 const SplitPaneView = memo(function SplitPaneView({
   pane,
   uiTabs,
@@ -827,6 +830,8 @@ const SplitPaneView = memo(function SplitPaneView({
         collapsable={false}
         style={styles.pane}
         testID={`workspace-pane-${pane.id}`}
+        tabIndex={isNative ? undefined : -1}
+        dataSet={isFocused ? FOCUSED_PANE_DATASET : PANE_DATASET}
       >
         <AdaptiveWorkspaceChrome compactHeader={compactHeader}>
           {ownsWorkspaceHeader ? renderMainHeader?.() : null}
@@ -978,6 +983,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 0,
     backgroundColor: theme.colors.surface0,
     overflow: "hidden",
+    outlineWidth: 0,
   },
   paneTabs: {
     position: "relative",
