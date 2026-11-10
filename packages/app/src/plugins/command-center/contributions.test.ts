@@ -250,6 +250,72 @@ describe("plugin Command Center contributions", () => {
     expect(opened).toEqual(["review/surface/main", "review/agent/details/agent-1/explorer"]);
   });
 
+  it("forwards panel params and newTab to navigation", async () => {
+    const calls: unknown[][] = [];
+    const installed = plugin(async (context) => {
+      context.openPanel("details", {
+        location: "workspace",
+        params: { artifactId: "artifact-1" },
+        newTab: true,
+      });
+    });
+    const actions = buildPluginCommandCenterContributions({
+      plugins: [installed],
+      state: stateSource(),
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      navigation: {
+        openSettings() {},
+        openSurface() {},
+        openWorkspacePanel(pluginId, panelId, location, params, newTab) {
+          calls.push(["workspace", pluginId, panelId, location, params, newTab]);
+        },
+        openAgentPanel(pluginId, panelId, agentId, location, params, newTab) {
+          calls.push(["agent", pluginId, panelId, agentId, location, params, newTab]);
+        },
+      },
+      reportError(error) {
+        throw error;
+      },
+    });
+
+    await actions.find((action) => action.id === "review:agent")?.run();
+
+    expect(calls).toEqual([
+      ["agent", "review", "details", "agent-1", "workspace", { artifactId: "artifact-1" }, true],
+    ]);
+  });
+
+  it("keeps the navigation call shape for openPanel without params or newTab", async () => {
+    const calls: unknown[][] = [];
+    const installed = plugin(async (context) => {
+      context.openPanel("details", { location: "workspace" });
+    });
+    const actions = buildPluginCommandCenterContributions({
+      plugins: [installed],
+      state: stateSource(),
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      navigation: {
+        openSettings() {},
+        openSurface() {},
+        openWorkspacePanel(...args: unknown[]) {
+          calls.push(["workspace", ...args]);
+        },
+        openAgentPanel(...args: unknown[]) {
+          calls.push(["agent", ...args]);
+        },
+      },
+      reportError(error) {
+        throw error;
+      },
+    });
+
+    await actions.find((action) => action.id === "review:agent")?.run();
+
+    expect(calls).toEqual([["agent", "review", "details", "agent-1", "workspace"]]);
+  });
+
   it("removes every contribution when its installation disappears", () => {
     expect(
       buildPluginCommandCenterContributions({

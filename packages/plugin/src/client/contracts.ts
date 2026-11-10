@@ -133,6 +133,10 @@ export type PluginPanelLocation = "workspace" | "explorer";
 
 export interface PluginOpenPanelOptions {
   location?: PluginPanelLocation;
+  /** JSON params delivered as the opened panel's `params`; persisted with the tab. */
+  params?: JsonValue;
+  /** Always open a new tab instead of focusing an existing tab of the same panel. */
+  newTab?: boolean;
 }
 
 interface PluginWorkspacePanelBase<Text extends PluginText = string> {
@@ -156,9 +160,10 @@ export interface PluginPanelProps<Params> extends PluginNavigableHostProps {
   revision: number;
   tab: PluginTab;
 }
-export interface PluginWorkspacePanelParams {}
+export type PluginWorkspacePanelParams = Record<string, JsonValue>;
 export interface PluginAgentPanelParams {
   readonly agentId: string;
+  readonly [key: string]: JsonValue | undefined;
 }
 export interface PluginFilePanelParams {
   readonly path: string;
