@@ -24,7 +24,7 @@ interface RecoveryOptions {
   paseoHome: string;
   runtimeStore: WorkspaceScriptRuntimeStore;
   terminalManager: TerminalManager;
-  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "list">;
+  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "listAll">;
   projectRegistry: Pick<ProjectRegistry, "get">;
   logger: Pick<Logger, "warn" | "info">;
 }
@@ -112,7 +112,7 @@ export async function recoverLegacyWorkspaceScripts(options: RecoveryOptions): P
     options,
     inspector: createTerminalWorkerProcessInspector(),
     programs: files.flatMap((f) => ("error" in f ? [] : f.record.terminals)),
-    workspaces: new Map((await options.workspaceRegistry.list()).map((w) => [w.workspaceId, w])),
+    workspaces: new Map((await options.workspaceRegistry.listAll()).map((w) => [w.workspaceId, w])),
   };
   for (const cwd of directories) await recoverDirectory(cwd, context);
   await options.runtimeStore.flush();
