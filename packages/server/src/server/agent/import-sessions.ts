@@ -348,7 +348,6 @@ async function collectImportedProviderSessions(
   const handles = new Set<string>();
   const sessions = new Set<string>();
   const records = await agentStorage.list();
-  const storedRecordsById = new Map(records.map((record) => [record.id, record]));
 
   const collect = (
     provider: AgentProvider | StoredAgentRecord["provider"] | string,
@@ -359,17 +358,14 @@ async function collectImportedProviderSessions(
     collectProviderSessionHandleKeys(handles, provider, persistence);
   };
 
+  // Archived records stay collected: an archived Paseo agent's provider
+  // session must not resurface as importable, or archiving loops back into
+  // an automatic re-import that unarchives the agent again (pa-ewfxq).
   for (const agent of agentManager.listAgents()) {
-    if (storedRecordsById.get(agent.id)?.archivedAt) {
-      continue;
-    }
     collect(agent.provider, agent.persistence);
   }
 
   for (const record of records) {
-    if (record.archivedAt) {
-      continue;
-    }
     collect(record.provider, record.persistence);
   }
 

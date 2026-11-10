@@ -131,6 +131,22 @@ function controlResponse(frame) {
   }
   return false;
 }
+function decorateSessionList(result) {
+  if (!process.env.MUSE_TEST_SUBAGENT_LIST) return;
+  // One row marked via kind, one via parentSessionId; the appended root
+  // row is the only one the provider may surface (pa-ewfxq).
+  result.sessions[0].kind = "subagent";
+  result.sessions[0].parentSessionId = "01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6";
+  result.sessions[1].parentSessionId = "01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6";
+  if (!result.sessions.some((s) => s.sessionId === "09b0ee4b-8364-7aa1-9ba3-c251d4cf0cb6")) {
+    result.sessions.push({
+      ...result.sessions[1],
+      sessionId: "09b0ee4b-8364-7aa1-9ba3-c251d4cf0cb6",
+      kind: "root",
+      parentSessionId: null,
+    });
+  }
+}
 function parityResponse(frame) {
   if (workflowResponse(frame)) return true;
   if (frame.method === "view/page") {
@@ -184,6 +200,7 @@ function parityResponse(frame) {
     if (process.env.MUSE_TEST_NULL_MODEL) {
       for (const session of result.sessions) session.modelId = null;
     }
+    decorateSessionList(result);
     respond(frame, result);
     return true;
   }

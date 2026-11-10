@@ -1368,6 +1368,20 @@ test("sessions list filters workspace and imported persistence opens via resume"
     listed.sessions[0]!.persistence.data.sessionId,
   );
 });
+test("sessions list skips muse subagent sessions", async () => {
+  const h = await harness("resume-without-cursor", { MUSE_TEST_SUBAGENT_LIST: "1" });
+  await h.send({
+    type: "sessions",
+    requestId: "subagent-list",
+    cwd: "/tmp/muse-phase0/repo",
+    limit: 10,
+  });
+  const listed = await h.wait((e) => e.type === "sessions");
+  if (listed.type !== "sessions") throw new Error("Expected sessions");
+  expect(listed.sessions.map((s) => s.persistence.data.sessionId)).toEqual([
+    "09b0ee4b-8364-7aa1-9ba3-c251d4cf0cb6",
+  ]);
+});
 for (const fixture of ["phase3-compact", "phase3-compact-history", "phase3-compact-limit"]) {
   test(`${fixture} routes compact and exposes the recorded outcome`, async () => {
     const h = await harness(fixture);
