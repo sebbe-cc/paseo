@@ -40,6 +40,17 @@ describe("plugin manifest", () => {
     await expect(readPluginManifest(directory)).resolves.toEqual(manifest);
   });
 
+  it("reads runtime externals", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
+    directories.push(directory);
+    const manifest = {
+      id: "workflows",
+      runtimeExternals: ["@opentelemetry/*", "winston", "@dbos-inc/dbos-enterprise"],
+    };
+    await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify(manifest));
+    await expect(readPluginManifest(directory)).resolves.toEqual(manifest);
+  });
+
   it.each([
     { name: "   " },
     { name: 42 },
@@ -68,6 +79,17 @@ describe("plugin manifest", () => {
     { id: "INVALID" },
     { description: 42 },
     { requirements: { paseoo: ">=0.11.0" } },
+    { runtimeExternals: "winston" },
+    { runtimeExternals: [""] },
+    { runtimeExternals: ["Winston"] },
+    { runtimeExternals: ["./local"] },
+    { runtimeExternals: ["*"] },
+    { runtimeExternals: ["winston/*"] },
+    { runtimeExternals: ["@scope"] },
+    { runtimeExternals: ["@scope/pkg/sub"] },
+    { runtimeExternals: ["@getpaseo/plugin"] },
+    { runtimeExternals: ["@paseo/*"] },
+    { runtimeExternals: ["zod"] },
   ])("rejects invalid known fields: %j", async (fields) => {
     const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
     directories.push(directory);
