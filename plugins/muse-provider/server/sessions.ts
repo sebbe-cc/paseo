@@ -27,6 +27,11 @@ export class Sessions {
         );
         for (const session of page.sessions) {
           if (session.workspaceRoot === null) continue;
+          // Subagent sessions belong to their containing session's workflow
+          // and must not import as standalone Paseo agents (pa-ewfxq). Either
+          // marker filters; unknown kinds still list (open enum), and absent
+          // markers assert nothing.
+          if (session.kind === "subagent" || session.parentSessionId != null) continue;
           if (
             input.query &&
             !(session.title ?? "").toLowerCase().includes(input.query.toLowerCase())

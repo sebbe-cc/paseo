@@ -348,7 +348,6 @@ async function collectImportedProviderSessions(
   const handles = new Set<string>();
   const sessions = new Set<string>();
   const records = await agentStorage.list();
-  const storedRecordsById = new Map(records.map((record) => [record.id, record]));
 
   const collect = (
     provider: AgentProvider | StoredAgentRecord["provider"] | string,
@@ -359,17 +358,14 @@ async function collectImportedProviderSessions(
     collectProviderSessionHandleKeys(handles, provider, persistence);
   };
 
+  // Archived records stay collected: an archived Paseo agent's provider
+  // session must not resurface as importable, or archiving loops back into
+  // an automatic re-import that unarchives the agent again (pa-ewfxq).
   for (const agent of agentManager.listAgents()) {
-    if (storedRecordsById.get(agent.id)?.archivedAt) {
-      continue;
-    }
     collect(agent.provider, agent.persistence);
   }
 
   for (const record of records) {
-    if (record.archivedAt) {
-      continue;
-    }
     collect(record.provider, record.persistence);
   }
 
@@ -377,7 +373,33 @@ async function collectImportedProviderSessions(
 }
 
 function toProviderSessionHandleKey(provider: string, providerHandleId: string): string {
-  return `${provider}\0${providerHandleId}`;
+  return `${provider}\0${normalizeProviderSessionHandle(providerHandleId)}`;
+}
+
+// Plugin providers encode persistence as `plugin:{...}` blobs whose volatile
+// fields (model, thinkingOption) drift between listing and import, so the raw
+// strings never compare equal. Key on the underlying provider session id so an
+// archived import still matches its listing entry (pa-ewfxq). Anything else —
+// including an unparseable blob or one without a session id — keys raw.
+function normalizeProviderSessionHandle(providerHandleId: string): string {
+  if (!providerHandleId.startsWith("plugin:")) {
+    return providerHandleId;
+  }
+  try {
+    const parsed: unknown = JSON.parse(providerHandleId.slice("plugin:".length));
+    if (parsed && typeof parsed === "object" && "data" in parsed) {
+      const data: unknown = parsed.data;
+      if (data && typeof data === "object" && "sessionId" in data) {
+        const sessionId: unknown = data.sessionId;
+        if (typeof sessionId === "string" && sessionId.length > 0) {
+          return `plugin-session:${sessionId}`;
+        }
+      }
+    }
+  } catch {
+    // Fall through to the raw handle below.
+  }
+  return providerHandleId;
 }
 
 function isMetadataGenerationSession(input: { firstPromptPreview: string | null }): boolean {
