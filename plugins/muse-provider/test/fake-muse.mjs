@@ -80,6 +80,14 @@ function receiveFrame(line) {
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
 function controlResponse(frame) {
+  if (frame.method === "session/resume" && process.env.MUSE_TEST_RESUME_ECHO) {
+    // A real host resumes the requested session; echo its id instead of the
+    // canned fixture id so import binds the listed session (pa-ewfxq demo).
+    const result = responseFor(rows, "session/resume");
+    result.session.sessionId = frame.params.sessionId;
+    respond(frame, result);
+    return true;
+  }
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;

@@ -460,6 +460,45 @@ test("listImportableProviderSessions excludes an archived provider session still
   expect(result.filteredAlreadyImportedCount).toBe(1);
 });
 
+test("listImportableProviderSessions matches archived plugin sessions despite volatile persistence fields", async () => {
+  const cwd = "/tmp/project";
+  const listedHandle =
+    'plugin:{"version":1,"data":{"sessionId":"01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6","model":"meta/muse-spark-1.3"}}';
+  const storedHandle =
+    'plugin:{"version":1,"data":{"sessionId":"01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6","model":"meta/muse-spark-1.3","thinkingOption":"high"}}';
+  const archivedSession = makeImportableSession({
+    provider: "muse",
+    sessionId: listedHandle,
+    cwd,
+    title: "Archived muse import",
+    lastActivityAt: "2026-04-30T12:00:00.000Z",
+  });
+
+  const result = await listImportableProviderSessions({
+    request: makeRequest({ cwd, providers: ["muse"] }),
+    agentManager: {
+      listAgents: () => [],
+      listImportableSessions: async () => makeImportableSessionsResult([archivedSession]),
+    },
+    agentStorage: {
+      list: async () => [
+        {
+          provider: "muse",
+          archivedAt: "2026-04-30T12:01:00.000Z",
+          persistence: {
+            provider: "muse",
+            sessionId: storedHandle,
+          },
+        } as StoredAgentRecord,
+      ],
+    },
+    providerSnapshotManager: { getProviderLabel: () => "Muse" },
+  });
+
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual([]);
+  expect(result.filteredAlreadyImportedCount).toBe(1);
+});
+
 test("listImportableProviderSessions filters out metadata generation sessions", async () => {
   const cwd = "/tmp/project";
   const sessions = [
