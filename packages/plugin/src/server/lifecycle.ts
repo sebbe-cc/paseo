@@ -86,8 +86,25 @@ export interface PluginSessionOpenRequest {
   readonly labels: Readonly<Record<string, string>>;
   readonly metadata: Readonly<Record<string, JsonValue>>;
   tools: AgentToolDefinition[];
+  initialPrompt: string | null;
+  systemPrompt?: string | null;
+  daemonAppendSystemPrompt?: string | null;
   env: Record<string, string>;
   mcpServers: NonNullable<AgentSessionConfig["mcpServers"]>;
+}
+
+/**
+ * Fired before an agent's context is compacted. Return `{ ...request, skip: true }` to
+ * replace the compaction; only `skip` may change.
+ */
+export interface PluginCompactRequest {
+  agentId: string;
+  provider: string;
+  reason: "auto" | "manual";
+  /** "provider": the harness's own pre-compact hook; "threshold": Paseo's context usage watch. */
+  source: "provider" | "threshold";
+  usage: { contextWindowUsedTokens: number | null; contextWindowMaxTokens: number | null };
+  skip: boolean;
 }
 
 export type PluginTurnOutcome =
@@ -120,14 +137,61 @@ export interface PluginHookEvents {
   "workspace.archive.after": { workspace: PluginHookWorkspace };
 }
 
-export interface PluginHookRequests {
-  "worktree.create.before": PluginWorktreeCreateRequest;
-  "agent.create.before": {
-    config: AgentSessionConfig;
-    env?: Record<string, string>;
-    /** Stored on the new agent. Always present in the payload; return it changed to change it. */
-    metadata?: Record<string, JsonValue>;
+export interface PluginCreateRequest {
+  config: AgentSessionConfig;
+  env?: Record<string, string>;
+  /** Stored on the new agent. Always present in the payload; return it changed to change it. */
+  metadata?: Record<string, JsonValue>;
+  /**
+   * Verified labels the agent will be registered with. Read-only: create
+   * hooks must not change them; they exist so retrieval can match task and
+   * role without trusting env.
+   */
+  labels: Record<string, string>;
+  /**
+   * First user prompt when the caller supplied one, otherwise null.
+   * Read-only: hooks must not change it. Normal agent creation happens
+   * before the first prompt, so this is usually null; the per-turn prompt
+   * snapshot arrives via `agent.turn_prepare`.
+   */
+  initialPrompt: string | null;
+}
+
+export type PluginTurnKind = "start" | "resume" | "refresh" | "compaction" | "next";
+
+export interface PluginTurnPrepareRequest {
+  agent: Omit<PluginHookAgent, "metadata"> & { labels: Record<string, string> };
+  turn: {
+    /** Snapshot of the submitted user prompt for this turn. Never mutated. */
+    prompt: string;
+    /** Why this turn starts: first start, resume, refresh, post-compaction, or a later turn. */
+    kind: PluginTurnKind;
+    /** Interactive turns run the model; history opens never do. */
+    purpose: "interactive" | "history";
+    /** 1-based count of foreground turns started on this agent. */
+    turnNumber: number;
   };
+  /**
+   * Hidden per-turn context contributed by earlier turn_prepare hooks.
+   * A hook returns only its own addition via `context`; it never edits this.
+   */
+  accumulatedContext: string[];
+}
+
+export interface PluginTurnPrepareResult {
+  /**
+   * Hidden context for the effective model request. A separate channel from
+   * the user prompt: the daemon delivers it without mutating stored user
+   * text and without creating a new turn or a visible timeline message.
+   */
+  context?: string | string[] | null;
+}
+
+export interface PluginHookRequests {
+  "agent.turn_prepare.before": PluginTurnPrepareRequest;
+  "agent.compact.before": PluginCompactRequest;
+  "worktree.create.before": PluginWorktreeCreateRequest;
+  "agent.create.before": PluginCreateRequest;
   "agent.open.before": PluginSessionOpenRequest;
   "workspace.create.before": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
@@ -142,7 +206,9 @@ type PluginHookRequestResults = Omit<PluginHookRequests, "agent.open.before"> & 
 export type PluginHooks = {
   [Name in keyof PluginHookRequests]: {
     request: PluginHookRequests[Name];
-    result: PluginHookRequestResults[Name];
+    result: Name extends "agent.turn_prepare.before"
+      ? PluginTurnPrepareResult
+      : PluginHookRequestResults[Name];
   };
 } & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } } & {
   "worktree.create.after": { payload: { worktree: PluginHookWorktree } };
@@ -168,6 +234,11 @@ type HookHandlers = {
   ) => Promise<PluginHookResult<Name>>;
 };
 
+export type PluginBeforeResult<Name extends keyof PluginBeforeRequests> =
+  Name extends "agent.turn_prepare"
+    ? PluginTurnPrepareResult | void | Promise<PluginTurnPrepareResult | void>
+    : PluginBeforeRequests[Name] | void | Promise<PluginBeforeRequests[Name] | void>;
+
 export interface PluginLifecycleRegistration {
   addHook<Name extends keyof PluginHooks>(name: Name, handler: HookHandlers[Name]): () => void;
   /** @deprecated Use addHook with the renamed hook. Removed after 2027-04-30. */
@@ -184,12 +255,14 @@ export interface PluginLifecycleRegistration {
     handler: (
       input: { request: PluginBeforeRequests[Name] },
       context: PluginHookContext,
-    ) => PluginBeforeRequests[Name] | void | Promise<PluginBeforeRequests[Name] | void>,
+    ) => PluginBeforeResult<Name>,
   ): () => void;
 }
 
 /** @internal Lifecycle policy shared by the daemon and plugin process. */
 export const pluginHookRegistry = {
+  "agent.turn_prepare.before": { waits: true },
+  "agent.compact.before": { waits: true },
   "workspace.create.before": { waits: true },
   "workspace.create.after": { waits: false },
   "workspace.archive.after": { waits: false },
@@ -219,6 +292,8 @@ const legacyEvents = {
   "agent.permission_resolved": "agent.permission.after",
 } as const;
 const legacyRequests = {
+  "agent.turn_prepare": "agent.turn_prepare.before",
+  "agent.compact": "agent.compact.before",
   "workspace.create": "workspace.create.before",
   "agent.create": "agent.create.before",
   "agent.session_open": "agent.open.before",

@@ -13329,6 +13329,160 @@ test("reads the last durable assistant response without loading a stored-only ch
   expect(manager.getAgent("stored-child")).toBeNull();
 });
 
+class TurnPrepareRecordingSession extends TestAgentSession {
+  readonly receivedPrompts: AgentPromptInput[] = [];
+
+  override async startTurn(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
+    this.receivedPrompts.push(prompt);
+    return super.startTurn(prompt, options);
+  }
+}
+
+class TurnPrepareRecordingClient extends TestAgentClient {
+  readonly sessions: TurnPrepareRecordingSession[] = [];
+
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    const session = new TurnPrepareRecordingSession(config);
+    this.sessions.push(session);
+    return session;
+  }
+}
+
+function promptTextOf(prompt: AgentPromptInput): string {
+  if (typeof prompt === "string") return prompt;
+  return prompt.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+test("turn_prepare hidden context reaches the provider prompt but not the stored timeline", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-prepare-"));
+  const client = new TurnPrepareRecordingClient();
+  const turnPrepareRequests: Array<{
+    kind: unknown;
+    turnNumber: unknown;
+    prompt: unknown;
+    labels: unknown;
+  }> = [];
+  const createRequests: unknown[] = [];
+  const manager = new AgentManager({
+    clients: { codex: client },
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: (async (name: string, request: unknown) => {
+        if (name === "agent.turn_prepare.before") {
+          const seen = request as {
+            agent: { labels: unknown };
+            turn: { kind: unknown; turnNumber: unknown; prompt: unknown };
+          };
+          turnPrepareRequests.push({
+            kind: seen.turn.kind,
+            turnNumber: seen.turn.turnNumber,
+            prompt: seen.turn.prompt,
+            labels: seen.agent.labels,
+          });
+          // Mirror PluginHookHandlers: the daemon accumulates `context`
+          // pieces and returns them as `accumulatedContext`.
+          return {
+            ...(seen as object),
+            accumulatedContext: ["memory: sentinel-alpha"],
+          };
+        }
+        if (name === "agent.create.before") createRequests.push(request);
+        return request;
+      }) as never,
+    },
+  });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { "gc-session": "sentinel-test" },
+    });
+    expect(createRequests).toHaveLength(1);
+
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "do the thing", { clientMessageId: "msg-1" }),
+    );
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "follow up", { clientMessageId: "msg-2" }),
+    );
+
+    // Verified identity, prompt snapshot, and turn progression reach the hook.
+    expect(turnPrepareRequests).toEqual([
+      {
+        kind: "start",
+        turnNumber: 1,
+        prompt: "do the thing",
+        labels: { "gc-session": "sentinel-test" },
+      },
+      {
+        kind: "next",
+        turnNumber: 2,
+        prompt: "follow up",
+        labels: { "gc-session": "sentinel-test" },
+      },
+    ]);
+
+    // The provider-bound request carries the hidden sentinel exactly once per
+    // turn; the stored timeline keeps the original user text.
+    const received = client.sessions[0]?.receivedPrompts ?? [];
+    expect(received).toHaveLength(2);
+    for (const [index, expected] of ["do the thing", "follow up"].entries()) {
+      const text = promptTextOf(received[index]!);
+      expect(text).toContain("memory: sentinel-alpha");
+      expect(text).toContain(expected);
+      expect(countOccurrences(text, "memory: sentinel-alpha")).toBe(1);
+    }
+    const storedUserMessages = manager
+      .getTimeline(agent.id)
+      .filter((item) => item.type === "user_message");
+    expect(storedUserMessages.map((item) => item.type === "user_message" && item.text)).toEqual([
+      "do the thing",
+      "follow up",
+    ]);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("a failing turn_prepare hook never stops the turn", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-prepare-failopen-"));
+  const client = new TurnPrepareRecordingClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    logger,
+    pluginLifecycle: {
+      emit: () => {},
+      before: (async (name: string, request: unknown) => {
+        if (name === "agent.turn_prepare.before") throw new Error("hindsight is down");
+        return request;
+      }) as never,
+    },
+  });
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await drainAsyncGenerator(
+      manager.streamAgent(agent.id, "do the thing", { clientMessageId: "msg-1" }),
+    );
+    const received = client.sessions[0]?.receivedPrompts ?? [];
+    expect(received).toHaveLength(1);
+    expect(promptTextOf(received[0]!)).toBe("do the thing");
+    expect(
+      manager.getTimeline(agent.id).filter((item) => item.type === "user_message"),
+    ).toHaveLength(1);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 function runtimeCleanup(manager: AgentManager) {
   let now = Date.now();
   let protectedCaller = (_agentId: string) => false;
@@ -14284,4 +14438,110 @@ test("turns keep distinct identities across an idle runtime collection and resum
     await storage.flush();
     rmSync(workdir, { recursive: true, force: true });
   }
+});
+
+test("agent.compact fires once per threshold crossing for providers without a pre-compact hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-compact-threshold-"));
+  const client = new SessionRecordingAgentClient();
+  const requests: unknown[] = [];
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    compactThreshold: 0.8,
+    pluginLifecycle: {
+      before: async (name, request) => {
+        if (name === "agent.compact.before") requests.push(request);
+        return request;
+      },
+      emit: () => {},
+    },
+  });
+  onTestFinished(async () => {
+    await manager.closeAgent(manager.listAgents()[0]!.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const session = client.sessions[0]!;
+  const usage = (used: number) =>
+    session.pushEvent({
+      type: "usage_updated",
+      provider: "codex",
+      usage: { contextWindowUsedTokens: used, contextWindowMaxTokens: 1000 },
+    });
+  usage(500);
+  usage(850);
+  usage(900);
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0]).toEqual({
+    agentId: agent.id,
+    provider: "codex",
+    reason: "auto",
+    source: "threshold",
+    usage: { contextWindowUsedTokens: 850, contextWindowMaxTokens: 1000 },
+    skip: false,
+  });
+  usage(100);
+  usage(820);
+  await expect.poll(() => requests.length).toBe(2);
+});
+
+test("providers with a pre-compact hook get beforeCompact instead of the threshold", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-compact-hook-"));
+  const capabilities = { ...TEST_CAPABILITIES, supportsPreCompactHook: true };
+  class HookSession extends TestAgentSession {
+    override readonly capabilities = capabilities;
+  }
+  class HookClient extends TestAgentClient {
+    override readonly capabilities = capabilities;
+    readonly sessions: HookSession[] = [];
+    launchContext: AgentLaunchContext | undefined;
+    override async createSession(
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.launchContext = launchContext;
+      const session = new HookSession(config);
+      this.sessions.push(session);
+      return session;
+    }
+  }
+  const client = new HookClient();
+  const requests: Array<{ source: string; reason: string }> = [];
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    pluginLifecycle: {
+      before: async (name, request) => {
+        if (name !== "agent.compact.before") return request;
+        const compact = request as { source: string; reason: string; skip: boolean };
+        requests.push(compact);
+        return { ...compact, skip: true } as typeof request;
+      },
+      emit: () => {},
+    },
+  });
+  onTestFinished(async () => {
+    await manager.closeAgent(manager.listAgents()[0]!.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  });
+  await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  client.sessions[0]!.pushEvent({
+    type: "usage_updated",
+    provider: "codex",
+    usage: { contextWindowUsedTokens: 990, contextWindowMaxTokens: 1000 },
+  });
+  await manager.flush();
+  expect(requests).toEqual([]);
+  await expect(client.launchContext?.beforeCompact?.({ reason: "manual" })).resolves.toEqual({
+    skip: true,
+  });
+  expect(requests).toMatchObject([{ source: "provider", reason: "manual" }]);
 });
