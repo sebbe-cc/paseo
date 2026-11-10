@@ -8,7 +8,7 @@ import {
   type ProviderRegistration,
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
-import { isDaemonSession, serveArgs } from "./options.js";
+import { daemonSocket, isDaemonSession, probeDaemon, serveArgs } from "./options.js";
 import { Usage } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
@@ -120,6 +120,11 @@ function connect(
     if (input.type === "session.open") {
       if (sessions.has(input.sessionId))
         throw new MuseError("duplicateSession", "Muse session is already open");
+      // A daemon session fails when the shared daemon does not answer: a socket
+      // left by a killed daemon refuses the connect, and `--join` would then
+      // start a daemon of its own.
+      if (isDaemonSession(input.config.env))
+        await probeDaemon(daemonSocket({ ...launch.env, ...input.config.env }));
       const session = new Session({
         id: input.sessionId,
         config: input.config,

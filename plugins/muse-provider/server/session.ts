@@ -47,9 +47,9 @@ import { Commands } from "./commands.js";
 
 interface SessionOptions {
   serveArgs: string[];
-  // Daemon mode joins the shared Muse session daemon for the first host; the
-  // same session code runs either way, and a refused join falls back to an own
-  // process below.
+  // Daemon mode serves every host of this session from the shared Muse session
+  // daemon. There is no own-process fallback: a daemon that does not answer
+  // fails the session with daemonUnavailable.
   daemon: boolean;
   id: string;
   config: ProviderSessionConfig;
@@ -112,20 +112,7 @@ export class Session {
   }
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
-    try {
-      await this.openOnHost(input);
-    } catch (error) {
-      // A daemon that refuses the join (backpressure at start) must not fail
-      // the turn: fall back to an own host process for this session and log it.
-      // Anything else, or a failure past session creation, keeps its error.
-      if (!this.options.daemon || this.liveState || !isDaemonRefusal(error)) throw error;
-      process.stderr.write(
-        `Muse daemon refused session ${this.options.id} (${describeRefusal(error)}); starting an own host process instead\n`,
-      );
-      await this.host.close().catch(() => {});
-      this.host = this.spawn(false);
-      await this.openOnHost(input);
-    }
+    await this.openOnHost(input);
   }
 
   private async openOnHost(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
@@ -651,17 +638,6 @@ export class Session {
       },
     });
   }
-}
-// The daemon admits each joined session; when it is saturated it refuses with a
-// retryable admission error (for example -32031 backpressure). Retries already
-// ran inside MspConnection.command, so a refusal surfacing here means the join
-// itself must give way to an own host process.
-function isDaemonRefusal(error: unknown): boolean {
-  return error instanceof MuseError && ["overloaded", "backpressured"].includes(error.kind);
-}
-
-function describeRefusal(error: unknown): string {
-  return error instanceof MuseError ? `${error.kind}: ${error.message}` : String(error);
 }
 function mcpServer(server: ProviderMcpServerConfig): SessionMcpServerConfig {
   if (server.type === "stdio")

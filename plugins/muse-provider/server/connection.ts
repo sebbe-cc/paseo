@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { MuseError, classifyExit } from "./errors.js";
+import { assertDaemonSocket } from "./options.js";
 import { frameSchema, initializedSchema, fingerprint } from "./wire.js";
 
 export function commandId(): string {
@@ -48,6 +49,9 @@ export class MspConnection {
     },
   ) {
     const { launch, cwd } = options;
+    // `--join` starts a daemon of its own when none runs; a session meant for
+    // the shared daemon must fail instead (no silent own-process fallback).
+    if (options.serveArgs?.includes("--join")) assertDaemonSocket(launch.env);
     this.child = spawnProcess(
       launch.command,
       [...launch.args, "serve", ...(options.serveArgs ?? [])],
