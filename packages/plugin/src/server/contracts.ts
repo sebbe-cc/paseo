@@ -44,6 +44,12 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
     definition: import("../settings.js").SettingsDefinition<Schema>,
   ): PluginSettings<Schema>;
   /**
+   * The plugin process's Paseo API, connected before the contribution runs. Handlers and
+   * hooks receive the same instance. Use it for background work that does not start from a
+   * handler or hook, such as resuming durable work after a restart.
+   */
+  readonly paseo: PaseoApi;
+  /**
    * Serves a subscription. The handler starts the work and returns; the subscription stays open
    * until `signal` aborts. A handler that throws refuses the subscription. When it returns a
    * promise, settling the promise closes the subscription, with the rejection as its error.
