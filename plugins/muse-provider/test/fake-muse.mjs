@@ -111,6 +111,10 @@ function controlResponse(frame) {
   }
   if (process.env.MUSE_TEST_HANG === frame.method) return true;
   if (frame.method === "session/setReasoningEffort") {
+    if (process.env.MUSE_TEST_REJECT_EFFORT) {
+      rpcError(frame, -32601, "unknownMethod", "session/setReasoningEffort is not supported");
+      return true;
+    }
     respond(frame, { status: "accepted", commandId: frame.params.commandId });
     return true;
   }
