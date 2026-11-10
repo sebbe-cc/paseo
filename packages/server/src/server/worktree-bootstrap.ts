@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
+import { watchWorkspaceScript } from "./workspace-script-lifecycle.js";
 import {
   getScriptConfigs,
   getWorktreeTerminalSpecs,
@@ -481,6 +482,56 @@ async function setupServiceScriptRoute(params: {
   return { hostname: registeredRoute.hostname, port, env };
 }
 
+/**
+ * Worker-seen completions before this point belong to earlier runs, not the one
+ * being launched. Read after readiness so shell startup cannot leak in, and
+ * before the command goes out. Undefined when the worker does not track
+ * completions; then restore trusts the journal as before.
+ */
+function readCommandSeqBaseline(terminal: TerminalSession): number | undefined {
+  const lastCompletion = terminal.getLastCommandFinished?.();
+  return lastCompletion === undefined ? undefined : (lastCompletion?.seq ?? 0);
+}
+
+async function registerRunningScriptRuntime(params: {
+  runtimeStore: WorkspaceScriptRuntimeStore;
+  workspaceId: string;
+  scriptName: string;
+  scriptType: "script" | "service";
+  terminal: TerminalSession;
+  repoRoot: string;
+  port: number | null;
+  projectSlug: string;
+  branchName: string | null;
+}): Promise<void> {
+  const {
+    runtimeStore,
+    workspaceId,
+    scriptName,
+    scriptType,
+    terminal,
+    repoRoot,
+    port,
+    projectSlug,
+    branchName,
+  } = params;
+  const commandSeqBaseline = readCommandSeqBaseline(terminal);
+  runtimeStore.set({
+    workspaceId,
+    scriptName,
+    type: scriptType,
+    lifecycle: "running",
+    terminalId: terminal.id,
+    exitCode: null,
+    cwd: repoRoot,
+    ...(port === null ? {} : { port }),
+    projectSlug,
+    branchName,
+    ...(commandSeqBaseline !== undefined ? { commandSeq: commandSeqBaseline } : {}),
+  });
+  await runtimeStore.flush();
+}
+
 async function acquireWorkspaceScriptTerminal(params: {
   serviceScript: boolean;
   existingRuntimeEntry: ReturnType<WorkspaceScriptRuntimeStore["get"]>;
@@ -516,6 +567,12 @@ async function acquireWorkspaceScriptTerminal(params: {
 }
 
 export async function spawnWorkspaceScript(
+  options: SpawnWorkspaceScriptOptions,
+): Promise<WorktreeScriptResult> {
+  return options.runtimeStore.withScriptLock(options, () => spawnWorkspaceScriptUnlocked(options));
+}
+
+async function spawnWorkspaceScriptUnlocked(
   options: SpawnWorkspaceScriptOptions,
 ): Promise<WorktreeScriptResult> {
   const {
@@ -591,69 +648,31 @@ export async function spawnWorkspaceScript(
       env,
     });
 
-    runtimeStore.set({
-      workspaceId,
-      scriptName,
-      type: scriptType,
-      lifecycle: "running",
-      terminalId: terminal.id,
-      exitCode: null,
-    });
-    runtimeRegistered = true;
-
-    const stopRuntimeIfCurrent = (input: { exitCode: number | null; removeRoute: boolean }) => {
-      const current = runtimeStore.get({ workspaceId, scriptName });
-      if (current?.terminalId !== terminal.id || current.lifecycle !== "running") {
-        return;
-      }
-
-      disposeLifecycleListeners?.();
-      disposeLifecycleListeners = null;
-
-      if (input.removeRoute && hostname) {
-        serviceProxy.removeWorkspaceService({ workspaceId, scriptName });
-      }
-      runtimeStore.set({
-        workspaceId,
-        scriptName,
-        type: scriptType,
-        lifecycle: "stopped",
-        terminalId: terminal.id,
-        exitCode: input.exitCode,
-      });
-      onLifecycleChanged?.();
-      logger?.info(
-        {
-          scriptName,
-          hostname,
-          exitCode: input.exitCode,
-          terminalId: terminal.id,
-        },
-        "Stopped worktree script",
-      );
-    };
-
-    const unsubscribeExit = terminal.onExit((info) => {
-      stopRuntimeIfCurrent({
-        exitCode: info.exitCode,
-        removeRoute: true,
-      });
-    });
-
-    let unsubscribeCommandFinished: (() => void) | null = null;
-    if (!serviceScript) {
-      unsubscribeCommandFinished = terminal.onCommandFinished((info) => {
-        stopRuntimeIfCurrent({ exitCode: info.exitCode, removeRoute: false });
-      });
-    }
-    disposeLifecycleListeners = () => {
-      unsubscribeExit();
-      unsubscribeCommandFinished?.();
-    };
-
     if (!reusableTerminal) {
       await waitForTerminalBootstrapReadiness(terminal);
     }
+    await registerRunningScriptRuntime({
+      runtimeStore,
+      workspaceId,
+      scriptName,
+      scriptType,
+      terminal,
+      repoRoot,
+      port,
+      projectSlug,
+      branchName,
+    });
+    runtimeRegistered = true;
+
+    disposeLifecycleListeners = watchWorkspaceScript({
+      terminal,
+      runtimeStore,
+      serviceProxy,
+      workspaceId,
+      scriptName,
+      onLifecycleChanged,
+    });
+
     terminal.send({ type: "input", data: `${config.command}\r` });
 
     logger?.info(

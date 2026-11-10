@@ -49,7 +49,7 @@ const paseoHome = join(root, "home");
 const cliHome = join(root, "os-home");
 const workDir = join(root, "work");
 for (const dir of [paseoHome, cliHome, workDir]) mkdirSync(dir, { recursive: true });
-const currentProtocolVersion = 5;
+const currentProtocolVersion = 6;
 const zsh = ["/bin/zsh", "/usr/bin/zsh"].find((candidate) => existsSync(candidate)) ?? null;
 
 interface Installation {
@@ -456,8 +456,9 @@ try {
   });
   console.log(`Competing listener owns released port ${releasedPort}`);
 
-  // There is no supported previous wire at protocol 5. Future previous-version classification
-  // is covered by terminal-worker-protocol.test.ts; do not simulate an unreleased drain adapter.
+  // Protocol 5 is the supported previous wire at protocol 6: it drains with tolerant
+  // reads and needs no adapter. Future previous-version classification is covered by
+  // terminal-worker-protocol.test.ts; do not simulate an unreleased drain adapter.
   for (const protocolVersion of [0, 1, 2, 3, 4]) {
     console.log(`Test 4: obsolete protocol ${protocolVersion} is closed before serving terminals`);
     const obsolete = await leaveWorkerWithProtocol(
