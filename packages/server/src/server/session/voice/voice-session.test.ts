@@ -325,4 +325,51 @@ describe("VoiceSession streaming transcription", () => {
 
     await voiceSession.cleanup();
   });
+
+  test("enabling voice mode re-resolves the agent after a concurrent reload", async () => {
+    const { voiceSession, host } = createVoiceSession();
+    let reloads = 0;
+    const loaded: string[] = [];
+    const originalLoad = host.loadAgent;
+    host.loadAgent = async (agentId) => {
+      loaded.push(agentId);
+      return originalLoad(agentId);
+    };
+    host.reloadAgentSession = async (agentId: string) => {
+      reloads += 1;
+      // The first reload races a concurrent agent reload/resume and misses.
+      if (reloads === 1) throw new Error(`Unknown agent '${agentId}'`);
+      return { id: agentId } as unknown as ManagedAgent;
+    };
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+
+    expect(reloads).toBe(2);
+    expect(loaded).toEqual([VOICE_AGENT_ID, VOICE_AGENT_ID]);
+    expect(voiceSession.isActiveForAgent(VOICE_AGENT_ID)).toBe(true);
+
+    await voiceSession.handleSetVoiceMode(false);
+    await voiceSession.cleanup();
+  });
+
+  test("voice abort skips interruption when the agent was reloaded away", async () => {
+    const { voiceSession, host } = createVoiceSession();
+    host.interruptAgentIfRunning = vi.fn(async () => {
+      throw new Error(`Unknown agent '${VOICE_AGENT_ID}'`);
+    });
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+
+    await expect(voiceSession.handleAbort()).resolves.toBeUndefined();
+    expect(host.interruptAgentIfRunning).toHaveBeenCalledWith(VOICE_AGENT_ID);
+    const failures = host.emitted.filter(
+      (msg) =>
+        msg.type === "activity_log" &&
+        (msg.payload as unknown as { metadata?: { voiceAbortFailed?: boolean } }).metadata
+          ?.voiceAbortFailed === true,
+    );
+    expect(failures).toEqual([]);
+
+    await voiceSession.cleanup();
+  });
 });
