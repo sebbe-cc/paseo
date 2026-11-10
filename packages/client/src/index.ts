@@ -459,6 +459,12 @@ export interface PaseoAgentHandle {
    * rejecting.
    */
   commands(options?: PaseoAgentCommandsOptions): Promise<PaseoAgentCommandsResult>;
+  /**
+   * Interrupts the agent's running turn, if any. A no-op for idle agents.
+   * This is what `paseo agent stop` calls; plugins use it to cancel a
+   * running agent without sending a message.
+   */
+  cancel(): Promise<void>;
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
@@ -1180,6 +1186,9 @@ function createAgentHandleFactory(
         return result;
       },
       commands: (options) => daemonClient.listCommands({ agentId: id, ...options }),
+      cancel: async () => {
+        await daemonClient.cancelAgent(id);
+      },
       archive: async () => {
         const result = await daemonClient.archiveAgent(id);
         if (current) {
