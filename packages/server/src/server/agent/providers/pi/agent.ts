@@ -500,6 +500,34 @@ function buildResumeConfig(
   };
 }
 
+// Pi treats a missing --session path as "start a new session" and reports the
+// requested path back as its session file with a fresh session id, so resuming
+// after the session file was deleted silently drops all context while the
+// persisted nativeHandle keeps pointing at the old path (pa-vigk.5/D4). Refuse
+// the resume instead: the failure surfaces through the normal resume-failure
+// channels (rpc_error agent_resume_failed + activity-log error, stored error
+// attention on the startup sweep) instead of an empty session.
+function assertPiResumeSessionFilePresent(sessionFile: string, sessionId: string): void {
+  if (!looksLikePiSessionFilePath(sessionFile)) {
+    // An opaque Pi session id: pi resolves it to its own session file, so
+    // there is nothing on disk to check up front.
+    return;
+  }
+  if (!existsSync(sessionFile)) {
+    throw new Error(
+      `Cannot resume Pi session "${sessionId}": session file is missing: ${sessionFile}. ` +
+        `The previous context is unavailable. Restore the file or start a new session instead.`,
+    );
+  }
+}
+
+// Pi accepts a session id as well as a file path for --session. Only probe the
+// filesystem when the handle is shaped like a path, so id-based resumes (e.g.
+// importing a session by id) keep working.
+function looksLikePiSessionFilePath(handle: string): boolean {
+  return handle.endsWith(".jsonl") || handle.includes("/") || handle.includes("\\");
+}
+
 function buildResumeStartInput(input: {
   resumeConfig: PiResumeConfig;
   processCwd: string;
@@ -2754,6 +2782,7 @@ export class PiRpcAgentClient implements AgentClient {
     if (!sessionFile) {
       throw new Error("Pi resume requires a native session file handle");
     }
+    assertPiResumeSessionFilePresent(sessionFile, handle.sessionId);
 
     const persistenceMetadata = parsePersistenceMetadata(handle.metadata);
     const resumeConfig = buildResumeConfig(persistenceMetadata, overrides, this.provider);
