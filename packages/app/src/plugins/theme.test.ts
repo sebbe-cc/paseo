@@ -76,6 +76,7 @@ function installed(serverId: string, themes: PluginThemeContribution[]): Install
     timelineRenderers: [],
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 
