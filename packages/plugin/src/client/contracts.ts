@@ -210,6 +210,14 @@ interface PluginClientContextAliases {
 }
 
 export interface PluginClientContext extends PluginCommandCapabilities, PluginClientContextAliases {
+  /** App-lifetime inputs; immediately emit current state. Removed on plugin unload. */
+  subscribeHosts?(
+    listener: (hosts: readonly import("./index.js").PluginHostSummary[]) => void,
+  ): PluginCleanup;
+  subscribeSettings?<Schema extends ZodType>(
+    definition: import("../settings.js").SettingsDefinition<Schema>,
+    listener: (snapshot: PluginSettingsSnapshot<Schema>) => void,
+  ): PluginCleanup;
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
@@ -588,3 +596,10 @@ export interface PluginTimelineSelectionActionContribution {
   icon: string;
   Content: ComponentType<PluginTimelineSelectionActionProps>;
 }
+
+/** Read-only state shared by imperative consumers of host-scoped plugin settings. */
+export type PluginSettingsSnapshot<Schema extends ZodType> =
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | { status: "invalid"; error: string; revision: string }
+  | { status: "ready"; values: ZodOutput<Schema>; revision: string };
