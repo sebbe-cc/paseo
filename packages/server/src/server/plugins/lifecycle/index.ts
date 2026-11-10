@@ -111,6 +111,21 @@ const beforeSchemas = {
       mcpServers: CreateAgentRequestMessageSchema.shape.config.shape.mcpServers.unwrap(),
     })
     .strict(),
+  "agent.compact.before": z
+    .object({
+      agentId: z.string(),
+      provider: z.string(),
+      reason: z.enum(["auto", "manual"]),
+      source: z.enum(["provider", "threshold"]),
+      usage: z
+        .object({
+          contextWindowUsedTokens: z.number().nullable(),
+          contextWindowMaxTokens: z.number().nullable(),
+        })
+        .strict(),
+      skip: z.boolean(),
+    })
+    .strict(),
   "workspace.create.before": WorkspaceCreateRequestSchema.omit({
     type: true,
     requestId: true,
@@ -242,6 +257,13 @@ export async function validateBeforeResult<Name extends keyof PluginWireBeforeRe
       throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
     }
     return { ...result, metadata: previous.metadata };
+  }
+  if (name === "agent.compact.before") {
+    const previous = beforeSchemas["agent.compact.before"].parse(input);
+    const next = beforeSchemas["agent.compact.before"].parse(result);
+    if (JSON.stringify({ ...previous, skip: next.skip }) !== JSON.stringify(next)) {
+      throw new Error("agent.compact hooks can only change skip");
+    }
   }
   if (name === "agent.create.before") {
     const previous = beforeSchemas["agent.create.before"].parse(input);
