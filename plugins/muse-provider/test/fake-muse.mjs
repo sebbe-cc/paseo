@@ -95,7 +95,21 @@ function receiveFrame(line) {
     setTimeout(() => emitFixtureMessage(response.msg, recorded, frame), 50);
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
-function controlResponse(frame) {
+// A saturated shared daemon refuses admission; an own host process serves
+// the same session instead. Refuse only joined hosts so the fallback host
+// (spawned without --join) succeeds with the same environment.
+function refuseSaturatedJoin(frame) {
+  if (
+    process.env.MUSE_TEST_REFUSE_JOIN &&
+    process.argv.slice(2).includes("--join") &&
+    (frame.method === "session/start" || frame.method === "session/resume")
+  ) {
+    rpcError(frame, -32031, process.env.MUSE_TEST_REFUSE_KIND || "backpressured", "daemon busy");
+    return true;
+  }
+  return false;
+}
+function resumeHistoryResponse(frame) {
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;
@@ -112,6 +126,11 @@ function controlResponse(frame) {
     respond(frame, result);
     return true;
   }
+  return false;
+}
+function controlResponse(frame) {
+  if (refuseSaturatedJoin(frame)) return true;
+  if (resumeHistoryResponse(frame)) return true;
   if (frame.method === "initialized") return true;
   if (frame.method === "initialize" && process.env.MUSE_TEST_EXIT) {
     process.stderr.write("diagnostic tail, not protocol\n");
