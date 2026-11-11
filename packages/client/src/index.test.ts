@@ -521,7 +521,10 @@ test("workspace handles keep identity and refresh snapshots through existing dri
   expect(workspace.directory).toBe("/repo/sdk");
   expect(workspace.current()).toEqual(openedWorkspace);
 
-  const refreshedWorkspace = createWorkspace({ name: "sdk refreshed" });
+  const refreshedWorkspace = createWorkspace({
+    name: "sdk refreshed",
+    base: { ref: "refs/heads/epic/sprint", forkSha: "a".repeat(40), missing: true },
+  });
   const refetchPromise = workspace.refresh({ requestId: "workspace-refetch-request" });
   expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
     type: "fetch_workspaces_request",
@@ -2369,6 +2372,25 @@ test("agent handles delegate setFeature to setAgentFeature and return its result
     }),
   );
   await expect(failingPromise).rejects.toThrow("feature feature-id is not supported by provider");
+  await client.close();
+});
 
+test("workspaces.get exposes the comparison base", async () => {
+  const { client, ws } = await connectClient();
+  const workspace = createWorkspace({
+    base: { ref: "refs/remotes/upstream/epic", forkSha: "a".repeat(40), missing: true },
+  });
+  const result = client.workspaces.get(workspace.id, "workspace-base-get");
+  ws.message(
+    sessionMessage({
+      type: "fetch_workspaces_response",
+      payload: {
+        requestId: "workspace-base-get",
+        entries: [workspace],
+        pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
+      },
+    }),
+  );
+  await expect(result).resolves.toEqual(workspace);
   await client.close();
 });
