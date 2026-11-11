@@ -17,6 +17,7 @@ import {
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
 import { buildSidebarProjection } from "./sidebar-projection";
+import { useMergedProjectContainers } from "@/project-containers";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
 import { filterWorkspacesByLabels, type SidebarWorkspaceGroup } from "./sidebar-labels";
 import { filterWorkspacesByProjects, resolveActiveProjectFilters } from "./sidebar-project-filter";
@@ -65,7 +66,7 @@ export function SidebarModelProvider({
   const labelFilter = useSidebarViewStore((state) => state.labelFilter);
   const projectFilters = useSidebarViewStore((state) => state.projectFilters);
   const reconcileLabelFilter = useSidebarViewStore((state) => state.reconcileLabelFilter);
-  const { hosts: labelHosts } = useWorkspaceLabelProjection();
+  const { hosts: labelHosts, labels: labelCatalog } = useWorkspaceLabelProjection();
   const collapsedProjectKeys = useSidebarCollapsedSectionsStore(
     (state) => state.collapsedProjectKeys,
   );
@@ -73,7 +74,12 @@ export function SidebarModelProvider({
     (state) => state.collapsedWorkspaceGroupKeys,
   );
   const pinnedCollapsed = useSidebarCollapsedSectionsStore((state) => state.collapsedPinned);
+  const projectContainerList = useMergedProjectContainers();
+  const collapsedProjectContainerKeys = useSidebarCollapsedSectionsStore(
+    (state) => state.collapsedProjectContainerKeys,
+  );
   const pinnedWorkspaceOrder = useSidebarOrderStore((state) => state.pinnedWorkspaceOrder);
+  const labelGroupOrder = useSidebarOrderStore((state) => state.labelGroupOrder);
   const toggleProjectCollapsed = useSidebarCollapsedSectionsStore(
     (state) => state.toggleProjectCollapsed,
   );
@@ -160,15 +166,25 @@ export function SidebarModelProvider({
       workspaceEntriesByKey: filteredWorkspaceEntriesByKey,
       projectNamesByViewKey: list.projectNamesByViewKey,
       groupMode,
+      labelCatalog,
+      labelGroupOrder,
       pinnedCollapsed,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
       t,
+      projectContainers: {
+        containers: projectContainerList,
+        collapsedContainerKeys: collapsedProjectContainerKeys,
+      },
     }),
     [
+      collapsedProjectContainerKeys,
+      projectContainerList,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
       groupMode,
+      labelCatalog,
+      labelGroupOrder,
       list.projectNamesByViewKey,
       filteredProjects,
       pinnedCollapsed,
