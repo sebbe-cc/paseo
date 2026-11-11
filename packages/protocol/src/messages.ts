@@ -4410,6 +4410,10 @@ const WorkspaceGitRuntimePayloadSchema = z
       .optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    // The workspace's resolved comparison base (pa-9av7): the same value as
+    // the descriptor's top-level base, so plugin-API readers see it on the
+    // entry they already hold. Null until the daemon resolves it.
+    base: WorkspaceBaseSchema.nullable().optional(),
   })
   .optional()
   .nullable();
