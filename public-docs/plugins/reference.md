@@ -789,6 +789,11 @@ Each present entry default-exports one contribution function and returns cleanup
 receive `PluginClientContext`; server entries receive `PluginServerContext`. Client registration methods return idempotent removers, except header buttons and composer pills,
 which return `{ update, remove }` handles. The entry cleanup runs before Paseo removes remaining registrations.
 
+Server entries also receive `server.paseo`, the subprocess's connected `PaseoApi`. It is the same
+instance handlers and hooks receive, and it is available while the contribution function runs, so
+background work such as resuming durable jobs after a restart does not have to wait for a request.
+It closes with the subprocess.
+
 ```ts
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { Main } from "./client/main";
