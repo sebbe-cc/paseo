@@ -6,6 +6,7 @@ import type { PluginPaseoApi } from "./reference-api.js";
 import type { AgentTimelineItem, JsonValue } from "@getpaseo/protocol/agent-types";
 import type { WorkspaceLabelColor } from "@getpaseo/protocol/workspace-labels";
 import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
+import type { PluginClientActionsCapability } from "./client-actions.js";
 import type { PluginFile } from "./file.js";
 import type {
   PluginComposer,
@@ -25,6 +26,8 @@ import type {
   PluginHeaderButtonContribution,
   PluginComposerPillContribution,
 } from "./buttons.js";
+import type { PluginHidCapability } from "./hid.js";
+import type { PluginClientContextCapability } from "./client-context.js";
 import type {
   PluginTheme,
   PluginWorkspaceSnapshot,
@@ -212,11 +215,42 @@ interface PluginClientContextAliases {
 }
 
 export interface PluginClientContext extends PluginCommandCapabilities, PluginClientContextAliases {
+  /** App-lifetime inputs; immediately emit current state. Removed on plugin unload. */
+  subscribeHosts?(
+    listener: (hosts: readonly import("./index.js").PluginHostSummary[]) => void,
+  ): PluginCleanup;
+  subscribeSettings?<Schema extends ZodType>(
+    definition: import("../settings.js").SettingsDefinition<Schema>,
+    listener: (snapshot: PluginSettingsSnapshot<Schema>) => void,
+  ): PluginCleanup;
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
   readonly navigation: PluginRecentNavigation;
   addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
+  /**
+   * Trusted local device (HID) broker. Present only on clients with a
+   * local broker (desktop); undefined on browser and mobile, where the
+   * plugin reports "unsupported" and stays a no-op. App-owned with app
+   * lifetime: subscribe in contribute() and release in cleanup.
+   */
+  readonly hid?: PluginHidCapability;
+  /**
+   * Trusted global client context (window/server/workspace/pane/agent/
+   * focus) with app lifetime. Available on every client and works
+   * without a mounted plugin panel. Null snapshot until the app has
+   * resolved its installation and window identities.
+   */
+  readonly clientContext?: PluginClientContextCapability;
+  /**
+   * Trusted app actions (voice hold-to-talk, focused-panel scroll,
+   * joystick navigation). Present only on clients whose app
+   * implements it (desktop); undefined on older apps, browser and
+   * mobile, where the plugin reports "unsupported" and stays a
+   * no-op. App-owned with app lifetime: subscribe in contribute()
+   * and release in cleanup.
+   */
+  readonly clientActions?: PluginClientActionsCapability;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarView(contribution: PluginSidebarViewContribution<PluginText>): PluginCleanup;
@@ -567,3 +601,10 @@ export interface PluginTimelineSelectionActionContribution {
   icon: string;
   Content: ComponentType<PluginTimelineSelectionActionProps>;
 }
+
+/** Read-only state shared by imperative consumers of host-scoped plugin settings. */
+export type PluginSettingsSnapshot<Schema extends ZodType> =
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | { status: "invalid"; error: string; revision: string }
+  | { status: "ready"; values: ZodOutput<Schema>; revision: string };
