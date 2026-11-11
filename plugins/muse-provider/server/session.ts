@@ -49,6 +49,10 @@ import { Commands } from "./commands.js";
 
 interface SessionOptions {
   serveArgs: string[];
+  // Daemon mode joins the shared Muse session daemon for the first host; the
+  // same session code runs either way, and a refused join falls back to an own
+  // process below.
+  daemon: boolean;
   id: string;
   config: ProviderSessionConfig;
   launch: ProviderLaunch;
@@ -66,7 +70,7 @@ interface Live {
 }
 
 export class Session {
-  private readonly host: IdleHost;
+  private host: IdleHost;
   private liveState: Live | undefined;
   private providerId: string | undefined;
   private config: ProviderSessionConfig;
@@ -87,24 +91,51 @@ export class Session {
 
   constructor(private readonly options: SessionOptions) {
     this.config = options.config;
-    this.host = new IdleHost(
+    this.host = this.spawn(options.daemon);
+  }
+
+  // The idle host respawns through this factory, so a joined session rejoins
+  // the daemon on wake and a fallen-back session keeps its own process.
+  private spawn(join: boolean): IdleHost {
+    const host = new IdleHost(
       () =>
         new MspConnection({
-          launch: { ...options.launch, env: { ...options.launch.env, ...options.config.env } },
-          cwd: options.config.cwd,
-          serveArgs: options.serveArgs,
+          launch: {
+            ...this.options.launch,
+            env: { ...this.options.launch.env, ...this.config.env },
+          },
+          cwd: this.options.config.cwd,
+          serveArgs: join ? [...this.options.serveArgs, "--join"] : this.options.serveArgs,
         }),
     );
-    this.host.onNotification((notification) => {
+    host.onNotification((notification) => {
       if (this.opening) this.buffered.push(notification);
       else this.enqueue(notification);
     });
-    this.host.onExit((error) => {
+    host.onExit((error) => {
       if (!this.opening && !this.closing) this.runtimeFailed(error);
     });
+    return host;
   }
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
+    try {
+      await this.openOnHost(input);
+    } catch (error) {
+      // A daemon that refuses the join (backpressure at start) must not fail
+      // the turn: fall back to an own host process for this session and log it.
+      // Anything else, or a failure past session creation, keeps its error.
+      if (!this.options.daemon || this.liveState || !isDaemonRefusal(error)) throw error;
+      process.stderr.write(
+        `Muse daemon refused session ${this.options.id} (${describeRefusal(error)}); starting an own host process instead\n`,
+      );
+      await this.host.close().catch(() => {});
+      this.host = this.spawn(false);
+      await this.openOnHost(input);
+    }
+  }
+
+  private async openOnHost(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.host.initialize();
     const mcpServers = this.mcpServers();
     let response;
@@ -728,6 +759,17 @@ export class Session {
       },
     });
   }
+}
+// The daemon admits each joined session; when it is saturated it refuses with a
+// retryable admission error (for example -32031 backpressure). Retries already
+// ran inside MspConnection.command, so a refusal surfacing here means the join
+// itself must give way to an own host process.
+function isDaemonRefusal(error: unknown): boolean {
+  return error instanceof MuseError && ["overloaded", "backpressured"].includes(error.kind);
+}
+
+function describeRefusal(error: unknown): string {
+  return error instanceof MuseError ? `${error.kind}: ${error.message}` : String(error);
 }
 function mcpServer(server: ProviderMcpServerConfig): SessionMcpServerConfig {
   if (server.type === "stdio")

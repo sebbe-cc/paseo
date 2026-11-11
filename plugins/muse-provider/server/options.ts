@@ -30,3 +30,12 @@ export function serveArgs(providerOptions: unknown): string[] {
     ...(trustWorkspace ? ["--trust-workspace"] : []),
   ];
 }
+
+// Orbit's agent.create hook marks fleet daemon sessions with PASEO_MUSE_DAEMON=1.
+// The flag alone selects daemon mode; `--join` itself handles a missing daemon
+// by serving in-process, so no socket pre-check is needed here.
+export const DAEMON_ENV_VAR = "PASEO_MUSE_DAEMON";
+
+export function isDaemonSession(env: Readonly<Record<string, string>> | undefined): boolean {
+  return env?.[DAEMON_ENV_VAR] === "1";
+}

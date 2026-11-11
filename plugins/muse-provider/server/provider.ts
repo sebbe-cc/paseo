@@ -8,7 +8,7 @@ import {
   type ProviderRegistration,
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
-import { serveArgs } from "./options.js";
+import { isDaemonSession, serveArgs } from "./options.js";
 import { Usage } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
@@ -131,6 +131,7 @@ function connect(
         emit,
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
+        daemon: isDaemonSession(input.config.env),
       });
       sessions.set(input.sessionId, session);
       try {
