@@ -77,6 +77,7 @@ import {
 import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../provider-runner.js";
 import {
   applyClaudeToolPolicy,
+  claudeInboxAccept,
   ClaudeProviderOptionsSchema,
   type ClaudeProviderOptions,
 } from "./options.js";
@@ -3943,13 +3944,26 @@ class ClaudeAgentSession implements AgentSession {
     // Internal agents do daemon work such as naming a branch, so the user's and
     // project's hooks must not run for them.
     const disableAllHooks = this.config.internal === true;
-    if (fastMode === null && !input.ultracode && !disableAllHooks) {
+    // Gas City sessions opt into cross-session inbox delivery through the
+    // claude_inbox_accept feature value (pa-4ixw6.4), so peer mail arrives
+    // between tool calls instead of being held for a headless approval
+    // dialog that can never be answered.
+    const inboxAccept = claudeInboxAccept(
+      this.config.featureValues as Record<string, unknown> | undefined,
+    );
+    if (
+      fastMode === null &&
+      !input.ultracode &&
+      !disableAllHooks &&
+      !inboxAccept
+    ) {
       return {};
     }
     const updates = {
       ...(fastMode === null ? {} : { fastMode }),
       ...(input.ultracode ? { ultracode: true } : {}),
       ...(disableAllHooks ? { disableAllHooks: true } : {}),
+      ...(inboxAccept ? { crossSessionInbound: "accept" as const } : {}),
     };
     // The SDK replaces extraArgs.settings with Options.settings, so a user's
     // `--settings` would be dropped whenever Paseo sets flag settings. Fold it in.
