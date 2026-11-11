@@ -732,6 +732,13 @@ export interface AgentSession {
    * An optional additional veto: missing methods use daemon baseline eligibility;
    * implemented checks that reject or return false keep the runtime resident. */
   canStopRuntime?(): Promise<boolean>;
+  /**
+   * Re-advertise provider tool registrations after the manager hot-swapped the
+   * shared native tool catalog in place (plugin reload). Providers that bind
+   * tool definitions once at open implement this to push the current set;
+   * providers without a bound native catalog omit it.
+   */
+  updatePaseoTools?(): Promise<void>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
