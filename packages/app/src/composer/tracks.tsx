@@ -397,6 +397,9 @@ const styles = StyleSheet.create((theme) => {
       left: 0,
       right: 0,
       bottom: 0,
+      // Breathing room between the pills and the transcript above. The bar floats with no
+      // background, so without it the row sits flush against the last line.
+      marginTop: theme.spacing[2],
       alignItems: "center",
       paddingHorizontal: theme.spacing[4],
       paddingBottom: {
