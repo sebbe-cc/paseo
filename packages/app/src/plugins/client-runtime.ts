@@ -113,5 +113,9 @@ function openClientPanel(input: {
         workspaceId,
       });
   if (!action) throw new Error("Plugin panel context is unavailable");
-  action.openPanel(panelId, { location: options.location });
+  action.openPanel(panelId, {
+    location: options.location,
+    ...(options.params === undefined ? {} : { params: options.params }),
+    ...(options.newTab === true ? { newTab: true as const } : {}),
+  });
 }

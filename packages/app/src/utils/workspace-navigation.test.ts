@@ -74,4 +74,31 @@ describe("prepareWorkspaceTab", () => {
       },
     ]);
   });
+
+  it("requests a new tab instance when newTab is true", () => {
+    const intents: string[] = [];
+    const layout = {
+      openTab: (input: {
+        workspaceKey: string;
+        target: WorkspaceTabTarget;
+        intent: "reveal" | "new";
+        pin?: boolean;
+      }) => {
+        intents.push(input.intent);
+        return null;
+      },
+    };
+
+    prepareWorkspaceTab(
+      {
+        serverId: SERVER_ID,
+        workspaceId: WORKSPACE_ID,
+        target: { kind: "agent", agentId: AGENT_ID },
+        newTab: true,
+      },
+      layout,
+    );
+
+    expect(intents).toEqual(["new"]);
+  });
 });

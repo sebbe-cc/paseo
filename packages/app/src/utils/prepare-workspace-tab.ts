@@ -9,13 +9,14 @@ export interface PrepareWorkspaceTabInput {
   pin?: boolean;
   placement?: WorkspaceTabPlacement;
   asTab?: boolean;
+  newTab?: boolean;
 }
 
 export interface PrepareWorkspaceTabDeps {
   openTab: (input: {
     workspaceKey: string;
     target: WorkspaceTabTarget;
-    intent: "reveal";
+    intent: "reveal" | "new";
     pin?: boolean;
     placement?: WorkspaceTabPlacement;
     asTab?: boolean;
@@ -43,7 +44,7 @@ export function prepareWorkspaceTab(
   deps.openTab({
     workspaceKey: key,
     target,
-    intent: "reveal",
+    intent: input.newTab === true ? "new" : "reveal",
     pin: input.pin === true && target.kind === "agent",
     placement: input.placement,
     asTab: input.asTab,

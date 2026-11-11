@@ -13,7 +13,7 @@ function layoutStoreDeps() {
     openTab: (input: {
       workspaceKey: string;
       target: WorkspaceTabTarget;
-      intent: "reveal";
+      intent: "reveal" | "new";
       pin?: boolean;
       placement?: import("@/stores/workspace-layout-actions").WorkspaceTabPlacement;
     }) => store.openTab(input),
