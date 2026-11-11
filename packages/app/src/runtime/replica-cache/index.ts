@@ -1,3 +1,4 @@
+import { WorkspaceBaseSchema } from "@getpaseo/protocol/messages";
 import { findMountedWindowStart } from "@/agent-stream/history-window";
 import { z } from "zod";
 import {
@@ -303,6 +304,8 @@ const WorkspaceGitRuntimeSchema = z
   .optional();
 
 const StoredWorkspaceSchema = z.strictObject({
+  base: WorkspaceBaseSchema.nullable().optional(),
+  baseError: z.string().optional(),
   parentWorkspaceId: z.string().optional(),
   // Require both keys: a cursor without these values would preserve the wrong sort on reconnect.
   createdAt: IsoDateSchema.nullable(),
@@ -733,6 +736,8 @@ function serializeWorkspace(workspace: WorkspaceDescriptor): StoredWorkspace {
     createdAt: workspace.createdAt?.toISOString() ?? null,
     lastUserMessageAt: workspace.lastUserMessageAt?.toISOString() ?? null,
     id: workspace.id,
+    base: workspace.base,
+    baseError: workspace.baseError,
     projectId: workspace.projectId,
     projectDisplayName: workspace.projectDisplayName,
     projectCustomName: workspace.projectCustomName ?? null,
