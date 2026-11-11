@@ -44,6 +44,7 @@ import { Children } from "./children.js";
 import { Recovery } from "./recovery.js";
 import { Questions } from "./questions.js";
 import { Commands } from "./commands.js";
+import { installSessionEnvScripts, removeSessionEnv, writeSessionEnv } from "./session-env.js";
 
 interface SessionOptions {
   serveArgs: string[];
@@ -81,6 +82,7 @@ export class Session {
   private opening = true;
   private closing = false;
   private firstTurn = true;
+  private envDir: string | undefined;
   private interruptCompletion: {
     turnId: string;
     resolve(): void;
@@ -111,15 +113,38 @@ export class Session {
     return host;
   }
 
+  // An own host spawns stdio MCP servers as its children, so they inherit the
+  // session's launch environment. The shared daemon spawns them with only their
+  // declared `env`, so daemon sessions declare the launch environment under it.
+  private sessionMcpServers(): Record<string, SessionMcpServerConfig> {
+    const inherited = this.options.daemon ? this.launchEnv() : undefined;
+    return Object.fromEntries(
+      Object.entries(this.config.mcpServers).map(([id, server]) => [
+        id,
+        mcpServer(server, inherited),
+      ]),
+    );
+  }
+
+  // Daemon sessions: the shared daemon runs command tools with its own
+  // environment, so the session's launch environment is stored where the
+  // daemon's PreToolUse hook finds it by session id (see session-env.ts).
+  private launchEnv(): Record<string, string> {
+    return { ...this.options.launch.env, ...this.config.env };
+  }
+  private async storeSessionEnv(nativeId: string): Promise<void> {
+    if (!this.options.daemon) return;
+    this.envDir ??= await installSessionEnvScripts(this.launchEnv());
+    await writeSessionEnv(this.envDir, nativeId, this.launchEnv());
+  }
+
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.openOnHost(input);
   }
 
   private async openOnHost(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.host.initialize();
-    const mcpServers = Object.fromEntries(
-      Object.entries(this.config.mcpServers).map(([id, server]) => [id, mcpServer(server)]),
-    );
+    const mcpServers = this.sessionMcpServers();
     let response;
     if (input.persistence) {
       if (input.persistence.version !== 1)
@@ -156,6 +181,8 @@ export class Session {
         "Muse returned an empty resume viewCursor; this session cannot be watched.",
       );
     const nativeId = response.session.sessionId;
+    // Before any turn can run a command.
+    await this.storeSessionEnv(nativeId);
     this.liveState = {
       nativeId,
       children: new Children(this.host, this.options.id, this.config.cwd, this.options.emit),
@@ -400,6 +427,8 @@ export class Session {
   async close(): Promise<void> {
     this.closing = true;
     if (this.liveState) this.live().recovery.close();
+    if (this.envDir && this.liveState)
+      await removeSessionEnv(this.envDir, this.live().nativeId).catch(() => {});
     await this.host.close();
     await this.notifications;
     if (this.liveState) this.live().children.close();
@@ -639,13 +668,16 @@ export class Session {
     });
   }
 }
-function mcpServer(server: ProviderMcpServerConfig): SessionMcpServerConfig {
+function mcpServer(
+  server: ProviderMcpServerConfig,
+  inherited?: Record<string, string>,
+): SessionMcpServerConfig {
   if (server.type === "stdio")
     return {
       transport: "stdio",
       command: server.command,
       args: server.args,
-      env: server.env,
+      env: inherited ? { ...inherited, ...server.env } : server.env,
       framing: "lineDelimitedJson",
     };
   return { transport: "streamableHttp", url: server.url, headers: server.headers };

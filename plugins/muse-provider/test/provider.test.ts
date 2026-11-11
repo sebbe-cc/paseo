@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { UsageSourceRegistry } from "../../../packages/server/src/server/plugins/usage-sources/index.js";
 import { Usage as MuseUsage } from "../server/usage.js";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
@@ -1362,6 +1362,74 @@ test("a daemon session joins the shared host and keeps the default sandbox postu
     "--trust-workspace",
     "--join",
   ]);
+});
+test("a daemon session stores its launch env for the daemon's command hook", async () => {
+  const envDir = await daemonHome(false);
+  const env = {
+    ...(await daemonEnv()),
+    PASEO_MUSE_SESSION_ENV_DIR: envDir,
+    ORBIT_BEAD: "bead-1",
+    PATH: "/agent/bin:/usr/bin",
+  };
+  const h = await harness("text-reasoning", { LAUNCH_ONLY: "launch" });
+  expect(await h.open(undefined, "onRequest", "meta/muse-spark-1.3", env)).toMatchObject({
+    type: "session.ready",
+  });
+  const start = (await h.recorded()).find((f) => f.method === "session/start").params;
+  expect(start.limits).toBeUndefined();
+  const files = (await readdir(envDir)).filter((f) => f !== "muse").sort();
+  expect(files).toEqual(
+    ["01a0ee4c-c501-7d50-9020-effa9f9956e1.json", "hook.cjs", "run.cjs"].sort(),
+  );
+  const stored = JSON.parse(
+    await readFile(path.join(envDir, "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"), "utf8"),
+  );
+  expect(stored).toMatchObject({
+    ORBIT_BEAD: "bead-1",
+    PATH: "/agent/bin:/usr/bin",
+    LAUNCH_ONLY: "launch",
+  });
+  expect(
+    (await stat(path.join(envDir, "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"))).mode & 0o777,
+  ).toBe(0o600);
+  expect((await stat(envDir)).mode & 0o777).toBe(0o700);
+  await h.connection.close();
+  expect(await readdir(envDir)).not.toContain("01a0ee4c-c501-7d50-9020-effa9f9956e1.json");
+});
+test("an own-host session stores no env file", async () => {
+  const envDir = await daemonHome(false);
+  const h = await harness("text-reasoning", { PASEO_MUSE_SESSION_ENV_DIR: envDir });
+  await h.open();
+  expect(await readdir(envDir)).toEqual(["muse"]);
+});
+test("daemon sessions give stdio MCP servers the launch env under their own env", async () => {
+  const env = { ...(await daemonEnv()), ORBIT_BEAD: "bead-3", TEST_ENV: "session" };
+  const h = await harness();
+  await h.send({
+    type: "session.open",
+    sessionId: "paseo-session",
+    requestId: "mcp-env",
+    history: "replay",
+    config: {
+      cwd: h.root,
+      env,
+      persist: true,
+      settings: {},
+      mcpServers: {
+        stdio: { type: "stdio", command: "srv", args: [], env: { TEST_ENV: "server" } },
+        http: { type: "http", url: "http://localhost/mcp", headers: { A: "b" } },
+      },
+    },
+  });
+  await h.wait((event) => event.type === "session.ready");
+  const servers = (await h.recorded()).find((f) => f.method === "session/start").params.config
+    .mcpServers;
+  expect(servers.stdio.env).toMatchObject({ ORBIT_BEAD: "bead-3", TEST_ENV: "server" });
+  expect(servers.http).toEqual({
+    transport: "streamableHttp",
+    url: "http://localhost/mcp",
+    headers: { A: "b" },
+  });
 });
 test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
   const h = await harness();
