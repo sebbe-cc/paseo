@@ -3289,6 +3289,9 @@ export const CreateTerminalRequestSchema = z.object({
   agentId: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
+  // Compatibility flag for pre-v0.15 fork clients. The detached worker now
+  // preserves all terminals across restarts; no tmux backend is selected.
+  persistent: z.boolean().optional(),
   // Initial PTY size. Added in v0.1.107; the app no longer sends it (the estimate cache that fed
   // it was removed — the pane-focus resize claim sizes the PTY instead). Kept and honored
   // permanently: released v0.1.107 clients still send it, and programmatic callers may pass an
@@ -7054,6 +7057,9 @@ export const CaptureTerminalResponseSchema = z.object({
     lines: z.array(z.string()),
     totalLines: z.number().int().nonnegative(),
     requestId: z.string(),
+    // Null on success; set when the terminal (or its tmux session) is gone
+    // (pa-vbhcu). Optional so older daemons' responses still parse.
+    error: z.string().nullable().optional(),
   }),
 });
 
