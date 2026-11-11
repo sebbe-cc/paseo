@@ -2505,11 +2505,13 @@ export async function getCheckoutStatus(
   const factsContext = { ...context, facts };
   // Ref-derived counts skip the current base branch; the diff consumer still needs its ref.
   // A missing base keeps its ref on the wire: diff requests name it and resolve to the fork point.
-  const comparisonBaseRef = facts.base?.missing
-    ? baseRef
-    : baseRef
-      ? await resolveQualifiedComparisonBaseRef(cwd, baseRef, factsContext).catch(() => null)
-      : null;
+  let comparisonBaseRef: string | null = null;
+  if (facts.base?.missing) comparisonBaseRef = baseRef;
+  else if (baseRef) {
+    comparisonBaseRef = await resolveQualifiedComparisonBaseRef(cwd, baseRef, factsContext).catch(
+      () => null,
+    );
+  }
   const aheadBehind =
     baseRef && currentBranch
       ? await getAheadBehind(cwd, baseRef, currentBranch, factsContext)
