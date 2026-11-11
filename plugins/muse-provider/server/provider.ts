@@ -8,7 +8,7 @@ import {
   type ProviderRegistration,
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
-import { daemonSocket, isDaemonSession, probeDaemon, serveArgs } from "./options.js";
+import { daemonSocket, isDaemonSession, probeDaemon, serveArgs, wrapperArgv } from "./options.js";
 import { Usage } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
@@ -29,10 +29,20 @@ const capabilities = [
   "session.list",
 ] as const;
 
-export function createMuseProvider(usage: Usage): ProviderRegistration {
+/**
+ * `wrapped` registers `muse-ws`: every session runs confined by the configured
+ * `providerOptions.wrapper` (an own host runs `muse serve` through it; a daemon
+ * session runs its command tools and stdio MCP servers through it). A session
+ * of it without a wrapper fails to open: there is no unwrapped fallback.
+ */
+export function createMuseProvider(
+  usage: Usage,
+  variant: "plain" | "wrapped" = "plain",
+): ProviderRegistration {
+  const wrapped = variant === "wrapped";
   return {
-    id: "muse",
-    label: "Muse Code",
+    id: wrapped ? "muse-ws" : "muse",
+    label: wrapped ? "Muse Code (worktree sandbox)" : "Muse Code",
     icon: "icon.svg",
     command: ["muse"],
     async getCatalogCacheKey(options) {
@@ -52,6 +62,7 @@ export function createMuseProvider(usage: Usage): ProviderRegistration {
         requireLaunch(request.launch),
         negotiateProviderCapabilities(request.capabilities, capabilities),
         usage,
+        wrapped,
       );
     },
   };
@@ -95,6 +106,7 @@ function connect(
   launch: ProviderLaunch,
   negotiated: readonly string[],
   usage: Usage,
+  wrapped = false,
 ): ProviderConnection {
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<string, Session>();
@@ -123,6 +135,13 @@ function connect(
       // A daemon session fails when the shared daemon does not answer: a socket
       // left by a killed daemon refuses the connect, and `--join` would then
       // start a daemon of its own.
+      const wrapper = wrapperArgv(input.config.providerOptions);
+      if (wrapped && !wrapper)
+        throw new MuseError(
+          "wrapperRequired",
+          "muse-ws needs providerOptions.wrapper (the command that confines a session to its " +
+            "worktree); configure agents.providers.muse-ws.options.wrapper",
+        );
       if (isDaemonSession(input.config.env))
         await probeDaemon(daemonSocket({ ...launch.env, ...input.config.env }));
       const session = new Session({
@@ -133,6 +152,7 @@ function connect(
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
         daemon: isDaemonSession(input.config.env),
+        wrapper,
       });
       sessions.set(input.sessionId, session);
       try {
