@@ -1,8 +1,19 @@
+import { createPaseoApi } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "../types";
 import { runPluginClientBundle, type PluginClientRuntime } from "../evaluate";
+
+const testPaseo = () =>
+  createPaseoApi(
+    new DaemonClient({
+      url: "ws://127.0.0.1:1",
+      clientId: "plugin-decorator-test",
+      clientType: "cli",
+    }),
+  );
 
 const installed: InstalledPlugin[] = [];
 const openAgentPanel = vi.fn();
@@ -48,7 +59,12 @@ const BUNDLE = `(function(require) {
 
 function install(): InstalledPlugin {
   const evaluated = runPluginClientBundle("gascity", BUNDLE, {} as PluginClientRuntime);
-  return { ...evaluated, serverId: "local" } as InstalledPlugin;
+  return {
+    ...evaluated,
+    serverId: "local",
+    lifetime: new AbortController(),
+    paseo: testPaseo(),
+  } as InstalledPlugin;
 }
 
 function inScope(children: React.ReactNode) {

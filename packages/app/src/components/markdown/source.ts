@@ -160,13 +160,13 @@ export function collectAssistantFileLinkSources(
     walk(tree);
   }
 
-  FILE_PATTERN.lastIndex = 0;
-  for (const match of source.matchAll(FILE_PATTERN)) {
+  TEXT_PATTERN.lastIndex = 0;
+  for (const match of source.matchAll(TEXT_PATTERN)) {
     const token = match[0];
     if (!token || /^https?:\/\//i.test(token)) continue;
     push({ href: token, text: token, markup: "linkify" });
   }
-  FILE_PATTERN.lastIndex = 0;
+  TEXT_PATTERN.lastIndex = 0;
 
   return sources.slice(0, 50);
 }
@@ -324,8 +324,8 @@ function applyMissingFileDeLink(input: {
     if (nested) continue;
     input.edits.push({ start: node.end, end: node.end, text: " (saknas)" });
   }
-  FILE_PATTERN.lastIndex = 0;
-  for (const match of input.source.matchAll(FILE_PATTERN)) {
+  TEXT_PATTERN.lastIndex = 0;
+  for (const match of input.source.matchAll(TEXT_PATTERN)) {
     const token = match[0];
     const index = match.index;
     if (!token || /^https?:\/\//i.test(token)) continue;
@@ -337,7 +337,7 @@ function applyMissingFileDeLink(input: {
     if (!candidate || !input.missing.has(candidate)) continue;
     input.edits.push({ start: index, end: index + token.length, text: `\`${token}\` (saknas)` });
   }
-  FILE_PATTERN.lastIndex = 0;
+  TEXT_PATTERN.lastIndex = 0;
   return kept;
 }
 

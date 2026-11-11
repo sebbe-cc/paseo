@@ -738,6 +738,12 @@ type WorkspaceBaseResult = Pick<WorkspaceDescriptorPayload, "base" | "baseError"
 // work to a small constant number of concurrent resolutions.
 const WORKSPACE_BASE_BACKGROUND_CONCURRENCY = 4;
 
+function resolveWorkspaceBaseOrDefault(
+  injected: typeof resolveWorkspaceBaseDefault | undefined,
+): typeof resolveWorkspaceBaseDefault {
+  return injected ?? resolveWorkspaceBaseDefault;
+}
+
 export class Session {
   private readonly connectedHostSession: ConnectedHostSession | null;
   private routed = false;
@@ -1017,7 +1023,7 @@ export class Session {
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
-    this.resolveWorkspaceBaseFn = resolveWorkspaceBase ?? resolveWorkspaceBaseDefault;
+    this.resolveWorkspaceBaseFn = resolveWorkspaceBaseOrDefault(resolveWorkspaceBase);
     this.workspaceGitService = workspaceGitService;
     this.workspaceRuntimeStore = workspaceRuntimeStore;
     this.workspaceBaseBranch =

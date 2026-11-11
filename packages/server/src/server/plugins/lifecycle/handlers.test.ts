@@ -120,7 +120,13 @@ test("a create hook that omits metadata passes on what an earlier hook added", a
   const result = await hooks.invoke(
     "operation",
     "agent.create.before",
-    { config: { provider: "codex", cwd: "/project" }, env: {}, metadata: { original: true } },
+    {
+      config: { provider: "codex", cwd: "/project" },
+      env: {},
+      metadata: { original: true },
+      labels: {},
+      initialPrompt: null,
+    },
     paseo,
   );
   expect(result).toMatchObject({ metadata: { original: true, "new.plugin": { ticket: 42 } } });
@@ -422,7 +428,9 @@ test("agent.session_open allows instruction recomposition for interactive opens"
       purpose: "interactive",
       env: {},
       labels: { "gc-session": "test" },
-      title: null, tools: [], mcpServers: {},
+      title: null,
+      tools: [],
+      mcpServers: {},
       initialPrompt: "do the thing",
       systemPrompt: "stale role prompt",
       daemonAppendSystemPrompt: null,
@@ -450,7 +458,9 @@ test("agent.session_open rejects instruction changes for history opens", async (
         cwd: "/project",
         reason: "resume",
         purpose: "history",
-        title: null, tools: [], mcpServers: {},
+        title: null,
+        tools: [],
+        mcpServers: {},
         env: {},
         labels: {},
         initialPrompt: null,
@@ -629,16 +639,23 @@ test("agent.turn_prepare rejects identity changes from a child host", async () =
 test("agent.turn_prepare still accepts the bare {context} handler form", async () => {
   const request = turnPrepareRequest();
   expect(
-    (await validateBeforeResult("agent.turn_prepare.before", request, { context: "memory: sentinel-alpha" })).accumulatedContext,
+    (
+      await validateBeforeResult("agent.turn_prepare.before", request, {
+        context: "memory: sentinel-alpha",
+      })
+    ).accumulatedContext,
   ).toEqual(["memory: sentinel-alpha"]);
   expect(
-    (await validateBeforeResult("agent.turn_prepare.before", request, {
-      context: ["memory: sentinel-alpha", "memory: sentinel-alpha", "  "],
-    })).accumulatedContext,
+    (
+      await validateBeforeResult("agent.turn_prepare.before", request, {
+        context: ["memory: sentinel-alpha", "memory: sentinel-alpha", "  "],
+      })
+    ).accumulatedContext,
   ).toEqual(["memory: sentinel-alpha"]);
-  expect((await validateBeforeResult("agent.turn_prepare.before", request, undefined)).accumulatedContext).toEqual(
-    [],
-  );
+  expect(
+    (await validateBeforeResult("agent.turn_prepare.before", request, undefined))
+      .accumulatedContext,
+  ).toEqual([]);
 });
 
 test("agent.compact hooks can only change skip", async () => {

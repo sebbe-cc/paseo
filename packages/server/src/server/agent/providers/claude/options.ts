@@ -47,6 +47,13 @@ export const ClaudeProviderOptionsSchema = z
   .object({
     /** Composer control, not a Claude SDK option: the provider reads it and keeps it out of the SDK options. */
     fast_mode: z.boolean().optional(),
+    /**
+     * Gas City keys, not Claude SDK options: the gascity plugin sets them as feature values,
+     * which 0.16 folds into providerOptions. The provider reads them and keeps them out of
+     * the SDK options (pa-4ixw6.4, pa-uumx5v).
+     */
+    claude_inbox_accept: z.boolean().optional(),
+    gascity_granted_skills: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).optional(),
     additionalDirectories: z.array(z.string()).optional(),
