@@ -22,6 +22,18 @@ const PluginAssetPathSchema = z
       value.split("/").at(-1) !== ".",
     "Expected a relative file path inside the plugin package",
   );
+// npm package names, or `@scope/*` for every package in a scope. Host modules keep their
+// own runtime instances and cannot be redirected to the plugin's node_modules.
+const PluginRuntimeExternalSchema = z
+  .string()
+  .regex(
+    /^(?:@[a-z0-9-~][a-z0-9-._~]*\/(?:\*|[a-z0-9-~][a-z0-9-._~]*)|[a-z0-9-~][a-z0-9-._~]*)$/,
+    "Expected an npm package name or an @scope/* pattern",
+  )
+  .refine(
+    (value) => !/^@(?:getpaseo|paseo)\//.test(value) && value !== "zod",
+    "Paseo host modules cannot be runtime externals",
+  );
 const PluginManifestSchema = z.object({
   id: PluginIdSchema,
   name: z.string().trim().min(1).optional(),
@@ -34,6 +46,9 @@ const PluginManifestSchema = z.object({
   // A misspelled requirement must not silently disable compatibility checks.
   requirements: PluginRequirementsSchema.strict().optional(),
   build: z.array(PluginBuildCommandSchema).min(1).optional(),
+  // Server-bundle dependencies esbuild must not follow (optional or lazily required
+  // packages); the plugin subprocess requires them from the plugin's own node_modules.
+  runtimeExternals: z.array(PluginRuntimeExternalSchema).optional(),
 });
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
