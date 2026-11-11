@@ -32,6 +32,8 @@ export class VoiceSessions {
     private readonly options: VoiceSessionOptions,
     private readonly delivery: SessionDelivery,
     private readonly demandChanged: () => void,
+    private readonly supportsPluginVoice: (source: object) => boolean = () => true,
+    private readonly supportsPluginDictation: (source: object) => boolean = () => true,
   ) {}
 
   get hasDemand(): boolean {
@@ -82,6 +84,14 @@ export class VoiceSessions {
       closing: false,
       voice: new VoiceSession({
         ...this.options,
+        voice: {
+          ...this.options.voice,
+          clientSupportsPluginVoice: this.supportsPluginVoice(source),
+        },
+        dictation: this.options.dictation && {
+          ...this.options.dictation,
+          clientSupportsPluginDictation: this.supportsPluginDictation(source),
+        },
         host: { ...this.options.host, emit: (message) => owner.emit(message) },
         onIdle: () => this.releaseIdle(active),
       }),
