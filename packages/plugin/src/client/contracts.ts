@@ -134,6 +134,10 @@ export type PluginPanelLocation = "workspace" | "explorer";
 
 export interface PluginOpenPanelOptions {
   location?: PluginPanelLocation;
+  /** JSON params delivered as the opened panel's `params`; persisted with the tab. */
+  params?: JsonValue;
+  /** Always open a new tab instead of focusing an existing tab of the same panel. */
+  newTab?: boolean;
 }
 
 interface PluginWorkspacePanelBase<Text extends PluginText = string> {
@@ -157,9 +161,10 @@ export interface PluginPanelProps<Params> extends PluginNavigableHostProps {
   revision: number;
   tab: PluginTab;
 }
-export interface PluginWorkspacePanelParams {}
+export type PluginWorkspacePanelParams = Record<string, JsonValue>;
 export interface PluginAgentPanelParams {
   readonly agentId: string;
+  readonly [key: string]: JsonValue | undefined;
 }
 export interface PluginFilePanelParams {
   readonly path: string;
@@ -209,6 +214,8 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
+  readonly navigation: PluginRecentNavigation;
+  addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarView(contribution: PluginSidebarViewContribution<PluginText>): PluginCleanup;
@@ -255,6 +262,29 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
     onEvent: (event: ZodOutput<EventSchema>) => void,
     options?: PluginSubscribeOptions,
   ): PluginSubscriptionHandle;
+}
+
+export interface PluginNavigationLocation {
+  readonly serverId: string;
+  readonly workspaceId: string;
+  readonly tabId: string | null;
+}
+
+export interface PluginRecentNavigation {
+  getActive(): PluginNavigationLocation | null;
+  subscribe(listener: (location: PluginNavigationLocation | null) => void): PluginCleanup;
+  activateWorkspace(input: Pick<PluginNavigationLocation, "serverId" | "workspaceId">): boolean;
+  activateTab(input: PluginNavigationLocation & { tabId: string }): boolean;
+}
+
+export interface PluginKeyboardShortcutContribution {
+  /** A single modified key, such as Alt+Tab or Ctrl+Tab. */
+  combo: string;
+  /** Stable within this plugin. Together with label, exposes the shortcut in Settings. */
+  id?: string;
+  label?: string;
+  onPress(): boolean | undefined;
+  onRelease?(): void;
 }
 
 export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;
