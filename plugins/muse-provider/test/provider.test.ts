@@ -1161,6 +1161,56 @@ test("interrupt timeout fails the session and closes the host without an unhandl
   expect(requests.filter((frame) => frame.method === "turn/interrupt")).toHaveLength(1);
   expect(requests.find((frame) => frame.event === "hostClosed")).toBeDefined();
 }, 30000);
+test("interrupt timeout terminates the turn so a retry does not re-target the dead host", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_SILENT: "1",
+    MUSE_TEST_HANG: "turn/interrupt",
+  });
+  await h.open();
+  await h.prompt();
+  const started = await h.wait(
+    (event) => event.type === "session.turn" && event.state === "started",
+  );
+  if (started.type !== "session.turn" || !started.turnId) throw new Error("Expected started turn");
+  await h.send({
+    type: "session.interrupt",
+    sessionId: "paseo-session",
+    requestId: "slow-interrupt",
+  });
+  // The interrupted turn ends locally even though the host never confirms.
+  await expect
+    .poll(
+      () => h.events.find((event) => event.type === "session.turn" && event.state === "failed"),
+      {
+        timeout: 20000,
+      },
+    )
+    .toBeDefined();
+  expect(
+    h.events.find((event) => event.type === "session.turn" && event.state === "failed"),
+  ).toMatchObject({
+    turnId: started.turnId,
+    state: "failed",
+    error: { message: expect.stringContaining("did not confirm cancellation") },
+  });
+  await expect
+    .poll(() => h.events.find((event) => event.type === "session.runtime_failed"), {
+      timeout: 20000,
+    })
+    .toBeDefined();
+  // A retry must not send turn/interrupt again: the turn is over.
+  await h.send({
+    type: "session.interrupt",
+    sessionId: "paseo-session",
+    requestId: "retry-interrupt",
+  });
+  await h.wait(
+    (event) => event.type === "request.completed" && event.requestId === "retry-interrupt",
+  );
+  const requests = await h.recorded();
+  expect(requests.filter((frame) => frame.method === "turn/interrupt")).toHaveLength(1);
+  await h.connection.close();
+}, 60000);
 for (const [behavior, choiceId] of [
   ["allow", "allow_once"],
   ["deny", "abort"],
