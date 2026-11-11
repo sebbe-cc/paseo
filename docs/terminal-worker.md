@@ -84,3 +84,12 @@ On Windows every desktop stop closes terminals. In the desktop app the worker ru
 - On Linux, a member of a gone shell's session is signaled only if its environment carries that terminal's `PASEO_TERMINAL_ID`. A job that scrubbed its environment (`env -i`) is reported as unconfirmed, with its pid, and never signaled.
 - The agent-hook activity URL is baked into each shell when it starts. If the daemon's listen address changes across a restart, older shells report to the old address.
 - Restoring terminals after a reboot is out of scope: records from an earlier boot are retired without signaling anything.
+
+## Fork compatibility
+
+The fork still accepts `terminal create --persistent` and SDK `persistent: true`
+for existing callers. All terminals now use the upstream detached worker; the
+flag does not select tmux. Restart preserves terminals, while stop follows the
+upstream `--keep-terminals` contract. Legacy tmux sessions and the fork's
+`terminals/persistent/*.json` journal are not adopted by the new worker. Complete
+or move that work before rolling out this version; do not delete live sessions.
