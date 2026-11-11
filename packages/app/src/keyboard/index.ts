@@ -1,4 +1,4 @@
-export { useOverlayRegistration } from "./internal/overlay-registration";
+export { focusFirstElement, useOverlayRegistration } from "./internal/overlay-registration";
 export type { KeyboardInputEvent } from "./internal/overlays";
 export {
   dispatchTopOverlayKeyDown,
