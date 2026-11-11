@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
@@ -10,14 +11,28 @@ if (process.argv.includes("--version")) {
     process.stderr.write(process.env.MUSE_TEST_VERSION_ERROR + "\n");
     process.exit(17);
   }
-  process.stdout.write(`Muse Code ${process.env.MUSE_TEST_VERSION || "1.4.1"}\n`);
-  process.exit(0);
+  const versionDelayMs = Number(process.env.MUSE_TEST_VERSION_DELAY_MS || 0);
+  const reportVersion = () => {
+    process.stdout.write(`Muse Code ${process.env.MUSE_TEST_VERSION || "1.4.1"}\n`);
+    process.exit(0);
+  };
+  if (versionDelayMs > 0) setTimeout(reportVersion, versionDelayMs);
+  else reportVersion();
 }
 if (process.env.MUSE_TEST_STUBBORN) {
   setInterval(() => {}, 1000);
   appendFileSync(
     process.env.MUSE_TEST_REQUESTS,
     JSON.stringify({ event: "stubbornHost", pid: process.pid }) + "\n",
+  );
+}
+if (process.env.MUSE_TEST_ORPHAN_PIPE) {
+  const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "inherit",
+  });
+  appendFileSync(
+    process.env.MUSE_TEST_REQUESTS,
+    JSON.stringify({ event: "orphanHost", pid: orphan.pid }) + "\n",
   );
 }
 const rows = readFixture(scenario);
@@ -30,6 +45,7 @@ const catalogRows = readFixture("catalog-controls");
 const replacements = new Map();
 const counts = new Map();
 const receipts = new Set();
+let liveTurnId;
 const lines = createInterface({ input: process.stdin });
 lines.on("line", receive);
 function receive(line) {
@@ -55,13 +71,20 @@ function receiveFrame(line) {
   counts.set(frame.method, count + 1);
   if (retryResponse(frame, count)) return;
   const request = candidates[count];
-  if (!request)
+  if (!request) {
+    // Resume drift correction re-selects the configured model, which has no
+    // fixture entry in resume scenarios. Ack it like a normal model change.
+    if (frame.method === "session/setModel") {
+      respond(frame, { status: "accepted", commandId: frame.params.commandId });
+      return;
+    }
     return rpcError(
       frame,
       -32601,
       "unknownMethod",
       `No fixture request for ${frame.method} #${count}`,
     );
+  }
   const recorded = request.msg;
   validateCommand(frame, recorded);
   const response = rows.find(
@@ -79,7 +102,29 @@ function receiveFrame(line) {
     setTimeout(() => emitFixtureMessage(response.msg, recorded, frame), 50);
   } else for (const row of messages) emitFixtureMessage(row.msg, recorded, frame);
 }
-function controlResponse(frame) {
+// A saturated shared daemon refuses admission; an own host process serves
+// the same session instead. Refuse only joined hosts so the fallback host
+// (spawned without --join) succeeds with the same environment.
+function refuseSaturatedJoin(frame) {
+  if (
+    process.env.MUSE_TEST_REFUSE_JOIN &&
+    process.argv.slice(2).includes("--join") &&
+    (frame.method === "session/start" || frame.method === "session/resume")
+  ) {
+    rpcError(frame, -32031, process.env.MUSE_TEST_REFUSE_KIND || "backpressured", "daemon busy");
+    return true;
+  }
+  return false;
+}
+function resumeHistoryResponse(frame) {
+  if (frame.method === "session/resume" && process.env.MUSE_TEST_RESUME_ECHO) {
+    // A real host resumes the requested session; echo its id instead of the
+    // canned fixture id so import binds the listed session (pa-ewfxq demo).
+    const result = responseFor(rows, "session/resume");
+    result.session.sessionId = frame.params.sessionId;
+    respond(frame, result);
+    return true;
+  }
   if (frame.method === "session/resume" && process.env.MUSE_TEST_HISTORY) {
     const result = responseFor(readFixture("resume-without-cursor"), "session/resume");
     result.session.sessionId = frame.params.sessionId;
@@ -96,6 +141,11 @@ function controlResponse(frame) {
     respond(frame, result);
     return true;
   }
+  return false;
+}
+function controlResponse(frame) {
+  if (refuseSaturatedJoin(frame)) return true;
+  if (resumeHistoryResponse(frame)) return true;
   if (frame.method === "initialized") return true;
   if (frame.method === "initialize" && process.env.MUSE_TEST_EXIT) {
     process.stderr.write("diagnostic tail, not protocol\n");
@@ -111,6 +161,10 @@ function controlResponse(frame) {
   }
   if (process.env.MUSE_TEST_HANG === frame.method) return true;
   if (frame.method === "session/setReasoningEffort") {
+    if (process.env.MUSE_TEST_REJECT_EFFORT) {
+      rpcError(frame, -32601, "unknownMethod", "session/setReasoningEffort is not supported");
+      return true;
+    }
     respond(frame, { status: "accepted", commandId: frame.params.commandId });
     return true;
   }
@@ -131,46 +185,63 @@ function controlResponse(frame) {
   }
   return false;
 }
+function gapPageResult(frame) {
+  if (process.env.MUSE_TEST_GAP || process.env.MUSE_TEST_SILENT) {
+    const result = {
+      events: replace(
+        rows
+          .filter(
+            (row) =>
+              row.dir === "in" &&
+              row.msg.method &&
+              row.msg.params?.viewCursor &&
+              !row.msg.id &&
+              row.msg.method !== "item/delta",
+          )
+          .map((row) => ({ method: row.msg.method, params: row.msg.params })),
+      ),
+      nextCursor: null,
+    };
+    if (process.env.MUSE_TEST_PHANTOM) applyPhantomTerminal(result.events);
+    return result;
+  }
+  const result = replace(
+    responseFor(
+      readFixture(
+        String(frame.params.sessionId).startsWith("fixture-child")
+          ? "phase3-child-read"
+          : "phase3-controls",
+      ),
+      "view/page",
+    ),
+  );
+  for (const event of result.events) event.params.sessionId = frame.params.sessionId;
+  return result;
+}
+function decorateSessionList(result) {
+  if (!process.env.MUSE_TEST_SUBAGENT_LIST) return;
+  // One row marked via kind, one via parentSessionId; the appended root
+  // row is the only one the provider may surface (pa-ewfxq).
+  result.sessions[0].kind = "subagent";
+  result.sessions[0].parentSessionId = "01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6";
+  result.sessions[1].parentSessionId = "01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6";
+  if (!result.sessions.some((s) => s.sessionId === "09b0ee4b-8364-7aa1-9ba3-c251d4cf0cb6")) {
+    result.sessions.push({
+      ...result.sessions[1],
+      sessionId: "09b0ee4b-8364-7aa1-9ba3-c251d4cf0cb6",
+      kind: "root",
+      parentSessionId: null,
+    });
+  }
+}
 function parityResponse(frame) {
   if (workflowResponse(frame)) return true;
   if (frame.method === "view/page") {
-    let result;
-    if (process.env.MUSE_TEST_GAP || process.env.MUSE_TEST_SILENT) {
-      result = {
-        events: replace(
-          rows
-            .filter(
-              (row) =>
-                row.dir === "in" &&
-                row.msg.method &&
-                row.msg.params?.viewCursor &&
-                !row.msg.id &&
-                row.msg.method !== "item/delta",
-            )
-            .map((row) => ({ method: row.msg.method, params: row.msg.params })),
-        ),
-        nextCursor: null,
-      };
-    } else {
-      result = replace(
-        responseFor(
-          readFixture(
-            frame.params.sessionId === "fixture-child" ? "phase3-child-read" : "phase3-controls",
-          ),
-          "view/page",
-        ),
-      );
-      for (const event of result.events) event.params.sessionId = frame.params.sessionId;
-    }
-    respond(frame, result);
+    respond(frame, gapPageResult(frame));
     return true;
   }
-  if (frame.method === "session/read") {
-    const result = responseFor(readFixture("phase3-child-read"), "session/read");
-    result.session.sessionId = frame.params.sessionId;
-    respond(frame, result);
-    return true;
-  }
+  if (frame.method === "session/read" && sessionReadResponse(frame)) return true;
+  if (frame.method === "turn/interrupt" && interruptCancelResponse(frame)) return true;
   if (frame.method === "usage/read") {
     const result = process.env.MUSE_TEST_USAGE
       ? JSON.parse(process.env.MUSE_TEST_USAGE)
@@ -184,6 +255,7 @@ function parityResponse(frame) {
     if (process.env.MUSE_TEST_NULL_MODEL) {
       for (const session of result.sessions) session.modelId = null;
     }
+    decorateSessionList(result);
     respond(frame, result);
     return true;
   }
@@ -222,6 +294,34 @@ function parityResponse(frame) {
   }
   if (skillResponse(frame)) return true;
   return false;
+}
+function applyPhantomTerminal(events) {
+  for (const event of events) {
+    if (event.method !== "turn/completed") continue;
+    event.params = { ...event.params, terminal: "failed" };
+    delete event.params.error;
+  }
+}
+function sessionReadResponse(frame) {
+  const result = responseFor(readFixture("phase3-child-read"), "session/read");
+  result.session.sessionId = frame.params.sessionId;
+  if (process.env.MUSE_TEST_ACTIVE_TURN && liveTurnId) result.session.activeTurnId = liveTurnId;
+  respond(frame, result);
+  return true;
+}
+function interruptCancelResponse(frame) {
+  if (!process.env.MUSE_TEST_ACTIVE_TURN) return false;
+  respond(frame, {});
+  send({
+    jsonrpc: "2.0",
+    method: "turn/completed",
+    params: {
+      sessionId: frame.params.sessionId,
+      turnId: frame.params.turnId,
+      terminal: "cancelled",
+    },
+  });
+  return true;
 }
 function skillResponse(frame) {
   if (frame.method === "skill/list") {
@@ -300,6 +400,7 @@ function validateCommand(frame, recorded) {
 }
 function emitFixtureMessage(recordedMessage, recorded, frame) {
   const message = replace(recordedMessage);
+  trackLiveTurn(message);
   if (!message.method && message.id === recorded.id) message.id = frame.id;
   if (
     message.method === "session/closed" ||
@@ -329,6 +430,11 @@ function emitFixtureMessage(recordedMessage, recorded, frame) {
     });
   }
 }
+function trackLiveTurn(message) {
+  if (!process.env.MUSE_TEST_ACTIVE_TURN) return;
+  if (message.method === "turn/started" && message.params?.turnId)
+    liveTurnId = message.params.turnId;
+}
 function applyWireVariants(message) {
   if (
     message.method === "item/delta" &&
@@ -349,12 +455,6 @@ function parityDelivery(message) {
       method: "view/gap",
       params: { sessionId: message.params.sessionId, after: "", next: message.params.viewCursor },
     });
-  if (
-    process.env.MUSE_TEST_SILENT &&
-    ["item/started", "item/delta", "item/completed", "turn/completed"].includes(message.method) &&
-    message.params.item?.kind !== "userMessage"
-  )
-    return true;
   if (
     process.env.MUSE_TEST_GAP &&
     message.method === "item/completed" &&
@@ -377,6 +477,12 @@ function parityDelivery(message) {
       method: "skill/changed",
       params: { sessionId: message.params.sessionId },
     });
+  if (
+    process.env.MUSE_TEST_SILENT &&
+    ["item/started", "item/delta", "item/completed", "turn/completed"].includes(message.method) &&
+    message.params.item?.kind !== "userMessage"
+  )
+    return true;
   return false;
 }
 function applyTestVariants(message) {
@@ -404,9 +510,16 @@ function applyTestVariants(message) {
     message.params.item.fallbackText = "New MSP item";
   }
 }
+const childSequence = new Map();
 function applyParityVariants(message) {
   if (process.env.MUSE_TEST_CHILD && message.params?.item?.tool === "subagent_spawn") {
-    message.params.item.childSessionId = "fixture-child";
+    if (process.env.MUSE_TEST_CHILD_SEQ) {
+      const key = message.params.item.itemId;
+      if (!childSequence.has(key)) childSequence.set(key, childSequence.size + 1);
+      message.params.item.childSessionId = `fixture-child-${childSequence.get(key)}`;
+    } else {
+      message.params.item.childSessionId = "fixture-child";
+    }
     if (process.env.MUSE_TEST_CHILD === "workflow") message.params.item.kind = "workflow";
     if (process.env.MUSE_TEST_CHILD === "dedicated") {
       message.params.item.kind = "subagent";
