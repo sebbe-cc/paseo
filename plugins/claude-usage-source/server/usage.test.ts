@@ -1081,6 +1081,7 @@ it("session discovery reads only its Claude home and excludes foreign sessions",
       {
         key: "session-account.org",
         label: "session@example.test",
+        identity: "claude:session-account.org",
         harness: "Claude",
         input: credentialInput(home),
       },
@@ -1133,4 +1134,56 @@ it("session Keychain input retains the selected config-directory locator through
     env: { CLAUDE_CONFIG_DIR: "/somewhere-else" },
   });
   expect(reads).toEqual(Array(3).fill(`${service}:fixture-user`));
+});
+
+it("verified discovery carries a claude-namespaced identity; locator fallback omits it", async () => {
+  const verified = tokenLookup("verified-identity-token");
+  const accounts = await discover(
+    { kind: "global" },
+    { ...verified, now: Date.now },
+    async () =>
+      jsonResponse({
+        account: { uuid: "account-uuid", email: "owner@example.test" },
+        organization: { uuid: "org-uuid" },
+      }),
+  );
+  expect(accounts).toHaveLength(1);
+  expect(accounts[0]).toMatchObject({
+    key: "account-uuid.org-uuid",
+    identity: "claude:account-uuid.org-uuid",
+  });
+  // A rejected profile proves nothing: the locator account carries no identity
+  // and can never authorize native fallback.
+  const rejected = tokenLookup("rejected-identity-token");
+  const fallback = await discover(
+    { kind: "global" },
+    { ...rejected, now: Date.now },
+    async () => new Response(null, { status: 401 }),
+  );
+  expect(fallback).toHaveLength(1);
+  expect(fallback[0]?.key).toMatch(/^[a-f0-9]{64}$/);
+  expect(fallback[0]?.identity).toBeUndefined();
+});
+
+it("fetchUsage attests the verified identity whose credentials it read", async () => {
+  const lookup = tokenLookup("attested-fetch-token");
+  const input = credentialInput(lookup.claudeHome);
+  await discover(
+    { kind: "global" },
+    { ...lookup, now: Date.now },
+    async () =>
+      jsonResponse({
+        account: { uuid: "attest-account" },
+        organization: { uuid: "attest-org" },
+      }),
+  );
+  const report = await fetchUsage(
+    input,
+    async () => jsonResponse(makeClaudeResponse()),
+    { ...lookup },
+  );
+  expect(report).toMatchObject({
+    status: "available",
+    accountIdentity: "claude:attest-account.attest-org",
+  });
 });
