@@ -21,6 +21,7 @@ export interface BrowserShortcutPrefix {
 
 export interface BrowserShortcutInput extends KeyboardShortcutInput {
   browserId: string;
+  type?: "keyUp";
 }
 
 export interface BrowserKeyboardPolicy {
@@ -65,7 +66,8 @@ export function parseBrowserShortcutInput(value: unknown): BrowserShortcutInput 
     typeof value.control !== "boolean" ||
     typeof value.meta !== "boolean" ||
     typeof value.shift !== "boolean" ||
-    (value.repeat !== undefined && typeof value.repeat !== "boolean")
+    (value.repeat !== undefined && typeof value.repeat !== "boolean") ||
+    (value.type !== undefined && value.type !== "keyUp")
   ) {
     return null;
   }
@@ -79,6 +81,7 @@ export function parseBrowserShortcutInput(value: unknown): BrowserShortcutInput 
     metaKey: value.meta,
     shiftKey: value.shift,
     repeat: value.repeat ?? false,
+    ...(value.type === "keyUp" ? { type: "keyUp" as const } : {}),
   };
 }
 
@@ -221,6 +224,10 @@ export function attachElectronBrowserSource(
   const subscription = source.subscribe((payload) => {
     const input = parseBrowserShortcutInput(payload);
     if (!input) return;
+    if (input.type === "keyUp") {
+      handlers.keyUp({ ...input, preventDefault() {}, stopPropagation() {} });
+      return;
+    }
     handlers.keyDown({
       event: { ...input, preventDefault() {}, stopPropagation() {} },
       focusScope: "browser",
