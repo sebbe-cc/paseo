@@ -319,6 +319,54 @@ clear, and reset it there; the saved key also works inside browser tabs.
 shortcuts. Registration returns an idempotent remover and is also removed when
 the plugin stops. Operating system shortcuts take precedence if the OS intercepts
 a key before it reaches Paseo.
+### Trusted app actions
+
+`client.clientActions` exposes the app's own actions to trusted hardware controls:
+hold-to-talk voice input, focused-panel scroll, and panel navigation for joystick input.
+It is present only on clients whose app implements it (packaged desktop); on older apps,
+browser, and mobile it is `undefined`, and the plugin must report "unsupported" and stay
+a no-op — never fail, never fall back to another transport.
+
+```ts
+const actions = client.clientActions;
+if (!actions) {
+  // Show the unsupported state; do not attempt hardware actions.
+}
+const caps = actions?.getCapabilities(); // { voiceInput, panelScroll }
+```
+
+Probe each part separately with `getCapabilities()`: voice and panel scroll go live
+independently. Joystick navigation is gated under `panelScroll` — there is no separate
+joystick flag. Voice hold-to-talk starts the app's existing dictation pipeline for the
+exact `{serverId, agentId}` target; releasing stops the microphone first, flushes the
+final partial second of speech, and delivers the transcript to that agent. An empty
+transcript sends nothing. A release during pending microphone acquisition never
+enables recording. Starting a new session retires the previous one without delivery,
+and the app stops the microphone on dropped release, window change, and disconnect
+as the last guarantor. Scrolling resolves the real scroll viewport from the focused
+element (overflow and dimensions, never the focused input itself).
+
+```ts
+await actions?.startVoiceInput({ serverId, agentId });
+// ... while the control is held ...
+await actions?.stopVoiceInput(); // delivers the transcript to the agent
+actions?.scrollFocusedPanel("down", "page"); // works without a mounted plugin panel
+actions?.navigatePanel("back"); // back/forward ride the real session history
+```
+
+Navigation advertises only implemented operations: `back`/`forward` navigate for
+real, while `history`/`sidebar` throw an unsupported error naming the missing app
+wiring instead of silently succeeding — surface that reason, never a fallback.
+
+Agent interruption and provider mode controls are separate SDK calls on the agent
+handle (`cancel()`, `setMode()`, `setModel()`, `setFeature()`), not part of this
+capability — plugins probe them structurally and report "unsupported" where missing.
+
+| Platform | `client.clientActions`                          |
+| -------- | ----------------------------------------------- |
+| Electron | Present; per-part probing via `getCapabilities` |
+| Browser  | `undefined`; report "unsupported"               |
+| Mobile   | `undefined`; report "unsupported"               |
 
 ### External links and workspace browsers
 
