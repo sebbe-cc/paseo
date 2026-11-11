@@ -5,6 +5,9 @@ import type {
   SidebarWorkspaceEntry,
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
+import { mergeProjectContainerCatalogs } from "@/project-containers";
+import { SIDEBAR_UNLABELLED_LABEL_KEY, type SidebarGroupMode } from "@/stores/sidebar-view-store";
+import { labelWorkspaceGroupKey } from "./sidebar-labels";
 import { buildSidebarProjection } from "./sidebar-projection";
 
 function makeWorkspace(
@@ -64,10 +67,7 @@ function makeProject(
   };
 }
 
-function projectionInput(options?: {
-  groupMode?: "project" | "status";
-  pinnedCollapsed?: boolean;
-}) {
+function projectionInput(options?: { groupMode?: SidebarGroupMode; pinnedCollapsed?: boolean }) {
   const pinned = makeWorkspace("pinned", "running");
   const unpinned = makeWorkspace("unpinned", "needs_input");
   return {
@@ -83,6 +83,8 @@ function projectionInput(options?: {
     ]),
     projectNamesByViewKey: new Map([["project", "Project"]]),
     groupMode: options?.groupMode ?? ("project" as const),
+    labelCatalog: [],
+    labelGroupOrder: [],
     pinnedCollapsed: options?.pinnedCollapsed ?? false,
     collapsedProjectKeys: new Set<string>(),
     collapsedWorkspaceGroupKeys: new Set<string>(),
@@ -94,7 +96,7 @@ function projectionInput(options?: {
  * Two projects, one workspace each, both labelled — so every grouping mode puts rows from more
  * than one project on screen, and a mode that asked for fewer icons than it renders would show it.
  */
-function twoProjectInput(groupMode: "project" | "status") {
+function twoProjectInput(groupMode: SidebarGroupMode) {
   const first = makeWorkspace("first", "running", ["Urgent"], "project");
   const second = makeWorkspace("second", "needs_input", ["Backend"], "other-project");
   return {
@@ -115,7 +117,7 @@ function twoProjectInput(groupMode: "project" | "status") {
 describe("buildSidebarProjection", () => {
   // The rule that outlived the bug it was written for: a project icon is fetched per project, so
   // whatever a mode groups by, the rows it produces can only reference projects already covered.
-  for (const groupMode of ["project", "status"] as const) {
+  for (const groupMode of ["project", "status", "label"] as const) {
     it(`covers every row ${groupMode} grouping renders with a project icon target`, () => {
       const projection = buildSidebarProjection(twoProjectInput(groupMode));
       const covered = new Set(projection.projectIconTargets.map((target) => target.projectViewKey));
@@ -166,6 +168,73 @@ describe("buildSidebarProjection", () => {
     ]);
   });
 
+  it("gives a workspace listed under two labels one shortcut target", () => {
+    const shared = makeWorkspace("shared", "done", ["Backend", "Urgent"]);
+    const other = makeWorkspace("other", "done", ["Urgent"]);
+    const projection = buildSidebarProjection({
+      ...projectionInput({ groupMode: "label" }),
+      projects: [makeProject([shared.placement, other.placement])],
+      pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+      workspaceEntriesByKey: new Map([
+        [shared.entry.workspaceKey, shared.entry],
+        [other.entry.workspaceKey, other.entry],
+      ]),
+      labelCatalog: [
+        { name: "Backend", color: "sky" },
+        { name: "Urgent", color: "red" },
+      ],
+    });
+
+    const [backend, urgent] = projection.workspaceGroups;
+    expect(projection.workspaceGroups.map((group) => group.key)).toEqual([
+      "label:backend",
+      "label:urgent",
+    ]);
+    expect(backend?.rows.map((entry) => entry.workspaceId)).toEqual(["shared"]);
+    expect(urgent?.rows.map((entry) => entry.workspaceId)).toEqual(["shared", "other"]);
+    expect(projection.shortcutModel.shortcutTargets).toEqual([
+      { serverId: "srv", workspaceId: "shared" },
+      { serverId: "srv", workspaceId: "other" },
+    ]);
+    expect([...projection.shortcutModel.shortcutIndexByWorkspaceKey]).toEqual([
+      ["srv:shared", 1],
+      ["srv:other", 2],
+    ]);
+  });
+
+  it("orders label sections by the stored label group order, new labels last", () => {
+    const backend = makeWorkspace("backend", "done", ["Backend"]);
+    const urgent = makeWorkspace("urgent", "done", ["Urgent"]);
+    const fresh = makeWorkspace("fresh", "done", ["Fresh"]);
+    const homeless = makeWorkspace("homeless", "done", []);
+    const projection = buildSidebarProjection({
+      ...projectionInput({ groupMode: "label" }),
+      projects: [
+        makeProject([backend.placement, urgent.placement, fresh.placement, homeless.placement]),
+      ],
+      pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+      workspaceEntriesByKey: new Map([
+        [backend.entry.workspaceKey, backend.entry],
+        [urgent.entry.workspaceKey, urgent.entry],
+        [fresh.entry.workspaceKey, fresh.entry],
+        [homeless.entry.workspaceKey, homeless.entry],
+      ]),
+      labelCatalog: [
+        { name: "Backend", color: "sky" },
+        { name: "Urgent", color: "red" },
+        { name: "Fresh", color: "teal" },
+      ],
+      labelGroupOrder: ["label:urgent", "label:backend"],
+    });
+
+    expect(projection.workspaceGroups.map((group) => group.key)).toEqual([
+      "label:urgent",
+      "label:backend",
+      "label:fresh",
+      labelWorkspaceGroupKey(SIDEBAR_UNLABELLED_LABEL_KEY),
+    ]);
+  });
+
   it("does not number pinned chats while the pinned section is collapsed", () => {
     const projection = buildSidebarProjection(
       projectionInput({ groupMode: "status", pinnedCollapsed: true }),
@@ -174,5 +243,32 @@ describe("buildSidebarProjection", () => {
     expect(projection.shortcutModel.shortcutTargets).toEqual([
       { serverId: "srv", workspaceId: "unpinned" },
     ]);
+  });
+
+  it("numbers workspaces in project-container order and skips collapsed containers", () => {
+    const input = twoProjectInput("project");
+    const now = "2026-09-25T00:00:00.000Z";
+    const container = { name: "Heads", createdAt: now, updatedAt: now };
+    const containers = mergeProjectContainerCatalogs({
+      catalogs: [
+        {
+          serverId: "srv",
+          containers: [{ ...container, id: "pcnt_1", projectIds: ["other-project"] }],
+        },
+      ],
+    });
+    const expanded = buildSidebarProjection({
+      ...input,
+      projectContainers: { containers, collapsedContainerKeys: new Set() },
+    });
+    expect(expanded.shortcutModel.shortcutTargets.map((t) => t.workspaceId)).toEqual([
+      "second",
+      "first",
+    ]);
+    const collapsed = buildSidebarProjection({
+      ...input,
+      projectContainers: { containers, collapsedContainerKeys: new Set(["heads"]) },
+    });
+    expect(collapsed.shortcutModel.shortcutTargets.map((t) => t.workspaceId)).toEqual(["first"]);
   });
 });
