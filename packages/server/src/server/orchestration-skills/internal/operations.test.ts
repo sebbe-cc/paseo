@@ -14,6 +14,7 @@ import {
   uninstallSkills,
   updateSkills,
 } from "./operations";
+import { isSkillTargetReadOnlyError, SkillTargetReadOnlyError } from "./sync";
 
 const ALL_SKILLS: SkillSelection = { mode: "all" };
 
@@ -654,6 +655,38 @@ describe("installSkills / updateSkills", () => {
     expect(first.state).toBe("up-to-date");
     expect(second.state).toBe("up-to-date");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "autoUpdate converges writable targets and reports read-only ones instead of failing",
+    async () => {
+      await writeCurrentBundle(sandbox.targets.sourceDir);
+      const agentsSkill = path.join(sandbox.targets.agentsDir, "paseo");
+      await writeOnDiskSkill(sandbox.targets.agentsDir, "paseo", { "SKILL.md": "stale" });
+      await fs.chmod(path.join(agentsSkill, "SKILL.md"), 0o444);
+      await fs.chmod(agentsSkill, 0o555);
+      try {
+        const failure = await autoUpdateInstalledSkills(sandbox.targets, ALL_SKILLS).then(
+          () => null,
+          (error: unknown) => error,
+        );
+
+        expect(isSkillTargetReadOnlyError(failure)).toBe(true);
+        expect((failure as SkillTargetReadOnlyError).targets).toEqual([
+          { skillName: "paseo", targetDir: agentsSkill },
+        ]);
+        // The writable target still converges; the read-only one is untouched.
+        expect(
+          await fs.readFile(
+            path.join(sandbox.targets.claudeDir, "paseo", "SKILL.md"),
+            "utf-8",
+          ),
+        ).toBe("paseo-v1");
+        expect(await fs.readFile(path.join(agentsSkill, "SKILL.md"), "utf-8")).toBe("stale");
+      } finally {
+        await fs.chmod(agentsSkill, 0o755);
+      }
+    },
+  );
 });
 
 describe("uninstallSkills", () => {
