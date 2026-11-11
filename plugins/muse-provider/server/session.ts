@@ -1,15 +1,16 @@
-import type {
-  ProviderEvent,
-  ProviderInput,
-  ProviderLaunch,
-  ProviderPersistence,
-  ProviderSessionConfig,
-  ProviderConfigChanges,
-  ProviderPrompt,
-  ProviderPermissionResponse,
-  ProviderMcpServerConfig,
-  ProviderCatalog,
-  ProviderToolCallDetail,
+import {
+  supportsSubsessions,
+  type ProviderEvent,
+  type ProviderInput,
+  type ProviderLaunch,
+  type ProviderPersistence,
+  type ProviderSessionConfig,
+  type ProviderConfigChanges,
+  type ProviderPrompt,
+  type ProviderPermissionResponse,
+  type ProviderMcpServerConfig,
+  type ProviderCatalog,
+  type ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
 import type { z } from "zod";
 import { MspConnection, commandId, type Notification } from "./connection.js";
@@ -176,7 +177,13 @@ export class Session {
     const nativeId = response.session.sessionId;
     this.liveState = {
       nativeId,
-      children: new Children(this.host, this.options.id, this.config.cwd, this.options.emit),
+      children: new Children(
+        this.host,
+        this.options.id,
+        this.config.cwd,
+        this.options.emit,
+        supportsSubsessions(this.options.capabilities),
+      ),
       timeline: new Timeline(
         this.host,
         nativeId,

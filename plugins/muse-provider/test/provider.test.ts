@@ -46,6 +46,7 @@ async function harness(
   scenario = "text-reasoning",
   env: Record<string, string> = {},
   providerOptions?: Record<string, unknown>,
+  connectCapabilities: readonly string[] = PROVIDER_CAPABILITIES,
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "muse-provider-test-"));
   roots.push(root);
@@ -63,7 +64,7 @@ async function harness(
   const connection = await provider.connect({
     launch,
     versions: [1],
-    capabilities: PROVIDER_CAPABILITIES,
+    capabilities: connectCapabilities,
   });
   connections.push(connection);
   const events: ProviderEvent[] = [];
@@ -1486,6 +1487,101 @@ for (const variant of ["tool", "dedicated", "workflow"]) {
     ).toHaveLength(1);
   });
 }
+
+test("session.opened advertises session.subsession so the daemon accepts child sessions", async () => {
+  const h = await harness("subagent", { MUSE_TEST_CHILD: "workflow" });
+  expect(h.connection.capabilities).toContain("session.subsession");
+  await h.open();
+  const opened = h.events.find((e) => e.type === "session.opened");
+  expect(opened).toMatchObject({
+    sessionId: "paseo-session",
+    capabilities: expect.arrayContaining(["session.subsession"]),
+  });
+  await h.prompt();
+  await h.wait((e) => e.type === "session.opened" && e.sessionId === "fixture-child");
+});
+
+test("three parallel workflow children project as three subagents sharing one turn", async () => {
+  const h = await harness("subagent-3", { MUSE_TEST_CHILD: "workflow", MUSE_TEST_CHILD_SEQ: "1" });
+  await h.open();
+  await h.prompt();
+  for (const id of ["fixture-child-1", "fixture-child-2", "fixture-child-3"]) {
+    expect(await h.wait((e) => e.type === "session.opened" && e.sessionId === id)).toMatchObject({
+      parentSessionId: "paseo-session",
+      restoration: "parent",
+    });
+  }
+  await h.wait((e) => e.type === "session.turn" && e.state === "completed");
+  const opened = h.events.filter(
+    (e) => e.type === "session.opened" && e.parentSessionId === "paseo-session",
+  );
+  expect(opened.map((e) => e.sessionId).sort()).toEqual([
+    "fixture-child-1",
+    "fixture-child-2",
+    "fixture-child-3",
+  ]);
+  for (const id of ["fixture-child-1", "fixture-child-2", "fixture-child-3"]) {
+    expect(
+      h.events.filter(
+        (e) =>
+          e.type === "timeline.item" && e.sessionId === id && e.item.type === "assistant_message",
+      ),
+    ).toHaveLength(1);
+  }
+  expect(
+    (await h.recorded())
+      .filter((f) => f.method === "session/read")
+      .map((f) => f.params.sessionId)
+      .sort(),
+  ).toEqual(["fixture-child-1", "fixture-child-2", "fixture-child-3"]);
+});
+
+test("without session.subsession the parent gets a timeline error instead of a projected child", async () => {
+  const withoutSubsession = PROVIDER_CAPABILITIES.filter(
+    (capability) => capability !== "session.subsession",
+  );
+  const h = await harness(
+    "subagent",
+    { MUSE_TEST_CHILD: "workflow" },
+    undefined,
+    withoutSubsession,
+  );
+  expect(h.connection.capabilities).not.toContain("session.subsession");
+  await h.open();
+  await h.prompt();
+  await h.wait((e) => e.type === "session.turn" && e.state === "completed");
+  expect(
+    h.events.filter((e) => e.type === "session.opened" && e.sessionId === "fixture-child"),
+  ).toEqual([]);
+  const error = h.events.find(
+    (e) =>
+      e.type === "timeline.item" &&
+      e.sessionId === "paseo-session" &&
+      e.item.type === "error" &&
+      e.item.id === "subsession-unsupported:fixture-child",
+  );
+  expect(error).toMatchObject({
+    item: { message: expect.stringContaining("session.subsession") },
+  });
+  // The connection stays alive: the parent session closes cleanly afterwards.
+  const from = await h.send({
+    type: "session.close",
+    sessionId: "paseo-session",
+    requestId: "close",
+  });
+  await h.wait((e) => e.type === "session.closed", from);
+});
+
+test("status names session.subsession when the daemon never offered it", async () => {
+  const withoutSubsession = PROVIDER_CAPABILITIES.filter(
+    (capability) => capability !== "session.subsession",
+  );
+  const h = await harness("catalog-controls", {}, undefined, withoutSubsession);
+  expect(await h.provider.status!({ launch: h.launch })).toMatchObject({
+    available: true,
+    diagnostic: expect.stringContaining("session.subsession"),
+  });
+});
 test("gap backfill repairs a missing completion without duplicating item revisions", async () => {
   const h = await harness("text-reasoning", { MUSE_TEST_GAP: "1" });
   await h.open();
