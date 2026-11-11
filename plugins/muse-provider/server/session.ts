@@ -313,9 +313,9 @@ export class Session {
       return await resume({ mcpServers });
     } catch (error) {
       if (!this.options.daemon || !isLoadedMcpConflict(error)) throw error;
-      process.stderr.write(
-        `Muse session ${sessionId} is loaded in the daemon with other MCP configuration; ` +
-          "attaching to the loaded runtime and its MCP servers\n",
+      console.warn(
+        `[muse-provider] Muse session ${sessionId} is loaded in the daemon with other MCP ` +
+          "configuration; attaching to the loaded runtime and its MCP servers",
       );
       return resume({});
     }
