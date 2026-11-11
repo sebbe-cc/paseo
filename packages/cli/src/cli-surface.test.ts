@@ -12,10 +12,8 @@ describe("canonical CLI surface", () => {
     expect(send.opts().behavior).toBe("interrupt");
     await send.parseAsync(["target", "message", "--behavior", "steer"], { from: "user" });
     expect(send.opts().behavior).toBe("steer");
-    send.exitOverride().configureOutput({ writeErr: () => {} });
-    await expect(
-      send.parseAsync(["target", "message", "--behavior", "queue"], { from: "user" }),
-    ).rejects.toThrow();
+    await send.parseAsync(["target", "message", "--behavior", "queue"], { from: "user" });
+    expect(send.opts().behavior).toBe("queue");
   });
 
   it("offers daemon host selection as a global option", () => {
