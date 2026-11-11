@@ -43,6 +43,23 @@ export type UsageProblem =
   | { kind: "rejected"; status: number; refreshedBy?: string }
   | { kind: "no_quota"; detail: string };
 
+/**
+ * Source-owned historical quota snapshot (pa-vtgw9 R1). A failing source
+ * whose backend still holds a fresh validated vendor observation attaches
+ * its last-known quota here so the card can show the error WITH its recent
+ * history — including after a restart, when the registry has no local
+ * snapshot. The current error status always stays visible; history is never
+ * live quota. Same shape as the available report's quota fields.
+ */
+export interface UsageHistorySnapshot {
+  /** Last successful validated vendor observation (RFC3339 UTC), never poll time. */
+  observedAt: string;
+  windows: UsageWindow[];
+  planLabel?: string;
+  balances?: UsageBalance[];
+  details?: UsageDetail[];
+}
+
 export type UsageReport =
   | {
       status: "available";
@@ -50,14 +67,55 @@ export type UsageReport =
       windows: UsageWindow[];
       balances?: UsageBalance[];
       details?: UsageDetail[];
+      /**
+       * Verified account identity whose credentials were actually read for
+       * this quota response, `vendor:rest` (e.g. `claude:{account}.{org}`).
+       * The daemon only serves a taken-over card from a native login whose
+       * attested identity equals the expected one; an available report
+       * without a matching attestation is discarded, never shown under
+       * another account's card. Omit when the credentials carry no verified
+       * identity (locator-only logins never attest).
+       */
+      accountIdentity?: string;
+      /**
+       * Last successful validated vendor observation (RFC3339 UTC), owned
+       * by the source — never poll time. The registry and app enforce the
+       * 1800 s ceiling on this timestamp. Omit when the source has no
+       * verified observation; the daemon then keeps poll-time semantics.
+       */
+      observedAt?: string;
     }
-  | { status: "unavailable"; problem: UsageProblem }
-  | { status: "error"; error: string };
+  | { status: "unavailable"; problem: UsageProblem; history?: UsageHistorySnapshot }
+  | { status: "error"; error: string; history?: UsageHistorySnapshot };
+
+/**
+ * Builds a vendor-scoped verified account identity for `UsageAccount.identity`
+ * and available-report `accountIdentity`. The namespace (`claude:`, `codex:`)
+ * keeps one vendor's ids from ever matching another's; the daemon compares
+ * these strings for exact equality and treats a missing identity as
+ * unverified (fail closed). Never build one from a locator hash or any
+ * other unverified value.
+ */
+export function verifiedAccountIdentity(vendor: string, id: string): string {
+  return `${vendor}:${id}`;
+}
 
 export interface UsageAccount {
   /** Stable across token rotation; [A-Za-z0-9._-]{1,128}. Never a credential or raw email. */
   key: string;
   label?: string;
+  /**
+   * Verified account identity, `vendor:rest` (see `verifiedAccountIdentity`),
+   * proven at discovery time (e.g. Claude OAuth profile account+org, Codex
+   * account id or JWT claim). Only accounts carrying an explicitly verified
+   * identity may serve a taken-over card as native fallback, and only when
+   * the override account carries the exact same string. A locator hash or
+   * any unverified value must never appear here: omitting it fails closed
+   * and keeps the override's own error (or its last successful snapshot).
+   * The card key stays separate and keeps grouping cards; identity decides
+   * whether quota may move between accounts.
+   */
+  identity?: string;
   /** Harness owning this login, e.g. Codex, OpenCode, Pi or OMP. */
   harness?: string;
   /** Store locator, opaque to the daemon. */
@@ -90,6 +148,19 @@ export interface UsageSourceRegistration {
    * taken-over cards, never under its own id.
    */
   replaces?: string[];
+  /**
+   * Skip the taken-over sources' discovery/fetch fallback. Set this when
+   * this source's account keys can never match the native identities, or
+   * when a native fetch would start a host just to fail (e.g. a CPA-backed
+   * Muse source avoiding a transient `muse serve`). The daemon then never
+   * calls the taken-over sources' `discover`/`fetch` for this takeover,
+   * and a failing override reports its own error instead of native values.
+   * Without it, fallback still needs a proven match: both sides must carry
+   * the same explicitly verified `UsageAccount.identity`, and each native
+   * quota read must attest it back. Key equality alone never authorizes
+   * fallback.
+   */
+  skipNativeFallback?: boolean;
   /** Accounts for this scope only. The same key in any scope identifies the same account. */
   discover(scope: UsageScope): Promise<UsageAccount[]>;
   /** Re-reads the login store; never writes it. */
