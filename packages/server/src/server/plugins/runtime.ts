@@ -1,4 +1,9 @@
-import type { PluginVoiceHost, VoiceProviderEvent } from "@getpaseo/plugin/server";
+import {
+  DictationCommitResultSchema,
+  type PluginDictationHost,
+  type PluginVoiceHost,
+  type VoiceProviderEvent,
+} from "@getpaseo/plugin/server";
 import { validateWorktreePath } from "../../utils/worktree-path.js";
 import type { PluginHookPayload } from "@getpaseo/plugin/server";
 import type { PluginWireBeforeRequests, PluginBeforeResults } from "./lifecycle/index.js";
@@ -72,6 +77,11 @@ interface PendingInvocation {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+type PluginDictationCommand = Extract<
+  PluginProcessRequest,
+  { type: "dictation.request" }
+>["command"];
+
 interface LoadedPlugin {
   id: string;
   instanceId: string;
@@ -87,6 +97,7 @@ interface LoadedPlugin {
   usageSources: readonly PluginUsageSourceMetadata[];
   voiceProviders: ReadonlyArray<{ id: string; label: string }>;
   voiceSessions: Map<string, (event: VoiceProviderEvent) => void>;
+  dictationProviders: ReadonlyArray<{ id: string; label: string }>;
   child: PluginChild | null;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
@@ -574,6 +585,55 @@ export class PluginRuntime {
     };
   };
 
+  hasDictationProvider: PluginDictationHost["hasDictationProvider"] = ({ pluginId, providerId }) =>
+    this.plugins
+      .get(pluginId)
+      ?.dictationProviders.some((provider) => provider.id === providerId) === true;
+
+  startDictationProvider: PluginDictationHost["startDictationProvider"] = async (
+    selection,
+    context,
+  ) => {
+    const loaded = this.plugins.get(selection.pluginId);
+    if (!loaded || !this.hasDictationProvider(selection))
+      throw new Error("Selected dictation provider is unavailable");
+    context.signal.throwIfAborted();
+    const sessionId = randomUUID();
+    const dictate = (command: PluginDictationCommand) =>
+      this.request(loaded, {
+        type: "dictation.request",
+        requestId: randomUUID(),
+        sessionId,
+        command,
+      });
+    let closing: Promise<void> | null = null;
+    const close = (): Promise<void> => {
+      context.signal.removeEventListener("abort", onAbort);
+      closing ??= dictate({ type: "close" }).then(() => undefined);
+      return closing;
+    };
+    const onAbort = () => void close().catch(() => undefined);
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await dictate({ type: "start", providerId: selection.providerId, agentId: context.agentId });
+      context.signal.throwIfAborted();
+    } catch (error) {
+      await close().catch(() => undefined);
+      throw error;
+    }
+    return {
+      appendAudio: async (audio) => {
+        if (closing) throw new Error("Dictation provider is closed");
+        await dictate({ type: "audio", audio });
+      },
+      commit: async () => {
+        if (closing) throw new Error("Dictation provider is closed");
+        return DictationCommitResultSchema.parse(await dictate({ type: "commit" })).text;
+      },
+      close,
+    };
+  };
+
   private closeVoiceSessions(loaded: LoadedPlugin): void {
     const listeners = [...loaded.voiceSessions.values()];
     loaded.voiceSessions.clear();
@@ -901,6 +961,7 @@ export class PluginRuntime {
         usageSources: [],
         voiceProviders: [],
         voiceSessions: new Map(),
+        dictationProviders: [],
         child: null,
         outputCapture: null,
         pending: new Map(),
@@ -1035,6 +1096,7 @@ export class PluginRuntime {
       usageSources: ready.usageSources ?? [],
       voiceProviders: ready.voiceProviders ?? [],
       voiceSessions: new Map(),
+      dictationProviders: ready.dictationProviders ?? [],
       child,
       outputCapture,
       pending,

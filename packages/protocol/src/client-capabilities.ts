@@ -50,6 +50,7 @@ export const CLIENT_CAPS = {
   // The daemon sends plugin RPC outputs as binary opcode 0x21 only to clients that decode it.
   pluginBinaryPayloads: "plugin_binary_payloads",
   pluginVoiceProviders: "plugin_voice_providers",
+  pluginDictationProviders: "plugin_dictation_providers",
   // COMPAT(workspaceSetupBlocked): added in v0.8.0, remove after 2027-03-07 once client floor >= v0.8.0.
   workspaceSetupBlocked: "workspace_setup_blocked",
   // COMPAT(backgroundAgents): added in v0.15.0, remove after 2027-05-03 once client floor >= v0.15.0.

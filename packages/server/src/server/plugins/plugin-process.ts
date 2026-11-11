@@ -1,5 +1,6 @@
-import { PluginAgentTools } from "./agent-tools.js";
 import { PluginVoiceWorker } from "./voice-worker.js";
+import { PluginDictationWorker } from "./dictation-worker.js";
+import { PluginAgentTools } from "./agent-tools.js";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
 import {
@@ -49,6 +50,11 @@ export interface PluginWorkerChannel {
   disconnect(): void;
 }
 
+type ServiceRequest = Extract<
+  PluginProcessRequest,
+  { type: "usage.fetch" | "usage.discover" | "voice.request" | "dictation.request" }
+>;
+
 export function createPluginWorker(options: {
   channel: PluginWorkerChannel;
   contribute: PluginServerContribution;
@@ -82,6 +88,7 @@ export function createPluginWorker(options: {
   const handlers = new Map<string, RegisteredRpc>();
   const subscriptions = new PluginSubscriptionHandlers({ send, sendAndWait });
   const voice = new PluginVoiceWorker();
+  const dictation = new PluginDictationWorker();
   const providers = new Map<string, ProviderRegistration>();
   const usageSources = new Map<string, UsageSourceRegistration>();
   const providerConnections = new Map<
@@ -328,6 +335,7 @@ export function createPluginWorker(options: {
     const contributedCleanup = contribute({
       handle,
       registerVoiceProvider: voice.register,
+      registerDictationProvider: dictation.register,
       registerProvider,
       registerUsageSource,
       registerSettings,
@@ -360,13 +368,14 @@ export function createPluginWorker(options: {
         .map(providerMetadata),
       usageSources: usageSourceMetadata,
       voiceProviders: voice.catalog(),
+      dictationProviders: dictation.catalog(),
     });
   }
 
   async function shutdown(): Promise<void> {
     if (stopping) return;
     stopping = true;
-    await voice.shutdown();
+    await Promise.all([voice.shutdown(), dictation.shutdown()]);
     const releaseApi = paseo
       ?.dispose()
       .catch((error) => console.error("Plugin API cleanup failed", error));
@@ -390,13 +399,12 @@ export function createPluginWorker(options: {
     channel.disconnect();
   }
 
-  function handleServiceRequest(
-    message: Extract<
-      PluginProcessRequest,
-      { type: "usage.fetch" | "usage.discover" | "voice.request" }
-    >,
-  ): void {
+  function handleServiceRequest(message: ServiceRequest): void {
     void (async () => {
+      if (message.type === "dictation.request") {
+        if (!paseo) throw new Error("Plugin API is unavailable");
+        return dictation.request(message.sessionId, message.command, paseo, directory);
+      }
       if (message.type === "voice.request") {
         if (!paseo) throw new Error("Plugin API is unavailable");
         return voice.request(message.sessionId, message.command, paseo, directory, (event) =>
@@ -418,6 +426,7 @@ export function createPluginWorker(options: {
   function rejectWhileStopping(message: PluginProcessRequest): void {
     if (
       message.type === "voice.request" ||
+      message.type === "dictation.request" ||
       message.type === "provider.status" ||
       message.type === "provider.catalog_key" ||
       message.type === "usage.fetch" ||
@@ -441,6 +450,15 @@ export function createPluginWorker(options: {
     } else if (message.type === "provider.close") {
       send({ type: "provider.closed", connectionId: message.connectionId });
     }
+  }
+
+  function isServiceRequest(message: PluginProcessRequest): message is ServiceRequest {
+    return (
+      message.type === "voice.request" ||
+      message.type === "dictation.request" ||
+      message.type === "usage.fetch" ||
+      message.type === "usage.discover"
+    );
   }
 
   function handleToolMessage(
@@ -485,19 +503,6 @@ export function createPluginWorker(options: {
     if (message.type === "unsubscribe") subscriptions.release(message.subscriptionId);
     else if (paseo) subscriptions.start(message, paseo);
     else send({ type: "error", requestId: message.requestId, error: "Plugin API unavailable" });
-  }
-
-  function isServiceRequest(
-    message: PluginProcessRequest,
-  ): message is Extract<
-    PluginProcessRequest,
-    { type: "usage.fetch" | "usage.discover" | "voice.request" }
-  > {
-    return (
-      message.type === "voice.request" ||
-      message.type === "usage.fetch" ||
-      message.type === "usage.discover"
-    );
   }
 
   function handleMessage(rawMessage: unknown): void {
