@@ -89,18 +89,6 @@ async function gitTopLevel(cwd: string): Promise<string | null> {
   return existingDir(top);
 }
 
-async function gitWorktrees(cwd: string): Promise<string[]> {
-  const stdout = await gitOutput(["worktree", "list", "--porcelain"], cwd);
-  if (!stdout) return [];
-  const found: string[] = [];
-  for (const line of stdout.split("\n")) {
-    if (!line.startsWith("worktree ")) continue;
-    const dir = await existingDir(line.slice("worktree ".length).trim());
-    if (dir) found.push(dir);
-  }
-  return found;
-}
-
 async function gitTrackedFiles(repoCwd: string): Promise<string[] | null> {
   const tracked = await gitOutput(["ls-files", "-z"], repoCwd);
   if (tracked === null) return null;
@@ -204,7 +192,9 @@ export async function collectAssistantSearchRoots(input: {
   push(await existingDir(input.cwd));
   if (input.workspaceRoot) push(await existingDir(input.workspaceRoot));
   push(await gitTopLevel(input.cwd));
-  for (const worktree of await gitWorktrees(input.cwd)) push(worktree);
+  // Never sibling worktrees (pw-e423v.70): they hold the same relative paths for other tasks
+  // (`.orbit/implementation-summary.md`), so a link whose file left the agent's own tree opened
+  // another task's file. A missing file is reported missing; absolute paths still resolve.
   return ordered;
 }
 
