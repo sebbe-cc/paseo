@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
@@ -23,6 +24,15 @@ if (process.env.MUSE_TEST_STUBBORN) {
   appendFileSync(
     process.env.MUSE_TEST_REQUESTS,
     JSON.stringify({ event: "stubbornHost", pid: process.pid }) + "\n",
+  );
+}
+if (process.env.MUSE_TEST_ORPHAN_PIPE) {
+  const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "inherit",
+  });
+  appendFileSync(
+    process.env.MUSE_TEST_REQUESTS,
+    JSON.stringify({ event: "orphanHost", pid: orphan.pid }) + "\n",
   );
 }
 const rows = readFixture(scenario);
