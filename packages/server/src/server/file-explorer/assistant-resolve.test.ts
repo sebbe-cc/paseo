@@ -94,7 +94,7 @@ describe("assistant file resolve", () => {
     expect(result?.searchedRoots.length).toBeGreaterThan(0);
   });
 
-  it("finds files in a sibling worktree of the same repo", async () => {
+  it("never resolves a relative link into a sibling worktree of the same repo", async () => {
     const repo = await track(makeTempRoot("paseo-assistant-resolve-main-"));
     await gitInit(repo);
     await fs.writeFile(path.join(repo, "main.md"), "main", "utf8");
@@ -103,16 +103,27 @@ describe("assistant file resolve", () => {
     const sibling = path.join(os.tmpdir(), `paseo-assistant-resolve-sib-${process.pid}`);
     await runGitCommand(["worktree", "add", "--detach", sibling], { cwd: repo });
     roots.push(sibling);
-    const summaryName = "task-pa-9-summary.md";
-    await fs.writeFile(path.join(sibling, summaryName), "worker summary", "utf8");
+    // Another task's summary under the same relative path the agent linked (pw-e423v.70).
+    const summary = path.join(".orbit", "implementation-summary.md");
+    await fs.mkdir(path.join(sibling, ".orbit"), { recursive: true });
+    await fs.writeFile(path.join(sibling, summary), "another task", "utf8");
 
     const searchRoots = await collectAssistantSearchRoots({ cwd: repo });
-    expect(searchRoots).toContain(sibling);
+    expect(searchRoots).not.toContain(sibling);
 
-    const [result] = await resolveAssistantFilePaths({ cwd: repo, candidates: [summaryName] });
+    const [relative] = await resolveAssistantFilePaths({ cwd: repo, candidates: [summary] });
+    expect(relative?.status).toBe("missing");
+    expect(relative?.absolutePath).toBeNull();
+    const [bare] = await resolveAssistantFilePaths({ cwd: repo, candidates: ["implementation-summary.md"] });
+    expect(bare?.status).toBe("missing");
 
-    expect(result?.status).toBe("found");
-    expect(result?.absolutePath).toBe(await fs.realpath(path.join(sibling, summaryName)));
+    // Its own file resolves in its own tree; an absolute path to the sibling still opens.
+    await fs.mkdir(path.join(repo, ".orbit"), { recursive: true });
+    await fs.writeFile(path.join(repo, summary), "this task", "utf8");
+    const [own] = await resolveAssistantFilePaths({ cwd: repo, candidates: [summary] });
+    expect(own?.absolutePath).toBe(await fs.realpath(path.join(repo, summary)));
+    const [absolute] = await resolveAssistantFilePaths({ cwd: repo, candidates: [path.join(sibling, summary)] });
+    expect(absolute?.status).toBe("found");
 
     await runGitCommand(["worktree", "remove", "--force", sibling], { cwd: repo });
     roots = roots.filter((root) => root !== sibling);
