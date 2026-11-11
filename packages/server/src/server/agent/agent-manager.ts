@@ -1045,9 +1045,6 @@ export class AgentManager {
         title: agent.config.title ?? null,
         labels: { ...agent.labels },
         metadata: agent.metadata,
-        // A refresh carries no new initial prompt; sibling resume/import
-        // paths pass null (feat/plugin-turn-context made this required).
-        initialPrompt: null,
         tools: [],
         mcpServers: {},
         env: { ...agent.launchEnv },
