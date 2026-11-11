@@ -131,9 +131,9 @@ const sessionOpenLocalResultSchema = beforeSchemas["agent.open.before"].extend({
 });
 
 export interface PluginLifecycle {
-  wait(
-    name: "worktree.create.after",
-    payload: PluginHookPayload<"worktree.create.after">,
+  wait<Name extends "worktree.create.after" | "workspace.archive.before">(
+    name: Name,
+    payload: PluginHookPayload<Name>,
   ): Promise<void>;
   emit<Name extends keyof PluginHookEvents>(name: Name, event: PluginHookEvents[Name]): void;
   before<Name extends keyof PluginWireBeforeRequests>(

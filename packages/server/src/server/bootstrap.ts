@@ -177,6 +177,7 @@ import {
   archiveByScope,
   archivePersistedWorkspaceRecord,
   killTerminalsForWorkspace,
+  setWorkspaceArchiveGuard,
   type ActiveWorkspaceRef,
 } from "./workspace-archive-service.js";
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
@@ -973,6 +974,16 @@ export async function createPaseoDaemon(
     if (mutation.kind === "archive" && mutation.workspace) {
       pluginRuntime.emit("workspace.archive.after", {
         workspace: describeHookWorkspace(mutation.workspace),
+      });
+    }
+  });
+  // Plugins may refuse an archive (workspace.archive.before): awaited on every archive path.
+  setWorkspaceArchiveGuard(async (workspaceIds) => {
+    for (const workspaceId of workspaceIds) {
+      const workspace = await workspaceRegistry.get(workspaceId);
+      if (!workspace || workspace.archivedAt) continue;
+      await pluginRuntime.wait("workspace.archive.before", {
+        workspace: describeHookWorkspace(workspace),
       });
     }
   });

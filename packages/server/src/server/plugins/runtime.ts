@@ -582,9 +582,9 @@ export class PluginRuntime {
     await Promise.all(this.pendingEvents);
   }
 
-  async wait(
-    name: "worktree.create.after",
-    payload: PluginHookPayload<"worktree.create.after">,
+  async wait<Name extends "worktree.create.after" | "workspace.archive.before">(
+    name: Name,
+    payload: PluginHookPayload<Name>,
   ): Promise<void> {
     const plugins = [...this.plugins.values()].sort((left, right) =>
       left.id.localeCompare(right.id),
