@@ -1,3 +1,4 @@
+import { useMakeVoiceTarget } from "@/contexts/global-voice-context";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   Fragment,
@@ -1168,6 +1169,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   );
   const tabMenuLabels = useMemo<WorkspaceTabMenuLabels>(
     () => ({
+      makeVoiceTarget: t("globalVoice.makeTarget"),
       copyResumeCommand: t("workspace.tabs.menu.copyResumeCommand"),
       copyAgentId: t("workspace.tabs.menu.copyAgentId"),
       copyTerminalId: t("workspace.tabs.menu.copyTerminalId"),
@@ -1550,6 +1552,7 @@ function ResolvedDesktopTabChip({
   showDropIndicatorAfter: boolean;
 }) {
   const { t } = useTranslation();
+  const makeVoiceTarget = useMakeVoiceTarget(serverId);
   const presentation = item.presentation;
   const resolvedTab = useMemo(
     () =>
@@ -1557,6 +1560,7 @@ function ResolvedDesktopTabChip({
         tab: item.tab,
         index,
         tabCount,
+        onMakeVoiceTarget: makeVoiceTarget ?? undefined,
         onCopyResumeCommand,
         onCopyAgentId,
         onCopyTerminalId,
@@ -1572,6 +1576,7 @@ function ResolvedDesktopTabChip({
     [
       index,
       item.tab,
+      makeVoiceTarget,
       onCloseOtherTabs,
       onCloseTab,
       onCloseTabsToLeft,

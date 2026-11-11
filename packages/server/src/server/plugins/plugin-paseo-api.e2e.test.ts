@@ -537,3 +537,104 @@ test("keeps reload and enable responsive while compiling a real plugin", async (
     .parse(JSON.parse(stdout));
   for (const result of results) expect(result.blockingMs).toBeLessThan(20);
 });
+
+test("plugin voice uses the existing source-owned PCM transport and tears down on unload", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-voice-e2e-"));
+  roots.push(root);
+  const pluginDirectory = path.join(root, "voice-plugin");
+  await mkdir(pluginDirectory);
+  await mkdir(path.join(root, ".paseo"));
+  await writeFile(
+    path.join(root, ".paseo/config.json"),
+    JSON.stringify({
+      features: { voiceMode: { provider: { pluginId: "voice-fixture", providerId: "live" } } },
+    }),
+  );
+  await writeFile(
+    path.join(pluginDirectory, "paseo-plugin.json"),
+    JSON.stringify({ id: "voice-fixture", requirements: { paseo: ">=0.12.0" } }),
+  );
+  await writeFile(
+    path.join(pluginDirectory, "index.server.ts"),
+    `
+export default function contribute(server) {
+  server.registerVoiceProvider({ id: "live", label: "Fixture Live", async start({ agentId, paseo, emit, signal }) {
+    let sent = false;
+    console.log("voice started", agentId);
+    return {
+      async appendAudio(audio) {
+        if (sent) return;
+        sent = true;
+        emit({ type: "speech", isSpeaking: true });
+        await paseo.agents.ref(agentId).send("fixture voice request", { activeTurnBehavior: "steer_only" });
+        emit({ type: "audio", audio, utteranceId: "fixture-output", chunkIndex: 0, isLastChunk: true });
+      },
+      close() { console.log("voice closed", signal.aborted); },
+    };
+  } });
+  return () => {};
+}`,
+  );
+  const daemon = await createTestPaseoDaemon({
+    paseoHomeRoot: root,
+    daemonVersion: "0.12.0",
+    pluginsEnabled: true,
+    plugins: { "voice-fixture": { source: "directory", path: pluginDirectory, enabled: true } },
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+  });
+  const sibling = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.12.0",
+    capabilities: { plugin_voice_providers: false },
+  });
+  const audio: unknown[] = [];
+  const leakedAudio: unknown[] = [];
+  const ended: unknown[] = [];
+  client.on("audio_output", (message) => audio.push(message));
+  sibling.on("audio_output", (message) => leakedAudio.push(message));
+  client.on("voice_input_state", (message) => {
+    if (message.type === "voice_input_state" && message.payload.sessionEnded) ended.push(message);
+  });
+  try {
+    await client.connect();
+    await sibling.connect();
+    await client.observeEvents(["status.server_info"]).ready;
+
+    const created = await client.createAgent({ provider: "codex", cwd: root });
+    expect(client.getLastServerInfoMessage()?.features?.pluginVoiceProviders).toBe(true);
+    expect(client.getLastServerInfoMessage()?.capabilities?.voice?.provider).toEqual({
+      pluginId: "voice-fixture",
+      providerId: "live",
+    });
+    await expect(sibling.setVoiceMode(true, created.id)).rejects.toThrow("Update the Paseo app");
+    await client.setVoiceMode(true, created.id);
+    await client.sendVoiceAudioChunk("AAABAA==", "audio/pcm;rate=16000;bits=16");
+    await expect.poll(() => audio.length).toBe(1);
+    expect(audio[0]).toMatchObject({ payload: { format: "pcm" } });
+    expect(leakedAudio).toEqual([]);
+    const timeline = await client.fetchAgentTimeline(created.id);
+    expect(
+      timeline.entries.some(
+        (entry) =>
+          entry.item.type === "user_message" && entry.item.text.includes("fixture voice request"),
+      ),
+    ).toBe(true);
+    await client.disablePlugin("voice-fixture");
+    await expect.poll(() => ended.length).toBe(1);
+    await expect
+      .poll(() => client.getLastServerInfoMessage()?.capabilities?.voice?.voice.enabled)
+      .toBe(false);
+    expect(
+      (await client.getPluginLogs("voice-fixture")).filter((entry) =>
+        entry.message.includes("voice closed"),
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await client.close();
+    await sibling.close();
+    await daemon.close();
+  }
+}, 60_000);
