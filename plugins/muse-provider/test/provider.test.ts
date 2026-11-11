@@ -1889,6 +1889,82 @@ test("a joined muse-ws session wraps stdio MCP servers and stores the wrapper, n
   );
   expect(stored.wrapper).toEqual([wrapper]);
 });
+test("a daemon session reattached after idle re-declares stdio MCP with its env and wrapper", async () => {
+  const envDir = await daemonHome(false);
+  const wrapper = await writeWrapper();
+  const env = {
+    ...(await daemonEnv()),
+    PASEO_MUSE_SESSION_ENV_DIR: envDir,
+    ORBIT_BEAD: "bead-r",
+  };
+  const history = path.join(envDir, "native-history.ndjson");
+  const h = await harness(
+    "text-reasoning",
+    { MUSE_TEST_HISTORY: history },
+    { wrapper: [wrapper] },
+    PROVIDER_CAPABILITIES,
+    "muse-ws"
+  );
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  await h.send({
+    type: "session.open",
+    sessionId: "paseo-session",
+    requestId: "reattach",
+    history: "replay",
+    config: {
+      cwd: h.root,
+      env,
+      persist: true,
+      settings: {},
+      providerOptions: { wrapper: [wrapper] },
+      mcpServers: { srv: { type: "stdio", command: "mcp-bin", args: ["--x"] } },
+    },
+  });
+  // Fake the idle timer before open arms it; the open itself still waits on
+  // short timers, so step them until the session is ready.
+  for (
+    let tries = 0;
+    !h.events.some((e) => e.type === "session.ready") && tries < 500;
+    tries++
+  ) {
+    await vi.advanceTimersByTimeAsync(10);
+    await delay(10);
+  }
+  await h.wait((event) => event.type === "session.ready");
+  // One turn before idle writes the native history the resume replays.
+  const turnDone = () =>
+    h.events.filter((e) => e.type === "session.turn" && e.state === "completed")
+      .length;
+  await h.prompt();
+  for (let tries = 0; turnDone() < 1 && tries < 500; tries++) {
+    await vi.advanceTimersByTimeAsync(10);
+    await delay(10);
+  }
+  expect(turnDone()).toBe(1);
+  const hosts = async (event: string) =>
+    (await h.recorded()).filter((frame) => frame.event === event).length;
+  await vi.advanceTimersByTimeAsync(IDLE_MS);
+  for (let tries = 0; (await hosts("hostClosed")) === 0 && tries < 500; tries++)
+    await delay(10);
+  expect(await hosts("hostClosed")).toBe(1);
+  await h.prompt();
+  for (let tries = 0; turnDone() < 2 && tries < 500; tries++) {
+    await vi.advanceTimersByTimeAsync(10);
+    await delay(10);
+  }
+  expect(turnDone()).toBe(2);
+  const resume = (await h.recorded()).find(
+    (f) => f.method === "session/resume"
+  );
+  expect(resume.params.config.mcpServers.srv).toMatchObject({
+    command: wrapper,
+    args: ["mcp-bin", "--x"],
+    env: { ORBIT_BEAD: "bead-r" },
+  });
+  expect(await readdir(envDir)).toContain(
+    "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"
+  );
+}, 15000);
 test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
   const h = await harness();
   await h.open(undefined, "onRequest", "meta/muse-spark-1.3", { PASEO_MUSE_DAEMON: "0" });
