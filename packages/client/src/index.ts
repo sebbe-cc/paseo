@@ -115,6 +115,46 @@ export interface PaseoClientConfig {
 
 export type PaseoWorkspace = WorkspaceDescriptorPayload;
 export type PaseoAgent = AgentSnapshotPayload;
+
+/**
+ * A workspace's one base: what every view compares the checkout against.
+ * The daemon resolves it (pa-9av7 model): `ref` is the base ref (fully
+ * qualified for a branch base); `forkSha` is where the checkout branched from
+ * it (null when unknown); `missing` means the branch ref no longer exists and
+ * views compare against `forkSha` instead. Older daemons omit the field; read
+ * it with {@link workspaceBaseOf}, never by direct access.
+ */
+export interface PaseoWorkspaceBase {
+  ref: string;
+  forkSha: string | null;
+  missing: boolean;
+}
+
+function parseWorkspaceBase(base: unknown): PaseoWorkspaceBase | null {
+  if (!base || typeof base !== "object") return null;
+  const { ref, forkSha, missing } = base as Record<string, unknown>;
+  if (typeof ref !== "string" || ref === "") return null;
+  if (forkSha !== null && typeof forkSha !== "string") return null;
+  if (typeof missing !== "boolean") return null;
+  return { ref, forkSha, missing };
+}
+
+/**
+ * Read a workspace entry's base as resolved by the daemon: the descriptor's
+ * top-level base, else gitRuntime.base. Returns null when the daemon did not
+ * report one (older daemon, or non-git workspace), so callers never guess the
+ * branch. Malformed payloads also read as null; the entry itself stays usable.
+ */
+export function workspaceBaseOf(
+  workspace: PaseoWorkspace | null | undefined,
+): PaseoWorkspaceBase | null {
+  if (!workspace || typeof workspace !== "object") return null;
+  const top = (workspace as { base?: unknown }).base;
+  if (top !== undefined) return parseWorkspaceBase(top);
+  const gitRuntime = workspace.gitRuntime;
+  if (!gitRuntime || typeof gitRuntime !== "object") return null;
+  return parseWorkspaceBase((gitRuntime as { base?: unknown }).base);
+}
 export type PaseoAgentListOptions = FetchAgentsOptions;
 export type PaseoProject = WorkspaceProjectDescriptorPayload;
 export type PaseoProjectListOptions = Omit<ProjectListRequestMessage, "type" | "requestId"> & {
@@ -226,6 +266,12 @@ export interface PaseoWorkspaceActions {
     }
   >;
   list(options?: PaseoWorkspaceListOptions): Promise<PaseoWorkspaceListResult>;
+  /**
+   * Fetch one workspace by id, or null when no visible workspace has it.
+   * Pages through the daemon listing, so a background workspace resolves too
+   * on hosts that support them. The returned entry carries the daemon's
+   * resolved base (see {@link workspaceBaseOf}) once the daemon reports it.
+   */
   get(workspaceId: string, requestId?: string): Promise<PaseoWorkspace | null>;
   ref(workspace: string | PaseoWorkspace): PaseoWorkspaceHandle;
   open(
