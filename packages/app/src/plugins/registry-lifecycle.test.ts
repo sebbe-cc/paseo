@@ -62,6 +62,13 @@ function registry(
         openSettings: () => {},
         playAudio: async () => {},
         openPanel: () => {},
+        navigation: {
+          getActive: () => null,
+          subscribe: () => () => {},
+          activateWorkspace: () => false,
+          activateTab: () => false,
+        },
+        addKeyboardShortcut: () => () => {},
         addComposerPill: () => ({ update() {}, remove() {} }),
         addHeaderButton: () => ({ update() {}, remove() {} }),
         subscribe: () => {

@@ -3,7 +3,7 @@ import {
   useHardwareKeyboardPresent,
   useOverlayRegistration,
 } from "@/keyboard";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { View, Text, type PressableStateCallbackType } from "react-native";
 import { useIsFocused } from "expo-router/react-navigation";
@@ -32,6 +32,7 @@ import {
 } from "@/keyboard/keyboard-shortcuts";
 import {
   comboStringToShortcutKeys,
+  chordStringToShortcutKeys,
   heldModifiersFromEvent,
   keyboardEventToComboString,
 } from "@/keyboard/shortcut-string";
@@ -39,6 +40,7 @@ import type { ShortcutKey } from "@/utils/format-shortcut";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import { getDesktopHost } from "@/desktop/host";
+import { pluginKeyboardShortcuts } from "@/plugins/keyboard-shortcuts";
 
 const EMPTY_CAPTURED_COMBOS: string[] = [];
 
@@ -47,8 +49,12 @@ const ThemedPencil = withUnistyles(Pencil);
 const ThemedUndo2 = withUnistyles(Undo2);
 const ThemedX = withUnistyles(X);
 
-const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
-const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const foregroundColorMapping = (theme: Theme) => ({
+  color: theme.colors.foreground,
+});
+const foregroundMutedColorMapping = (theme: Theme) => ({
+  color: theme.colors.foregroundMuted,
+});
 
 const bindLeadingIcon = <ThemedPencil size={14} uniProps={foregroundMutedColorMapping} />;
 const clearLeadingIcon = <ThemedX size={14} uniProps={foregroundMutedColorMapping} />;
@@ -198,7 +204,9 @@ function ShortcutActionsMenu({
         hitSlop={8}
         style={triggerStyle}
         accessibilityRole="button"
-        accessibilityLabel={t("settings.shortcuts.actions.menu", { name: t(row.labelKey) })}
+        accessibilityLabel={t("settings.shortcuts.actions.menu", {
+          name: row.labelKey ? t(row.labelKey) : row.label,
+        })}
         testID={`shortcut-actions-${row.id}`}
       >
         {({ hovered, open }) => (
@@ -285,7 +293,7 @@ function ShortcutRow({
 
   return (
     <View style={rowStyle}>
-      <Text style={styles.rowLabel}>{t(row.labelKey)}</Text>
+      <Text style={styles.rowLabel}>{row.labelKey ? t(row.labelKey) : row.label}</Text>
       <View style={styles.rowActions}>
         <View style={styles.rowKeys}>
           <ShortcutRowKeys
@@ -341,12 +349,30 @@ export function KeyboardShortcutsSection() {
   const [heldModifiers, setHeldModifiers] = useState<string | null>(null);
   const { overrides, hasOverrides, setOverride, clearOverride, removeOverride, resetAll } =
     useKeyboardShortcutOverrides();
+  useSyncExternalStore(pluginKeyboardShortcuts.subscribe, pluginKeyboardShortcuts.getVersion);
   const setCapturingShortcut = useKeyboardShortcutsStore((s) => s.setCapturingShortcut);
   const capturing = useKeyboardShortcutsStore((s) => s.capturingShortcut);
 
   const isFocused = useIsFocused();
   const isMac = getShortcutOs() === "mac";
-  const sections = buildKeyboardShortcutHelpSections({ isMac, usesDesktopBindings });
+  const sections: Array<{
+    id: string;
+    titleKey: string;
+    rows: KeyboardShortcutHelpRow[];
+  }> = buildKeyboardShortcutHelpSections({ isMac, usesDesktopBindings });
+  const pluginBindings = pluginKeyboardShortcuts.list();
+  if (pluginBindings.length > 0) {
+    sections.push({
+      id: "plugins",
+      titleKey: "settings.sections.plugins",
+      rows: pluginBindings.map((binding) => ({
+        id: binding.bindingId!,
+        label: `${binding.pluginId}: ${binding.label}`,
+        labelKey: "",
+        chord: chordStringToShortcutKeys(binding.combo),
+      })),
+    });
+  }
 
   const cancelCapture = useCallback(() => {
     setCapturedCombos([]);
@@ -401,7 +427,9 @@ export function KeyboardShortcutsSection() {
       }
       setHeldModifiers(null);
       const capturedCombo = normalizeCapturedShortcutCombo(capturingBindingId, comboString);
-      setCapturedCombos((current) => [...current, capturedCombo]);
+      setCapturedCombos((current) =>
+        capturingBindingId.startsWith("plugin:") ? [capturedCombo] : [...current, capturedCombo],
+      );
       return true;
     },
   });
@@ -453,13 +481,24 @@ export function KeyboardShortcutsSection() {
             <View style={settingsStyles.card}>
               {section.rows.map(function (row, index) {
                 const platform = { isMac, usesDesktopBindings };
-                const bindingId = getBindingIdForAction(row.id, platform);
-                const displayChord = resolveShortcutKeysForAction(row.id, overrides, platform);
+                const pluginBinding = pluginBindings.find(
+                  (binding) => binding.bindingId === row.id,
+                );
+                const bindingId =
+                  pluginBinding?.bindingId ?? getBindingIdForAction(row.id, platform);
+                const pluginCombo = pluginBinding
+                  ? pluginKeyboardShortcuts.displayCombo(pluginBinding, overrides)
+                  : null;
+                let displayChord = resolveShortcutKeysForAction(row.id, overrides, platform);
+                if (pluginBinding) {
+                  displayChord = pluginCombo === null ? null : chordStringToShortcutKeys(pluginCombo);
+                }
                 // `in`, not a truthiness check: an unassigned shortcut stores
                 // null, and Reset has to stay available to undo it.
                 const hasOverride = bindingId !== null && bindingId in overrides;
                 // A binding authored with `combo: ""` has nothing to reset to.
-                const hasDefault = getDefaultKeysForAction(row.id, platform) !== null;
+                const hasDefault =
+                  pluginBinding !== undefined || getDefaultKeysForAction(row.id, platform) !== null;
 
                 return (
                   <View key={row.id}>
