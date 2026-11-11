@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, writeFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +10,7 @@ import {
   diffWorkspaceGitRemoteRefs,
   fetchWorkspaceGitRemote,
   parseWorkspaceGitRefs,
+  readStoredRemoteBaseRefs,
 } from "./workspace-git-fetch.js";
 import { runGitCommand, type RunGitCommand } from "../utils/run-git-command.js";
 
@@ -23,6 +25,9 @@ describe("workspace Git remote refs", () => {
           GIT_TERMINAL_PROMPT: "0",
           GIT_ASKPASS: "",
           GCM_INTERACTIVE: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "remote.origin.followRemoteHEAD",
+          GIT_CONFIG_VALUE_0: "always",
         });
       }
       const stdout =
@@ -247,3 +252,209 @@ test.skipIf(process.platform === "win32")(
     });
   },
 );
+
+interface LocalRemoteFixture {
+  root: string;
+  remote: string;
+  clone: string;
+  git: (cwd: string, ...args: string[]) => string;
+}
+
+// A clone of a real local repository. The remote has main, keep and gone; the clone has a linked
+// worktree whose paseo/worktree.json says it was cut from refs/remotes/origin/keep.
+async function withLocalRemote(verify: (fixture: LocalRemoteFixture) => Promise<void>) {
+  const root = await mkdtemp(join(tmpdir(), "paseo-fetch-prune-"));
+  const remote = join(root, "remote");
+  const clone = join(root, "clone");
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: join(root, "gitconfig"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "Fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+  };
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
+  try {
+    await writeFile(join(root, "gitconfig"), "");
+    await mkdir(remote);
+    git(remote, "init", "--initial-branch=main");
+    git(remote, "commit", "--allow-empty", "-m", "initial");
+    git(remote, "branch", "keep");
+    git(remote, "branch", "gone");
+    git(root, "clone", "-q", remote, clone);
+    git(
+      clone,
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      "topic",
+      join(root, "topic"),
+      "refs/remotes/origin/keep",
+    );
+    const adminDir = join(clone, ".git", "worktrees", "topic", "paseo");
+    await mkdir(adminDir);
+    await writeFile(
+      join(adminDir, "worktree.json"),
+      JSON.stringify({ version: 1, baseRefName: "keep", baseRef: "refs/remotes/origin/keep" }),
+    );
+    await verify({ root, remote, clone, git });
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+const gitRunner: RunGitCommand = (args, options) =>
+  runGitCommand(args, {
+    ...options,
+    envOverlay: {
+      ...options.envOverlay,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    },
+  });
+
+describe("background fetch of a repository with Paseo worktrees", () => {
+  test("reads stored remote bases from every worktree of the repository", async () => {
+    await withLocalRemote(async ({ clone }) => {
+      const mainAdmin = join(clone, ".git", "paseo");
+      await mkdir(mainAdmin);
+      await writeFile(
+        join(mainAdmin, "worktree.json"),
+        JSON.stringify({ version: 1, baseRefName: "legacy" }),
+      );
+      expect(await readStoredRemoteBaseRefs(join(clone, ".git"))).toEqual(
+        new Set(["refs/remotes/origin/keep", "refs/remotes/origin/legacy"]),
+      );
+    });
+  });
+
+  test("keeps a pruned remote ref that a worktree stores as its base", async () => {
+    await withLocalRemote(async ({ root, remote, clone, git }) => {
+      const keptOid = git(clone, "rev-parse", "refs/remotes/origin/keep");
+      git(remote, "commit", "--allow-empty", "-m", "second");
+      git(remote, "branch", "-D", "keep", "gone");
+
+      const result = await fetchWorkspaceGitRemote(
+        join(root, "topic"),
+        { onRefSnapshot() {} },
+        gitRunner,
+      );
+
+      expect(result.error).toBeNull();
+      expect(git(clone, "rev-parse", "refs/remotes/origin/keep")).toBe(keptOid);
+      expect(git(clone, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/gone")).toBe(
+        "",
+      );
+      expect(result.changes).toContainEqual({
+        kind: "deleted",
+        ref: "origin/gone",
+        beforeOid: keptOid,
+      });
+      expect(result.changes).not.toContainEqual(expect.objectContaining({ ref: "origin/keep" }));
+      expect(git(clone, "rev-parse", "refs/remotes/origin/main")).toBe(
+        git(remote, "rev-parse", "main"),
+      );
+    });
+  });
+
+  test("still moves a stored base while the remote has it", async () => {
+    await withLocalRemote(async ({ root, remote, clone, git }) => {
+      git(remote, "checkout", "-q", "keep");
+      git(remote, "commit", "--allow-empty", "-m", "moved");
+      git(remote, "checkout", "-q", "main");
+
+      await fetchWorkspaceGitRemote(join(root, "topic"), { onRefSnapshot() {} }, gitRunner);
+
+      expect(git(clone, "rev-parse", "refs/remotes/origin/keep")).toBe(
+        git(remote, "rev-parse", "keep"),
+      );
+    });
+  });
+
+  test("never moves local branches", async () => {
+    await withLocalRemote(async ({ remote, clone, git }) => {
+      const localMain = git(clone, "rev-parse", "refs/heads/main");
+      git(remote, "commit", "--allow-empty", "-m", "ahead");
+
+      await fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, gitRunner);
+
+      expect(git(clone, "rev-parse", "refs/heads/main")).toBe(localMain);
+      expect(git(clone, "rev-parse", "refs/remotes/origin/main")).toBe(
+        git(remote, "rev-parse", "main"),
+      );
+    });
+  });
+
+  test("removes a packed-refs.new left by a killed git so the prune succeeds", async () => {
+    await withLocalRemote(async ({ remote, clone, git }) => {
+      git(clone, "pack-refs", "--all");
+      const leftover = join(clone, ".git", "packed-refs.new");
+      await writeFile(leftover, "");
+      const anHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      await utimes(leftover, anHourAgo, anHourAgo);
+      git(remote, "branch", "-D", "gone");
+
+      const result = await fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, gitRunner);
+
+      expect(result.error).toBeNull();
+      expect(git(clone, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/gone")).toBe(
+        "",
+      );
+    });
+  });
+
+  test("leaves a fresh packed-refs.lock alone", async () => {
+    await withLocalRemote(async ({ clone }) => {
+      const lock = join(clone, ".git", "packed-refs.lock");
+      await writeFile(lock, "");
+
+      await fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, gitRunner);
+
+      await expect(stat(lock)).resolves.toBeTruthy();
+    });
+  });
+
+  test("serializes fetches started from different worktrees of one repository", async () => {
+    await withLocalRemote(async ({ root, clone }) => {
+      let running = 0;
+      let maxRunning = 0;
+      const run: RunGitCommand = async (args, options) => {
+        const isFetch = args.includes("fetch");
+        if (isFetch) {
+          running += 1;
+          maxRunning = Math.max(maxRunning, running);
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+        }
+        try {
+          return await gitRunner(args, options);
+        } finally {
+          if (isFetch) running -= 1;
+        }
+      };
+
+      await Promise.all([
+        fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, run),
+        fetchWorkspaceGitRemote(join(root, "topic"), { onRefSnapshot() {} }, run),
+        fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, run),
+      ]);
+
+      expect(maxRunning).toBe(1);
+    });
+  });
+
+  test("updates origin/HEAD when the remote changes its default branch", async () => {
+    await withLocalRemote(async ({ remote, clone, git }) => {
+      git(remote, "symbolic-ref", "HEAD", "refs/heads/keep");
+
+      await fetchWorkspaceGitRemote(clone, { onRefSnapshot() {} }, gitRunner);
+
+      expect(git(clone, "symbolic-ref", "refs/remotes/origin/HEAD")).toBe(
+        "refs/remotes/origin/keep",
+      );
+    });
+  });
+});
