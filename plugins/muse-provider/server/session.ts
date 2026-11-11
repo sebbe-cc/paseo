@@ -1,18 +1,25 @@
-import type {
-  ProviderEvent,
-  ProviderInput,
-  ProviderLaunch,
-  ProviderPersistence,
-  ProviderSessionConfig,
-  ProviderConfigChanges,
-  ProviderPrompt,
-  ProviderPermissionResponse,
-  ProviderMcpServerConfig,
-  ProviderCatalog,
-  ProviderToolCallDetail,
+import {
+  supportsSubsessions,
+  type ProviderEvent,
+  type ProviderInput,
+  type ProviderLaunch,
+  type ProviderPersistence,
+  type ProviderSessionConfig,
+  type ProviderConfigChanges,
+  type ProviderPrompt,
+  type ProviderPermissionResponse,
+  type ProviderMcpServerConfig,
+  type ProviderCatalog,
+  type ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
 import type { z } from "zod";
-import { MspConnection, commandId, type Notification } from "./connection.js";
+import {
+  MspConnection,
+  SESSION_OPEN_TIMEOUT_MS,
+  commandId,
+  type Notification,
+} from "./connection.js";
+import { IdleHost } from "./idle-host.js";
 import { MuseError, actionableError } from "./errors.js";
 import { Timeline, todoItem } from "./timeline.js";
 import { modes, efforts, presentCatalog } from "./catalog.js";
@@ -31,6 +38,7 @@ import {
   notificationSchema,
   persistenceSchema,
   promptResultSchema,
+  sessionReadSchema,
   sessionSchema,
   turnSchema,
   tokenUsageSchema,
@@ -44,14 +52,23 @@ import { Children } from "./children.js";
 import { Recovery } from "./recovery.js";
 import { Questions } from "./questions.js";
 import { Commands } from "./commands.js";
+import { installSessionEnvScripts, removeSessionEnv, writeSessionEnv } from "./session-env.js";
 
 interface SessionOptions {
   serveArgs: string[];
+  // Daemon mode serves every host of this session from the shared Muse session
+  // daemon. There is no own-process fallback: a daemon that does not answer
+  // fails the session with daemonUnavailable.
+  daemon: boolean;
   id: string;
   config: ProviderSessionConfig;
   launch: ProviderLaunch;
   emit(event: ProviderEvent): void;
   capabilities: readonly string[];
+  // Confines the session to its worktree: an own host runs `muse serve`
+  // through it; a joined session (the daemon cannot sit in one sandbox per
+  // agent) runs its command tools and stdio MCP servers through it.
+  wrapper?: string[];
 }
 
 interface Live {
@@ -64,7 +81,7 @@ interface Live {
 }
 
 export class Session {
-  private readonly host: MspConnection;
+  private host: IdleHost;
   private liveState: Live | undefined;
   private providerId: string | undefined;
   private config: ProviderSessionConfig;
@@ -77,6 +94,7 @@ export class Session {
   private opening = true;
   private closing = false;
   private firstTurn = true;
+  private envDir: string | undefined;
   private interruptCompletion: {
     turnId: string;
     resolve(): void;
@@ -85,25 +103,72 @@ export class Session {
 
   constructor(private readonly options: SessionOptions) {
     this.config = options.config;
-    this.host = new MspConnection({
-      launch: { ...options.launch, env: { ...options.launch.env, ...options.config.env } },
-      cwd: options.config.cwd,
-      serveArgs: options.serveArgs,
-    });
-    this.host.onNotification((notification) => {
+    this.host = this.spawn(options.daemon);
+  }
+
+  // The idle host respawns through this factory, so a joined session rejoins
+  // the daemon on wake and a fallen-back session keeps its own process.
+  private spawn(join: boolean): IdleHost {
+    const { launch, wrapper } = this.options;
+    // A joined host is only the client of the shared daemon: it stays outside
+    // the wrapper, which then applies per command (see session-env.ts).
+    const wrapHost = wrapper && !join;
+    const host = new IdleHost(
+      () =>
+        new MspConnection({
+          launch: {
+            ...launch,
+            command: wrapHost ? wrapper[0]! : launch.command,
+            args: wrapHost ? [...wrapper.slice(1), launch.command, ...launch.args] : launch.args,
+            env: { ...launch.env, ...this.config.env },
+          },
+          cwd: this.options.config.cwd,
+          serveArgs: join ? [...this.options.serveArgs, "--join"] : this.options.serveArgs,
+        }),
+    );
+    host.onNotification((notification) => {
       if (this.opening) this.buffered.push(notification);
       else this.enqueue(notification);
     });
-    this.host.onExit((error) => {
+    host.onExit((error) => {
       if (!this.opening && !this.closing) this.runtimeFailed(error);
     });
+    return host;
+  }
+
+  // An own host spawns stdio MCP servers as its children, so they inherit the
+  // session's launch environment. The shared daemon spawns them with only their
+  // declared `env`, so daemon sessions declare the launch environment under it.
+  private sessionMcpServers(): Record<string, SessionMcpServerConfig> {
+    const inherited = this.options.daemon ? this.launchEnv() : undefined;
+    const wrapper = this.options.daemon ? this.options.wrapper : undefined;
+    return Object.fromEntries(
+      Object.entries(this.config.mcpServers).map(([id, server]) => [
+        id,
+        mcpServer(server, inherited, wrapper),
+      ]),
+    );
+  }
+
+  // Daemon sessions: the shared daemon runs command tools with its own
+  // environment, so the session's launch environment is stored where the
+  // daemon's PreToolUse hook finds it by session id (see session-env.ts).
+  private launchEnv(): Record<string, string> {
+    return { ...this.options.launch.env, ...this.config.env };
+  }
+  private async storeSessionEnv(nativeId: string): Promise<void> {
+    if (!this.options.daemon) return;
+    this.envDir ??= await installSessionEnvScripts(this.launchEnv());
+    await writeSessionEnv(this.envDir, nativeId, this.launchEnv(), this.options.wrapper);
   }
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
+    await this.openOnHost(input);
+  }
+
+  private async openOnHost(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.host.initialize();
-    const mcpServers = Object.fromEntries(
-      Object.entries(this.config.mcpServers).map(([id, server]) => [id, mcpServer(server)]),
-    );
+    const mcpServers = this.sessionMcpServers();
     let response;
     if (input.persistence) {
       if (input.persistence.version !== 1)
@@ -111,11 +176,7 @@ export class Session {
       const saved = persistenceSchema.parse(input.persistence.data);
       // A fresh timeline needs history. MSP cursor resumes return only the suffix,
       // so even legacy persistence cursors cannot restore this session's projection.
-      response = await this.host.command(
-        "session/resume",
-        { sessionId: saved.sessionId, config: { mcpServers } },
-        sessionSchema,
-      );
+      response = await this.resumeSession(this.host, saved.sessionId, mcpServers);
       this.config = {
         ...this.config,
         model: this.config.model ?? saved.model,
@@ -132,6 +193,7 @@ export class Session {
           config: { mcpServers },
         },
         sessionSchema,
+        SESSION_OPEN_TIMEOUT_MS,
       );
     }
     if (!response.viewCursor)
@@ -140,9 +202,17 @@ export class Session {
         "Muse returned an empty resume viewCursor; this session cannot be watched.",
       );
     const nativeId = response.session.sessionId;
+    // Before any turn can run a command.
+    await this.storeSessionEnv(nativeId);
     this.liveState = {
       nativeId,
-      children: new Children(this.host, this.options.id, this.config.cwd, this.options.emit),
+      children: new Children(
+        this.host,
+        this.options.id,
+        this.config.cwd,
+        this.options.emit,
+        supportsSubsessions(this.options.capabilities),
+      ),
       timeline: new Timeline(
         this.host,
         nativeId,
@@ -156,7 +226,7 @@ export class Session {
         this.host,
         nativeId,
         response.viewCursor,
-        (event) => this.notify(event),
+        (event) => this.notify(event, "backfill"),
         () => {
           this.notifications = this.notifications
             .then(async () => {
@@ -169,9 +239,13 @@ export class Session {
       ),
     };
     this.providerId = response.session.providerId ?? undefined;
+    const nativeModel = response.session.modelId ?? undefined;
+    const configuredModel = this.config.model;
+    if (input.persistence)
+      await this.reselectModelAfterResume(nativeId, nativeModel, configuredModel);
     this.config = {
       ...this.config,
-      model: response.session.modelId ?? this.config.model,
+      model: configuredModel ?? nativeModel,
       mode: response.session.approvalMode?.mode ?? this.config.mode ?? "onRequest",
     };
     this.options.emit({
@@ -195,6 +269,10 @@ export class Session {
     this.buffered.length = 0;
     await this.notifications;
     await this.readCatalog();
+    // session/start has no effort slot and session/resume does not restore it,
+    // so mirror the effective level into the host default now that the catalog
+    // default is known. Fresh and resumed sessions converge here alike.
+    await this.applyReasoningEffort();
     await this.live().commands.refresh();
     this.publishPersistence();
     this.publishConfig();
@@ -203,11 +281,84 @@ export class Session {
       requestId: input.requestId,
       sessionId: this.options.id,
     });
+    this.host.arm({ reopen: (host) => this.reattach(host), busy: (host) => this.busy(host) });
+  }
+
+  get awake(): boolean {
+    return this.host.awake;
+  }
+  // The idle host ran no turn, so the timeline is current; only the view cursor is new.
+  // A daemon session re-declares its stdio MCP servers with the session env and
+  // wrapper, as at open; its env file stays in place until close.
+  private async reattach(host: MspConnection): Promise<void> {
+    await host.initialize();
+    const response = await this.resumeSession(host, this.live().nativeId, this.sessionMcpServers());
+    if (response.viewCursor) this.live().recovery.activity(response.viewCursor, false);
+  }
+  // The shared daemon keeps a session loaded after its client goes (a Paseo
+  // restart mid-turn, an idle host), and a warm resume must then declare the
+  // exact MCP configuration the session was loaded with, or Muse rejects it.
+  // A daemon session inlines its launch environment into stdio MCP servers, so
+  // a Paseo deploy that moves a store path on PATH changes that configuration.
+  // The loaded runtime already runs the session's MCP servers: attach to it
+  // without re-declaring them. A cold load still gets the current servers.
+  private async resumeSession(
+    host: Pick<MspConnection, "command">,
+    sessionId: string,
+    mcpServers: Record<string, SessionMcpServerConfig>,
+  ) {
+    const resume = (config: { mcpServers?: Record<string, SessionMcpServerConfig> }) =>
+      host.command("session/resume", { sessionId, config }, sessionSchema, SESSION_OPEN_TIMEOUT_MS);
+    try {
+      return await resume({ mcpServers });
+    } catch (error) {
+      if (!this.options.daemon || !isLoadedMcpConflict(error)) throw error;
+      console.warn(
+        `[muse-provider] Muse session ${sessionId} is loaded in the daemon with other MCP ` +
+          "configuration; attaching to the loaded runtime and its MCP servers",
+      );
+      return resume({});
+    }
+  }
+  private async busy(host: MspConnection): Promise<boolean> {
+    if (this.closing || this.activeTurnIds().length > 0 || this.approvals.size > 0) return true;
+    try {
+      const read = await host.request(
+        "session/read",
+        { sessionId: this.live().nativeId },
+        sessionReadSchema,
+      );
+      return read.session.activeTurnId !== null;
+    } catch {
+      return true;
+    }
   }
 
   private live(): Live {
     if (!this.liveState) throw new MuseError("sessionNotOpen", "Muse session is not open");
     return this.liveState;
+  }
+
+  private async reselectModelAfterResume(
+    nativeId: string,
+    nativeModel: string | undefined,
+    configuredModel: string | undefined,
+  ): Promise<void> {
+    // The native session keeps its standing model across restarts, which drifts
+    // away from the configured model (e.g. contributor -> base). Keep the
+    // configured model and re-select it so the next turn uses it.
+    if (!configuredModel || !nativeModel || nativeModel === configuredModel) return;
+    process.stderr.write(
+      `Muse session ${nativeId} model drift on resume: native ${nativeModel} != configured ${configuredModel}; re-selecting configured model\n`,
+    );
+    await this.host.command(
+      "session/setModel",
+      {
+        sessionId: nativeId,
+        model: { providerId: this.providerId, modelId: configuredModel },
+      },
+      ackSchema,
+    );
   }
 
   private async restorePending(
@@ -235,16 +386,48 @@ export class Session {
     };
   }
 
+  private effectiveReasoningEffort(): z.infer<typeof effortSchema> | undefined {
+    const configured = effortSchema.safeParse(this.config.thinkingOption);
+    if (configured.success) return configured.data;
+    const selected = this.catalog.models.find((model) => model.id === this.config.model);
+    const catalogDefault = effortSchema.safeParse(selected?.defaultThinkingOptionId);
+    return catalogDefault.success ? catalogDefault.data : undefined;
+  }
+
+  private async applyReasoningEffort(): Promise<void> {
+    const reasoningEffort = this.effectiveReasoningEffort();
+    if (!reasoningEffort) return;
+    try {
+      await this.host.command(
+        "session/setReasoningEffort",
+        { sessionId: this.live().nativeId, reasoningEffort },
+        ackSchema,
+      );
+    } catch (error) {
+      // Hosts that predate session/setReasoningEffort keep working: every
+      // turn/start still carries the level. Mirror failure must never break
+      // open or configure.
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Muse reasoning effort default not applied: ${detail}\n`);
+    }
+  }
+
   async prompt(prompt: ProviderPrompt): Promise<void> {
     if (await this.live().commands.compact(prompt)) return;
     const id = commandId();
     this.messages.set(id, prompt.clientMessageId);
     const input: TurnStartParams["input"] = [];
     const text: string[] = [];
+    // Muse's own servers send system context as <system-reminder source="…">;
+    // match that shape (attribute name and newlines) so the model treats the
+    // Paseo system prompt as its own reminder rather than foreign markup.
+    // config.systemPrompt already carries the composed prompt for create,
+    // resume and turn_prepare context (pa-89is1.4), so this one send-point
+    // covers all three.
     if (this.firstTurn && this.config.systemPrompt)
       input.push({
         type: "text",
-        text: `<system_instructions>\n${this.config.systemPrompt}\n</system_instructions>`,
+        text: `<system-reminder source="paseo-system-prompt">\n${this.config.systemPrompt}\n</system-reminder>`,
       });
     if (prompt.input.type === "command") {
       input.push(this.live().commands.input(prompt.input));
@@ -296,11 +479,13 @@ export class Session {
       );
       this.config = { ...this.config, model: changes.model };
     }
-    // Muse receives configured thinking effort on each turn/start, rather than a session mutation.
+    // The chosen level rides each turn/start and is also mirrored into the
+    // host's standing session default below, so host-side work observes it.
     if (changes.thinkingOption !== undefined) {
       const thinkingOption =
         changes.thinkingOption === null ? undefined : effortSchema.parse(changes.thinkingOption);
       this.config = { ...this.config, thinkingOption };
+      await this.applyReasoningEffort();
     }
     if (changes.mode !== undefined) {
       const mode = approvalModeSchema.parse(changes.mode ?? "onRequest");
@@ -356,19 +541,33 @@ export class Session {
     return this.host.request("usage/read", {}, usageSchema);
   }
   async interrupt(): Promise<void> {
-    const turnId = this.activeTurnIds().at(-1);
-    if (!turnId) return;
+    let turnId = this.activeTurnIds().at(-1);
+    if (!turnId) {
+      // Local bookkeeping may have lost a still-running native turn (a
+      // backfilled terminal applied while the live stream was down). Confirm
+      // with the host before giving up: without this the cancel is a silent
+      // no-op and the run continues behind Paseo's back.
+      turnId = (await this.nativeActiveTurnId()) ?? undefined;
+      if (!turnId) return;
+    }
     let timer: ReturnType<typeof setTimeout>;
     const completion = new Promise<void>((resolve, reject) => {
       this.interruptCompletion = { turnId, resolve, reject };
       timer = setTimeout(() => {
-        this.runtimeFailed(
-          new MuseError(
-            "interruptTimeout",
-            "Muse did not confirm cancellation within 10000ms. Reopen the session before sending another prompt.",
-          ),
+        const failure = new MuseError(
+          "interruptTimeout",
+          "Muse did not confirm cancellation within 10000ms. Reopen the session before sending another prompt.",
         );
-        void this.host.close();
+        // The host is about to be closed and can never confirm: terminate the
+        // interrupted turn locally so it cannot linger as active. Without this
+        // a later interrupt re-targets the dead turn on a closed host and the
+        // session never settles back to idle (pa-qd0ijb).
+        this.failInterruptedTurn(turnId, failure);
+        this.runtimeFailed(failure);
+        // The interrupt timeout already failed the session; a slow host
+        // shutdown must never surface as an unhandled rejection (it crashed
+        // the daemon). Swallow it here; close() callers still see failures.
+        void this.host.close().catch(() => {});
       }, 10000);
     });
     try {
@@ -381,9 +580,22 @@ export class Session {
       this.interruptCompletion = null;
     }
   }
+  private failInterruptedTurn(turnId: string, error: MuseError): void {
+    if (this.turns.get(turnId) !== "active") return;
+    this.turns.set(turnId, "completed");
+    this.options.emit({
+      type: "session.turn",
+      sessionId: this.options.id,
+      turnId,
+      state: "failed",
+      error: actionableError(error, this.options.launch),
+    });
+  }
   async close(): Promise<void> {
     this.closing = true;
     if (this.liveState) this.live().recovery.close();
+    if (this.envDir && this.liveState)
+      await removeSessionEnv(this.envDir, this.live().nativeId).catch(() => {});
     await this.host.close();
     await this.notifications;
     if (this.liveState) this.live().children.close();
@@ -403,16 +615,22 @@ export class Session {
     const interrupt = this.interruptCompletion;
     if (interrupt) interrupt.reject(error instanceof Error ? error : new Error(String(error)));
   }
-  private async notify(notification: Notification): Promise<void> {
+  private async notify(
+    notification: Notification,
+    origin: "live" | "backfill" = "live",
+  ): Promise<void> {
     const envelope = notificationSchema.parse(notification.params);
     if (envelope.sessionId && envelope.sessionId !== this.live().nativeId) {
       await this.live().children.notify(envelope.sessionId, notification);
       return;
     }
-    await this.processNotification(notification);
+    await this.processNotification(notification, origin);
     this.live().recovery.activity(envelope.viewCursor, this.activeTurnIds().length > 0);
   }
-  private async processNotification(notification: Notification): Promise<void> {
+  private async processNotification(
+    notification: Notification,
+    origin: "live" | "backfill" = "live",
+  ): Promise<void> {
     switch (notification.method) {
       case "view/gap":
         // The gap lower bound remains authoritative even if a later live event arrived first.
@@ -462,7 +680,7 @@ export class Session {
         this.startTurn(notification.params);
         break;
       case "turn/completed":
-        this.completeTurn(notification.params);
+        await this.completeTurn(notification.params, origin);
         break;
       case "session/tokenUsage": {
         const params = tokenUsageSchema.parse(notification.params);
@@ -510,9 +728,42 @@ export class Session {
   private activeTurnIds(): string[] {
     return [...this.turns].filter(([, state]) => state === "active").map(([id]) => id);
   }
-  private completeTurn(input: unknown): void {
+  private async nativeActiveTurnId(): Promise<string | null> {
+    if (!this.liveState || this.closing) return null;
+    try {
+      const read = await this.host.request(
+        "session/read",
+        { sessionId: this.live().nativeId },
+        sessionReadSchema,
+      );
+      return read.session.activeTurnId;
+    } catch {
+      return null;
+    }
+  }
+  private async nativeTurnStillActive(turnId: string): Promise<boolean> {
+    return (await this.nativeActiveTurnId()) === turnId;
+  }
+  private async completeTurn(input: unknown, origin: "live" | "backfill"): Promise<void> {
     const params = turnSchema.parse(input);
-    if (this.turns.get(params.turnId) !== "active") return;
+    if (this.turns.get(params.turnId) !== "active") {
+      // A live terminal always owns the run it names: release a racing
+      // interrupt even when local bookkeeping already lost the turn.
+      if (origin === "live" && this.interruptCompletion?.turnId === params.turnId)
+        this.interruptCompletion.resolve();
+      return;
+    }
+    if (origin === "backfill" && (await this.nativeTurnStillActive(params.turnId))) {
+      // The silence/gap repair replayed a terminal for a run the host still
+      // considers active. Accepting it would fail the turn while Muse keeps
+      // working and lose the run for later interrupts (phantom
+      // "Muse turn failed"). Keep the turn active; the live terminal will
+      // complete it when the run really ends.
+      console.warn(
+        `[muse-provider] ignoring backfilled turn/completed for still-active native turn ${params.turnId}: ${JSON.stringify(params)}`,
+      );
+      return;
+    }
     this.turns.set(params.turnId, "completed");
     let state: "completed" | "canceled" | "failed" = "completed";
     let error;
@@ -623,13 +874,27 @@ export class Session {
     });
   }
 }
-function mcpServer(server: ProviderMcpServerConfig): SessionMcpServerConfig {
+// Muse 1.4.15 rejects a warm resume whose mcpServers differ from the loaded
+// session's with this commandRejected message (no finer kind on the wire).
+function isLoadedMcpConflict(error: unknown): boolean {
+  return (
+    error instanceof MuseError &&
+    error.kind === "commandRejected" &&
+    error.message.includes("session MCP configuration conflicts with the loaded session runtime")
+  );
+}
+
+function mcpServer(
+  server: ProviderMcpServerConfig,
+  inherited?: Record<string, string>,
+  wrapper?: string[],
+): SessionMcpServerConfig {
   if (server.type === "stdio")
     return {
       transport: "stdio",
-      command: server.command,
-      args: server.args,
-      env: server.env,
+      command: wrapper ? wrapper[0]! : server.command,
+      args: wrapper ? [...wrapper.slice(1), server.command, ...(server.args ?? [])] : server.args,
+      env: inherited ? { ...inherited, ...server.env } : server.env,
       framing: "lineDelimitedJson",
     };
   return { transport: "streamableHttp", url: server.url, headers: server.headers };
