@@ -1409,9 +1409,20 @@ export const createWorktree = async ({
       });
     }
 
+    // pa-9av7: save the fork point with a branch base so a later-deleted base still compares.
+    const forkSha =
+      sourcePlan.metadataBaseRef && /^refs\/(heads|remotes)\//.test(sourcePlan.metadataBaseRef)
+        ? (
+            await runGitCommand(["merge-base", sourcePlan.metadataBaseRef, "HEAD"], {
+              cwd: worktreePath,
+              acceptExitCodes: [0, 1],
+            })
+          ).stdout.trim()
+        : "";
     await writePaseoWorktreeMetadata(worktreePath, {
       baseRefName: sourcePlan.metadataBaseRefName,
       ...(sourcePlan.metadataBaseRef ? { baseRef: sourcePlan.metadataBaseRef } : {}),
+      ...(forkSha ? { forkSha } : {}),
       ...(sourcePlan.changeRequestLookupTarget
         ? { changeRequestLookupTarget: sourcePlan.changeRequestLookupTarget }
         : {}),
@@ -1857,13 +1868,17 @@ async function resolveBaseBranchForWorktree(
     }
   }
 
-  const candidates = [`refs/heads/${requested}`, `refs/remotes/origin/${requested}`, requested];
+  // A published branch resolves against its remote-tracking ref: the local branch may be
+  // stale (local main/master never move on fetch) or carry unpushed work, and the new
+  // worktree must start from what the base means everywhere else. Local-only branches
+  // (orbit-base/*, sprint epics, push-none) have no remote ref and keep the local one.
+  const candidates = [`refs/remotes/origin/${requested}`, `refs/heads/${requested}`, requested];
   for (const candidate of candidates) {
     try {
       await runGitCommand(["rev-parse", "--verify", candidate], { cwd });
       return candidate;
     } catch {
-      // Try the next unambiguous local, remote, or legacy ref candidate.
+      // Try the next unambiguous remote, local, or legacy ref candidate.
     }
   }
   throw new Error(`Base branch not found: ${normalized}`);

@@ -32,9 +32,6 @@ function promptMessages(session: FakePiSession): string[] {
   return session.prompts.map((prompt) => prompt.message);
 }
 
-function completedTurnEvents(events: AgentStreamEvent[]): AgentStreamEvent[] {
-  return events.filter((event) => event.type === "turn_completed");
-}
 import { createPiExtensionHost } from "./extensions/index.js";
 import { PiExtensionHost } from "./extensions/host.js";
 import type { PiModel, PiThinkingLevel } from "./rpc-types.js";
