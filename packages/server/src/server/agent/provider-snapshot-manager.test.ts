@@ -438,6 +438,55 @@ describe("ProviderSnapshotManager public surface", () => {
     }
   });
 
+  test("an unavailable probe is retried with backoff until the provider is available", async () => {
+    // pa-4ua43: the first probe after a daemon start under load can time out.
+    // The snapshot must heal on its own; no manual diagnostic may be needed.
+    let probeAnswers = false;
+    const isAvailable = vi.fn(async () => probeAnswers);
+    const fetchCatalog = vi.fn(async () => ({
+      models: [
+        {
+          provider: "codex",
+          id: "gpt-5.4-mini",
+          label: "GPT 5.4 Mini",
+        },
+      ] as AgentModelDefinition[],
+      modes: [] as AgentMode[],
+    }));
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        claude: { enabled: false },
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+      },
+      extraClients: { codex: createExtraClient("codex", { isAvailable, fetchCatalog }) },
+      unavailableRetryDelaysMs: [20],
+      unavailableRetryIntervalMs: 20,
+    });
+    try {
+      const first = await manager.getProvider({
+        cwd: "/tmp/project",
+        provider: "codex",
+        wait: true,
+      });
+      expect(first.status).toBe("unavailable");
+
+      probeAnswers = true;
+      const deadline = Date.now() + 5000;
+      let entry = await manager.getProvider({ cwd: "/tmp/project", provider: "codex" });
+      while (entry.status !== "ready" && Date.now() < deadline) {
+        await waitForDelay(10);
+        entry = await manager.getProvider({ cwd: "/tmp/project", provider: "codex" });
+      }
+      expect(entry.status).toBe("ready");
+      expect(isAvailable.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      manager.destroy();
+    }
+  });
+
   test("wait:true returns a warm provider without refreshing it", async () => {
     const cwd = "/tmp/project";
     const isAvailable = vi.fn(async () => true);

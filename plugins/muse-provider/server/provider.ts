@@ -1,6 +1,7 @@
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
+  supportsSubsessions,
   type ProviderConnection,
   type ProviderEvent,
   type ProviderInput,
@@ -8,7 +9,7 @@ import {
   type ProviderRegistration,
   type ProviderStatus,
 } from "@getpaseo/plugin/server/provider";
-import { serveArgs } from "./options.js";
+import { daemonSocket, isDaemonSession, probeDaemon, serveArgs } from "./options.js";
 import { Usage } from "./usage.js";
 import { execCommand } from "@getpaseo/plugin/server";
 import { Catalog, launchKey } from "./catalog.js";
@@ -27,9 +28,14 @@ const capabilities = [
   "session.persistence",
   "permission",
   "session.list",
+  "session.subsession",
 ] as const;
 
 export function createMuseProvider(usage: Usage): ProviderRegistration {
+  // Whether the last connected daemon offered session.subsession. Unknown
+  // until the first connect; a daemon that never offers it cannot project
+  // Muse's parallel subagents and workflows as Paseo child sessions.
+  let subsessionOffered: boolean | undefined;
   return {
     id: "muse",
     label: "Muse Code",
@@ -42,12 +48,22 @@ export function createMuseProvider(usage: Usage): ProviderRegistration {
       if (!launch)
         return { available: false, diagnostic: "Install Muse Code and ensure `muse` is on PATH." };
       usage.remember(launch);
-      return status(launch);
+      const result = await status(launch);
+      if (result.available && subsessionOffered === false)
+        return {
+          available: true,
+          diagnostic:
+            "Muse Code is available, but this Paseo daemon does not offer session.subsession: " +
+            "parallel subagents and workflows run without Paseo child sessions. " +
+            "Update Paseo to follow them as subagents.",
+        };
+      return result;
     },
     async connect(request) {
       if (!request.versions.includes(1))
         throw new MuseError("protocol", "Provider protocol version 1 is required");
       usage.remember(requireLaunch(request.launch));
+      subsessionOffered = supportsSubsessions(request.capabilities);
       return connect(
         requireLaunch(request.launch),
         negotiateProviderCapabilities(request.capabilities, capabilities),
@@ -68,7 +84,9 @@ async function status(launch: ProviderLaunch): Promise<ProviderStatus> {
       [...launch.args, "--version"],
       {
         env: launch.env,
-        timeout: 3000,
+        // Daemon starts under load can stall process spawn; the version probe
+        // must not time out before the host had a chance to answer.
+        timeout: 15000,
         maxBuffer: 8192,
       },
     );
@@ -79,7 +97,9 @@ async function status(launch: ProviderLaunch): Promise<ProviderStatus> {
     if (major < 1 || (major === 1 && minor < 3))
       return { available: false, diagnostic: `Update Muse Code: found ${match[0]}, need ≥1.3.0` };
     // Leave room for the version probe, account read and cleanup within the status RPC deadline.
-    host = new MspConnection({ launch, timeoutMs: 3000, startupTimeoutMs: 20000 });
+    // Raised so a daemon start under load does not report the provider as
+    // unavailable (pa-4ua43): spawn and first responses can stall for seconds.
+    host = new MspConnection({ launch, timeoutMs: 10000, startupTimeoutMs: 60000 });
     await host.initialize();
     const account = await host.request("account/read", {}, accountSchema);
     if (account.state === "loggedOut")
@@ -120,6 +140,11 @@ function connect(
     if (input.type === "session.open") {
       if (sessions.has(input.sessionId))
         throw new MuseError("duplicateSession", "Muse session is already open");
+      // A daemon session fails when the shared daemon does not answer: a socket
+      // left by a killed daemon refuses the connect, and `--join` would then
+      // start a daemon of its own.
+      if (isDaemonSession(input.config.env))
+        await probeDaemon(daemonSocket({ ...launch.env, ...input.config.env }));
       const session = new Session({
         id: input.sessionId,
         config: input.config,
@@ -127,6 +152,7 @@ function connect(
         emit,
         capabilities: negotiated,
         serveArgs: serveArgs(input.config.providerOptions),
+        daemon: isDaemonSession(input.config.env),
       });
       sessions.set(input.sessionId, session);
       try {
@@ -135,6 +161,7 @@ function connect(
           input.sessionId,
           { ...launch, env: { ...launch.env, ...input.config.env } },
           () => session.readUsage(),
+          () => session.awake,
         );
       } catch (error) {
         sessions.delete(input.sessionId);
