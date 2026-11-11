@@ -100,6 +100,8 @@ export interface DesktopWindowChromeUpdate {
 
 export interface DesktopWindowBridge {
   label?: string;
+  /** Brings this window forward (show + focus). Absent outside Electron. */
+  focusSelf?: () => Promise<void>;
   minimize?: () => Promise<void>;
   close?: () => Promise<void>;
   toggleMaximize?: () => Promise<void>;
@@ -172,6 +174,71 @@ export interface DesktopInvokeBridge {
   invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
 
+export interface DesktopHidUsagePair {
+  usagePage: number;
+  usage: number;
+}
+
+export interface DesktopHidDeviceInfo {
+  deviceKey: string;
+  serial: string | null;
+  vendorId: number;
+  productId: number;
+  usagePairs: DesktopHidUsagePair[];
+  reportInputBytes: number;
+  reportOutputBytes: number;
+}
+
+export type DesktopHidIssueKind = "permission" | "packaging" | "other";
+
+export interface DesktopHidIssue {
+  kind: DesktopHidIssueKind;
+  message: string;
+}
+
+export interface DesktopHidSnapshot {
+  status: "ready" | "denied" | "unavailable";
+  devices: DesktopHidDeviceInfo[];
+  issue?: DesktopHidIssue;
+}
+
+export interface DesktopHidClaim {
+  installationId: string;
+  windowId: string;
+  version: number;
+  deviceKey: string;
+}
+
+export type DesktopHidClaimResult =
+  | { ok: true }
+  | { ok: false; reason?: string; issue?: DesktopHidIssue };
+
+export interface DesktopHidWriteInput extends DesktopHidClaim {
+  data: number[];
+}
+
+export interface DesktopHidInputReport {
+  deviceKey: string;
+  reportId: number;
+  data: number[];
+  atMs: number;
+}
+
+/**
+ * Local device (HID) bridge, exposed by the Electron preload.
+ * Absent on browser and mobile: check for presence, never for
+ * platform strings.
+ */
+export interface DesktopHidBridge {
+  identity?: () => Promise<{ windowId: string }>;
+  enumerate?: () => Promise<DesktopHidSnapshot>;
+  claim?: (input: DesktopHidClaim) => Promise<DesktopHidClaimResult>;
+  release?: (input: DesktopHidClaim) => Promise<boolean>;
+  write?: (input: DesktopHidWriteInput) => Promise<DesktopHidClaimResult>;
+  onDevicesChanged?: (handler: (snapshot: DesktopHidSnapshot) => void) => () => void;
+  onInput?: (handler: (report: DesktopHidInputReport) => void) => () => void;
+}
+
 export interface DesktopHostBridge {
   platform?: string;
   windowChromeMode?: string;
@@ -187,6 +254,7 @@ export interface DesktopHostBridge {
   webUtils?: DesktopWebUtilsBridge;
   menu?: DesktopMenuBridge;
   browser?: DesktopBrowserBridge;
+  hid?: DesktopHidBridge;
 }
 
 declare global {
