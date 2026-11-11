@@ -2036,7 +2036,10 @@ test("a daemon session still loaded with other MCP servers attaches to the loade
     MUSE_TEST_MCP_CONFLICT: "1",
     MUSE_TEST_RESUME_ECHO: "1",
   });
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   expect(await openSavedWithMcp(h, env)).toMatchObject({ type: "session.ready" });
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining("attaching to the loaded runtime"));
+  warn.mockRestore();
   const resumes = (await h.recorded()).filter((f) => f.method === "session/resume");
   expect(resumes).toHaveLength(2);
   expect(resumes[0].params.config.mcpServers.srv).toMatchObject({ transport: "stdio" });
