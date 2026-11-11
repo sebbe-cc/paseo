@@ -252,6 +252,12 @@ export const sessionListSchema = z.object({
       title: z.string().optional(),
       updatedAt: z.string(),
       modelId: z.string().nullable(),
+      // MSP Session.kind (spec 42713 FR-001, open enum: "root" | "subagent").
+      // Absence asserts nothing, so only a positive "subagent" filters.
+      kind: z.string().optional(),
+      // MSP Session.parentSessionId (spec 42713 FR-002): the containing
+      // session's id when kind is "subagent". A root carries none.
+      parentSessionId: z.string().nullable().optional(),
     }),
   ),
 });
