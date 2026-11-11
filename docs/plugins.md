@@ -479,6 +479,13 @@ The same holds for a hook that runs inside an agent's lifecycle lane: an `agent.
 an option, model, thinking or mode change) waits on the open, which waits on the hook. The hooks
 reference tells plugin authors to start such a write without awaiting it.
 
+## Voice providers
+
+The experimental fork voice API and startup selection are defined in the
+[public contract](../public-docs/plugins/reference.md#voice-providers-experimental-fork-api).
+Keep vendor authentication, media bootstrap and delegation in a server plugin.
+The Codex Live provider lives in the fleet repository (fleet/paseo `plugins/codex-live`); its README explains isolated testing and transport limits.
+
 ## Contribute a provider
 
 Register a provider from `index.server.ts`. The provider connection is callback-based and owns all

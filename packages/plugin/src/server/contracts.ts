@@ -62,6 +62,8 @@ export interface PluginServerContext extends PluginLifecycleRegistration {
       context: PluginHandlerContext,
     ) => PluginWireInput<ZodInput<OutputSchema>> | Promise<PluginWireInput<ZodInput<OutputSchema>>>,
   ): void;
+  registerVoiceProvider(provider: import("./voice.js").VoiceProviderRegistration): void;
+  registerDictationProvider(provider: import("./dictation.js").DictationProviderRegistration): void;
   registerProvider(provider: ProviderRegistration): void;
   registerUsageSource(source: UsageSourceRegistration): void;
 }
