@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
 import type {
+  PluginBeforeRequests,
   PluginHookAgent,
   PluginHookPayload,
   PluginHookContext,
@@ -87,13 +88,16 @@ const worktreeRequestSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const TURN_PREPARE_MAX_CHARS = 8000;
+const labelsSchema = z.record(z.string(), z.string());
+
 const beforeSchemas = {
   "worktree.create.before": worktreeRequestSchema,
   "agent.create.before": CreateAgentRequestMessageSchema.pick({
     config: true,
     env: true,
     metadata: true,
-  }).strict(),
+  }).extend({ labels: labelsSchema, initialPrompt: z.string().nullable().default(null) }).strict(),
   "agent.open.before": z
     .object({
       agentId: z.string(),
@@ -107,8 +111,35 @@ const beforeSchemas = {
       // Optional so a plugin that returns its own object keeps working; omitted means unchanged.
       metadata: z.record(z.string(), z.custom<JsonValue>()).optional(),
       tools: z.array(agentToolMetadataSchema),
+      initialPrompt: z.string().nullable().default(null),
+      systemPrompt: z.string().nullable().optional(),
+      daemonAppendSystemPrompt: z.string().nullable().optional(),
       env: z.record(z.string(), z.string()),
       mcpServers: CreateAgentRequestMessageSchema.shape.config.shape.mcpServers.unwrap(),
+    })
+    .strict(),
+  "agent.turn_prepare.before": z
+    .object({
+      agent: z
+        .object({
+          id: z.string(),
+          workspaceId: z.string().nullable(),
+          parentAgentId: z.string().nullable(),
+          provider: z.string(),
+          cwd: z.string(),
+          title: z.string().nullable(),
+          labels: labelsSchema,
+        })
+        .strict(),
+      turn: z
+        .object({
+          prompt: z.string(),
+          kind: z.enum(["start", "resume", "refresh", "compaction", "next"]),
+          purpose: z.enum(["interactive", "history"]),
+          turnNumber: z.number().int().min(1),
+        })
+        .strict(),
+      accumulatedContext: z.array(z.string()),
     })
     .strict(),
   "agent.compact.before": z
@@ -144,6 +175,66 @@ const sessionOpenLocalResultSchema = beforeSchemas["agent.open.before"].extend({
     ),
   ),
 });
+
+const turnPrepareResultSchema = z
+  .object({
+    context: z.union([z.string(), z.array(z.string())]).nullish(),
+  })
+  .strict();
+
+export const TURN_CONTEXT_MARKER_OPEN = "<system-reminder data-paseo-turn-context>";
+export const TURN_CONTEXT_MARKER_CLOSE = "</system-reminder>";
+
+export function normalizeTurnContextPieces(value: unknown): string[] {
+  const raw = turnPrepareResultSchema.parse(value ?? {});
+  let list: string[];
+  if (raw.context == null) {
+    list = [];
+  } else if (Array.isArray(raw.context)) {
+    list = raw.context;
+  } else {
+    list = [raw.context];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of list) {
+    const text = piece.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * Compose hidden per-turn context blocks in registration order, dropping
+ * empties and exact duplicates, capped at TURN_PREPARE_MAX_CHARS.
+ */
+export function composeTurnContext(blocks: string[]): string | null {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const block of blocks) {
+    const text = block.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    ordered.push(text);
+  }
+  if (ordered.length === 0) return null;
+  let composed = ordered.join("\n\n");
+  if (composed.length > TURN_PREPARE_MAX_CHARS) {
+    composed = composed.slice(0, TURN_PREPARE_MAX_CHARS);
+  }
+  return composed;
+}
+
+/**
+ * Wrap a provider-bound prompt with hidden turn context. The stored timeline
+ * row keeps the original prompt; only the model request carries the wrapper.
+ */
+export function wrapPromptWithTurnContext(prompt: string, context: string | null): string {
+  if (!context || !context.trim()) return prompt;
+  return `${TURN_CONTEXT_MARKER_OPEN}\n${context.trim()}\n${TURN_CONTEXT_MARKER_CLOSE}\n\n${prompt}`;
+}
 
 export interface PluginLifecycle {
   wait(
@@ -234,14 +325,110 @@ export function publishAgentStream(
   }
 }
 
+function sameLabels(
+  previous: Record<string, string> | undefined,
+  next: Record<string, string> | undefined,
+): boolean {
+  return JSON.stringify(previous ?? {}) === JSON.stringify(next ?? {});
+}
+
+function validateSessionOpenResult(
+  previous: z.infer<(typeof beforeSchemas)["agent.open.before"]>,
+  next: z.infer<(typeof beforeSchemas)["agent.open.before"]>,
+): void {
+  const identityChanged =
+    previous.agentId !== next.agentId ||
+    previous.workspaceId !== next.workspaceId ||
+    previous.provider !== next.provider ||
+    previous.cwd !== next.cwd ||
+    previous.reason !== next.reason ||
+    previous.purpose !== next.purpose || previous.title !== next.title || !sameLabels(previous.labels, next.labels);
+  if (identityChanged) {
+    throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
+  }
+  const contextChanged =
+    !sameLabels(previous.labels, next.labels) ||
+    (previous.initialPrompt ?? null) !== (next.initialPrompt ?? null);
+  if (contextChanged) {
+    throw new Error("agent.open.before hooks cannot change labels or initialPrompt");
+  }
+  const instructionsChanged =
+    (next.systemPrompt ?? null) !== (previous.systemPrompt ?? null) ||
+    (next.daemonAppendSystemPrompt ?? null) !== (previous.daemonAppendSystemPrompt ?? null);
+  if (previous.purpose === "history" && instructionsChanged) {
+    throw new Error("agent.open.before hooks cannot change instructions for history opens");
+  }
+}
+
+function validateCreateResult(
+  previous: z.infer<(typeof beforeSchemas)["agent.create.before"]>,
+  next: z.infer<(typeof beforeSchemas)["agent.create.before"]>,
+): void {
+  if (previous.config.cwd !== next.config.cwd) {
+    throw new Error("agent.create hooks cannot change the workspace directory");
+  }
+  const contextChanged =
+    !sameLabels(previous.labels, next.labels) ||
+    (previous.initialPrompt ?? null) !== (next.initialPrompt ?? null);
+  if (contextChanged) {
+    throw new Error("agent.create hooks cannot change labels or initialPrompt");
+  }
+}
+
+/**
+ * Merge a turn_prepare child answer into the running request. Child plugin
+ * hosts answer with the full request shape `{...request, accumulatedContext}`
+ * (their in-process `invokeTurnPrepare` accumulates each handler's
+ * `{context}` piece and returns the request), never with the bare handler
+ * `{context}` form — parsing that strict shape threw
+ * `unrecognized_keys [agent, turn, accumulatedContext]` on every turn, and
+ * returning the empty input dropped per-turn memory even when validation
+ * passed. Agent/turn identity stays immutable; only accumulated context
+ * merges through, in order without duplicates.
+ */
+function mergeTurnPrepareResult(
+  input: PluginBeforeRequests["agent.turn_prepare"],
+  output: unknown,
+): PluginBeforeRequests["agent.turn_prepare"] {
+  if (output === undefined) return input;
+  if (typeof output !== "object" || output === null || !("accumulatedContext" in output)) {
+    // Bare `{context}` handler form (tolerated for direct answers).
+    return appendTurnContext(input, normalizeTurnContextPieces(output));
+  }
+  const parsed = beforeSchemas["agent.turn_prepare.before"].parse(output);
+  const expected = beforeSchemas["agent.turn_prepare.before"].parse(input);
+  if (
+    JSON.stringify(parsed.agent) !== JSON.stringify(expected.agent) ||
+    JSON.stringify(parsed.turn) !== JSON.stringify(expected.turn)
+  ) {
+    throw new Error("agent.turn_prepare hooks cannot change agent or turn identity");
+  }
+  return appendTurnContext(input, parsed.accumulatedContext);
+}
+
+function appendTurnContext(
+  input: PluginBeforeRequests["agent.turn_prepare"],
+  pieces: string[],
+): PluginBeforeRequests["agent.turn_prepare"] {
+  const merged = [...input.accumulatedContext];
+  for (const piece of pieces) {
+    if (!merged.includes(piece)) merged.push(piece);
+  }
+  return { ...input, accumulatedContext: merged };
+}
+
 export async function validateBeforeResult<Name extends keyof PluginWireBeforeRequests>(
   name: Name,
   input: PluginWireBeforeRequests[Name],
   output: unknown,
 ): Promise<PluginWireBeforeRequests[Name]> {
+  if (name === "agent.turn_prepare.before") {
+    return mergeTurnPrepareResult(input as PluginBeforeRequests["agent.turn_prepare"], output) as PluginWireBeforeRequests[Name];
+  }
   const result = validateBeforeRequest(name, output);
   if (name === "agent.open.before") {
     const previous = beforeSchemas["agent.open.before"].parse(input);
+    validateSessionOpenResult(previous, beforeSchemas["agent.open.before"].parse(result));
     const next = beforeSchemas["agent.open.before"].parse(result);
     if (
       previous.agentId !== next.agentId ||
@@ -267,6 +454,7 @@ export async function validateBeforeResult<Name extends keyof PluginWireBeforeRe
   }
   if (name === "agent.create.before") {
     const previous = beforeSchemas["agent.create.before"].parse(input);
+    validateCreateResult(previous, beforeSchemas["agent.create.before"].parse(result));
     const next = beforeSchemas["agent.create.before"].parse(result);
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create.before hooks cannot change the workspace directory");
@@ -334,13 +522,18 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
           return await this.openSession(input, { paseo, signal: controller.signal });
         }
         let request = validateBeforeRequest(hookName, input);
+        if (hookName === "agent.turn_prepare.before") {
+          return this.invokeTurnPrepare(name, request as PluginBeforeRequests["agent.turn_prepare"], paseo, controller);
+        }
+        type MutableHook = Exclude<typeof hookName, "agent.turn_prepare.before">;
+        const mutableHook = hookName as MutableHook;
         for (const handler of this.handlers.get(name) ?? []) {
           controller.signal.throwIfAborted();
           const result = await handler(
             { request: structuredClone(request) },
             { paseo, signal: controller.signal },
           );
-          if (result !== undefined) request = await validateBeforeResult(hookName, request, result);
+          if (result !== undefined) request = await validateBeforeResult(mutableHook, request as PluginWireBeforeRequests[MutableHook], result);
         }
         return request;
       }
@@ -391,6 +584,55 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       request.mcpServers = {};
     } else this.agentTools?.attach(request.agentId, tools);
     return request;
+  }
+
+  /**
+   * Fail-open accumulation: each hook contributes hidden context only.
+   * A throwing hook is logged and skipped; the turn still starts.
+   */
+  private async invokeTurnPrepare(
+    name: string,
+    request: PluginBeforeRequests["agent.turn_prepare"],
+    paseo: PluginHookContext["paseo"],
+    controller: AbortController,
+  ): Promise<PluginBeforeRequests["agent.turn_prepare"]> {
+    const accumulated: string[] = [];
+    for (const handler of this.handlers.get(name) ?? []) {
+      controller.signal.throwIfAborted();
+      const result = await this.invokeOneTurnPrepare(
+        handler,
+        request,
+        accumulated,
+        paseo,
+        controller,
+      );
+      for (const piece of result) {
+        if (!accumulated.includes(piece)) accumulated.push(piece);
+      }
+    }
+    return { ...request, accumulatedContext: accumulated };
+  }
+
+  private async invokeOneTurnPrepare(
+    handler: Handler,
+    request: PluginBeforeRequests["agent.turn_prepare"],
+    accumulated: string[],
+    paseo: PluginHookContext["paseo"],
+    controller: AbortController,
+  ): Promise<string[]> {
+    try {
+      const result = await handler(
+        {
+          request: structuredClone({ ...request, accumulatedContext: [...accumulated] }),
+        },
+        { paseo, signal: controller.signal },
+      );
+      if (result === undefined) return [];
+      return normalizeTurnContextPieces(result);
+    } catch (error) {
+      console.error("Lifecycle hook agent.turn_prepare failed", error);
+      return [];
+    }
   }
 
   cancel(id: string): void {
