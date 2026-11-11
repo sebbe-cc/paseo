@@ -6,6 +6,7 @@ import type { PluginPaseoApi } from "./reference-api.js";
 import type { AgentTimelineItem, JsonValue } from "@getpaseo/protocol/agent-types";
 import type { WorkspaceLabelColor } from "@getpaseo/protocol/workspace-labels";
 import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
+import type { PluginClientActionsCapability } from "./client-actions.js";
 import type { PluginFile } from "./file.js";
 import type {
   PluginComposer,
@@ -233,6 +234,15 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
    * resolved its installation and window identities.
    */
   readonly clientContext?: PluginClientContextCapability;
+  /**
+   * Trusted app actions (voice hold-to-talk, focused-panel scroll,
+   * joystick navigation). Present only on clients whose app
+   * implements it (desktop); undefined on older apps, browser and
+   * mobile, where the plugin reports "unsupported" and stays a
+   * no-op. App-owned with app lifetime: subscribe in contribute()
+   * and release in cleanup.
+   */
+  readonly clientActions?: PluginClientActionsCapability;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarView(contribution: PluginSidebarViewContribution<PluginText>): PluginCleanup;
