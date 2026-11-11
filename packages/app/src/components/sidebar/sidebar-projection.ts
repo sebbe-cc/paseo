@@ -20,6 +20,8 @@ import {
   type SidebarShortcutSection,
 } from "@/utils/sidebar-shortcuts";
 import { statusWorkspaceGroups, type SidebarWorkspaceGroup } from "./sidebar-labels";
+import type { MergedProjectContainer } from "@/project-containers";
+import { orderByProjectContainers } from "@/project-containers/layout";
 
 export interface SidebarProjection {
   pinnedGroups: PinnedSidebarGroups;
@@ -47,6 +49,11 @@ export interface SidebarProjectionInput {
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
   t: TFunction;
+  /** Fork: project containers regroup project mode, so shortcuts follow the grouped order. */
+  projectContainers?: {
+    containers: readonly MergedProjectContainer[];
+    collapsedContainerKeys: ReadonlySet<string>;
+  };
 }
 
 export function buildSidebarProjection(input: SidebarProjectionInput): SidebarProjection {
@@ -69,10 +76,17 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
     sections.push({ workspaces: pinnedGroups.pinnedChats });
   }
   if (input.groupMode === "project") {
+    const grouped = orderByProjectContainers({
+      repositories: pinnedGroups.unpinnedProjects,
+      containers: input.projectContainers?.containers ?? [],
+      collapsedContainerKeys: input.projectContainers?.collapsedContainerKeys ?? new Set(),
+    });
     sections.push(
-      ...pinnedGroups.unpinnedProjects.map((project) => ({
+      ...grouped.repositories.map((project) => ({
         workspaces: project.workspaces,
-        collapsed: input.collapsedProjectKeys.has(project.viewKey),
+        collapsed:
+          grouped.hiddenKeys.has(project.viewKey) ||
+          input.collapsedProjectKeys.has(project.viewKey),
       })),
     );
   } else {
