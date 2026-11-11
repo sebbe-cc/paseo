@@ -4,24 +4,46 @@ import { callPluginRpc } from "@getpaseo/plugin/client/host";
 import type {
   PluginAgentCommandContext,
   PluginCommandCapabilities,
+  PluginOpenPanelOptions,
   PluginPanelLocation,
   PluginScreenParams,
   PluginWorkspaceCommandContext,
 } from "@getpaseo/plugin/client";
+import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import type { PluginClientStateSource } from "@getpaseo/plugin/client/host";
 import { resolvePluginPanelOpenLocation } from "./workspace-panels/locations";
 import { parsePluginOpenScreenInput } from "./surface-contribution";
 import type { InstalledPlugin } from "./types";
 
+type PanelNavigationTail = [] | [params: JsonValue | undefined, newTab: boolean | undefined];
+
+/**
+ * Trailing navigation args for an openPanel call. Empty when the caller passed
+ * neither params nor newTab, so existing callers keep their exact call shape.
+ */
+export function panelNavigationTail(options?: PluginOpenPanelOptions): PanelNavigationTail {
+  return options?.params === undefined && options?.newTab === undefined
+    ? []
+    : [options?.params, options?.newTab];
+}
+
 export interface PluginNavigation {
   openSettings(pluginId: string, screenId: string): void;
   openSurface(pluginId: string, surfaceId: string, params?: PluginScreenParams): void;
-  openWorkspacePanel(pluginId: string, panelId: string, location: PluginPanelLocation): void;
+  openWorkspacePanel(
+    pluginId: string,
+    panelId: string,
+    location: PluginPanelLocation,
+    params?: JsonValue,
+    newTab?: boolean,
+  ): void;
   openAgentPanel(
     pluginId: string,
     panelId: string,
     agentId: string,
     location: PluginPanelLocation,
+    params?: JsonValue,
+    newTab?: boolean,
   ): void;
 }
 
@@ -68,11 +90,12 @@ export function createPluginAgentActionContext(input: {
       const panel = plugin.workspacePanels.find((candidate) => candidate.id === panelId);
       if (!panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
       const location = resolvePluginPanelOpenLocation(panel, options?.location);
+      const tail = panelNavigationTail(options);
       if (panel.context === "workspace") {
-        navigation.openWorkspacePanel(plugin.id, panelId, location);
+        navigation.openWorkspacePanel(plugin.id, panelId, location, ...tail);
         return;
       }
-      navigation.openAgentPanel(plugin.id, panelId, agent.id, location);
+      navigation.openAgentPanel(plugin.id, panelId, agent.id, location, ...tail);
     },
   };
 }
@@ -96,7 +119,7 @@ export function createPluginWorkspaceActionContext(input: {
       );
       if (!panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
       const location = resolvePluginPanelOpenLocation(panel, options?.location);
-      navigation.openWorkspacePanel(plugin.id, panelId, location);
+      navigation.openWorkspacePanel(plugin.id, panelId, location, ...panelNavigationTail(options));
     },
   };
 }
