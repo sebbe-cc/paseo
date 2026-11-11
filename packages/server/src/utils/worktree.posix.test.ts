@@ -583,6 +583,43 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       ).toMatchObject({ baseRefName: "main" });
     });
 
+    it("branches a bare base branch off origin when both local and origin exist", async () => {
+      const remoteDir = join(tempDir, "bare-base-remote.git");
+      const remoteCloneDir = join(tempDir, "bare-base-clone");
+      execFileSync("git", ["init", "--bare", remoteDir]);
+      execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
+      execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+
+      execFileSync("git", ["clone", remoteDir, remoteCloneDir]);
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: remoteCloneDir });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: remoteCloneDir });
+      execFileSync("git", ["checkout", "-B", "main", "origin/main"], { cwd: remoteCloneDir });
+      writeFileSync(join(remoteCloneDir, "file.txt"), "from-origin\n");
+      execFileSync("git", ["add", "file.txt"], { cwd: remoteCloneDir });
+      execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "advance origin main"], {
+        cwd: remoteCloneDir,
+      });
+      execFileSync("git", ["push", "origin", "main"], { cwd: remoteCloneDir });
+
+      // The local main stays behind: a stale local default must not become the base.
+      execFileSync("git", ["fetch", "origin"], { cwd: repoDir });
+
+      const result = await createLegacyWorktreeForTest({
+        branchName: "bare-base-feature",
+        cwd: repoDir,
+        baseBranch: "main",
+        worktreeSlug: "bare-base-feature",
+
+        paseoHome,
+      });
+
+      expect(readFileSync(join(result.worktreePath, "file.txt"), "utf8")).toBe("from-origin\n");
+      expect(result.comparisonBaseRef).toBe("refs/remotes/origin/main");
+      expect(
+        JSON.parse(readFileSync(await getPaseoWorktreeMetadataPath(result.worktreePath), "utf8")),
+      ).toMatchObject({ baseRefName: "main", baseRef: "refs/remotes/origin/main" });
+    });
+
     it("records the branch name when the base is on a remote other than origin", async () => {
       const forkDir = join(tempDir, "fork.git");
       const forkCloneDir = join(tempDir, "fork-clone");
