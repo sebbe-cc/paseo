@@ -50,6 +50,13 @@ export function createWorkspaceCommand(): Command {
 
   addJsonAndDaemonHostOptions(
     workspace
+      .command("show")
+      .description("Show one workspace including its resolved base")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runShowCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
       .command("rename")
       .description("Set a workspace's user-visible title")
       .argument("<workspace-id>", "Workspace id")
@@ -92,13 +99,6 @@ export function createWorkspaceCommand(): Command {
       .argument("<label>", "Label name to remove")
       .allowExcessArguments(false),
   ).action(withOutput(runLabelRemoveCommand));
-
-  addJsonAndDaemonHostOptions(
-    workspace
-      .command("show")
-      .description("Show a workspace and its comparison base")
-      .argument("<workspace-id>", "Workspace id"),
-  ).action(withOutput(runShowCommand));
 
   return workspace;
 }
