@@ -98,6 +98,7 @@ interface LoadedPlugin {
   voiceProviders: ReadonlyArray<{ id: string; label: string }>;
   voiceSessions: Map<string, (event: VoiceProviderEvent) => void>;
   dictationProviders: ReadonlyArray<{ id: string; label: string }>;
+  disabledUsageSources: readonly string[];
   child: PluginChild | null;
   outputCapture: PluginOutputCapture | null;
   pending: Map<string, PendingInvocation>;
@@ -420,6 +421,10 @@ export class PluginRuntime {
 
   getUsageSourceRegistrations(pluginId: string): readonly PluginUsageSourceMetadata[] {
     return this.plugins.get(pluginId)?.usageSources ?? [];
+  }
+
+  getDisabledUsageSources(pluginId: string): readonly string[] {
+    return this.plugins.get(pluginId)?.disabledUsageSources ?? [];
   }
 
   fetchUsage(pluginId: string, sourceId: string, input: unknown): Promise<unknown> {
@@ -967,6 +972,7 @@ export class PluginRuntime {
         voiceProviders: [],
         voiceSessions: new Map(),
         dictationProviders: [],
+        disabledUsageSources: [],
         child: null,
         outputCapture: null,
         pending: new Map(),
@@ -1105,6 +1111,7 @@ export class PluginRuntime {
       voiceProviders: ready.voiceProviders ?? [],
       voiceSessions: new Map(),
       dictationProviders: ready.dictationProviders ?? [],
+      disabledUsageSources: ready.disabledUsageSources ?? [],
       child,
       outputCapture,
       pending,
