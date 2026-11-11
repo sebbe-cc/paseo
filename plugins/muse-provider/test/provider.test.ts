@@ -21,6 +21,8 @@ import type { UsageSourceRegistration } from "@getpaseo/plugin/server";
 import { execCommand } from "@getpaseo/plugin/server";
 import contribute from "../index.server.js";
 import { IDLE_MS } from "../server/idle-host.js";
+import { MspConnection } from "../server/connection.js";
+import { z } from "zod";
 
 const connections: ProviderConnection[] = [];
 const roots: string[] = [];
@@ -1142,7 +1144,7 @@ test("status bounds a stalled account read and closes the host", async () => {
   const h = await harness("catalog-controls", { MUSE_TEST_HANG: "account/read" });
   expect(await h.provider.status!({ launch: h.launch })).toEqual({
     available: false,
-    diagnostic: "Muse account/read timed out",
+    diagnostic: "Muse account/read timed out after 10 s",
   });
   expect(await h.recorded()).toContainEqual({ event: "hostClosed" });
 }, 30000);
@@ -1632,6 +1634,46 @@ test("session readiness accepts initialization beyond the old event polling wind
   ]);
 }, 10000);
 
+// pa-89is1.21: the first session/start on a fresh `muse serve` scans the whole
+// session store first; under load that took up to 13.5 s, past the 10 s request
+// budget. Session construction gets its own budget, other requests keep 10 s.
+test("session/start slower than the request budget still opens the session", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_DELAY_METHOD: "session/start",
+    MUSE_TEST_DELAY_MS: "11000",
+  });
+  // h.open() waits only 5 s for readiness; this start answers after 11 s.
+  void h.open().catch(() => {});
+  await expect
+    .poll(
+      () =>
+        h.events.find((event) => event.type === "session.ready" || event.type === "request.failed"),
+      { timeout: 20000, interval: 100 },
+    )
+    .toMatchObject({ type: "session.ready" });
+}, 30000);
+
+test("a session/start that never answers fails naming its budget", async () => {
+  const connection = new MspConnection({
+    launch: {
+      command: process.execPath,
+      args: [fileURLToPath(new URL("./fake-muse.mjs", import.meta.url))],
+      env: { MUSE_TEST_SCENARIO: "text-reasoning", MUSE_TEST_HANG: "session/start" },
+    },
+  });
+  try {
+    await connection.initialize();
+    await expect(
+      connection.command("session/start", { workspaceRoot: os.tmpdir() }, z.unknown(), 300),
+    ).rejects.toMatchObject({
+      kind: "timeout",
+      message: "Muse session/start timed out after 0.3 s",
+    });
+  } finally {
+    await connection.close();
+  }
+});
+
 test("default launch disables sandbox and trusts workspace", async () => {
   const h = await harness();
   await h.open();
@@ -1853,7 +1895,13 @@ test("muse-ws without a wrapper fails to open and spawns nothing", async () => {
 });
 test("an own muse-ws host runs muse serve through the wrapper", async () => {
   const wrapper = await writeWrapper();
-  const h = await harness("text-reasoning", {}, { wrapper: [wrapper, "--tag"] }, PROVIDER_CAPABILITIES, "muse-ws");
+  const h = await harness(
+    "text-reasoning",
+    {},
+    { wrapper: [wrapper, "--tag"] },
+    PROVIDER_CAPABILITIES,
+    "muse-ws",
+  );
   expect(await h.open()).toMatchObject({ type: "session.ready" });
   const log = await readFile(`${wrapper}.log`, "utf8");
   expect(log).toContain("--tag ");
@@ -1863,7 +1911,13 @@ test("a joined muse-ws session wraps stdio MCP servers and stores the wrapper, n
   const envDir = await daemonHome(false);
   const wrapper = await writeWrapper();
   const env = { ...(await daemonEnv()), PASEO_MUSE_SESSION_ENV_DIR: envDir };
-  const h = await harness("text-reasoning", {}, { wrapper: [wrapper] }, PROVIDER_CAPABILITIES, "muse-ws");
+  const h = await harness(
+    "text-reasoning",
+    {},
+    { wrapper: [wrapper] },
+    PROVIDER_CAPABILITIES,
+    "muse-ws",
+  );
   await h.send({
     type: "session.open",
     sessionId: "paseo-session",
@@ -1903,7 +1957,7 @@ test("a daemon session reattached after idle re-declares stdio MCP with its env 
     { MUSE_TEST_HISTORY: history },
     { wrapper: [wrapper] },
     PROVIDER_CAPABILITIES,
-    "muse-ws"
+    "muse-ws",
   );
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   await h.send({
@@ -1922,19 +1976,14 @@ test("a daemon session reattached after idle re-declares stdio MCP with its env 
   });
   // Fake the idle timer before open arms it; the open itself still waits on
   // short timers, so step them until the session is ready.
-  for (
-    let tries = 0;
-    !h.events.some((e) => e.type === "session.ready") && tries < 500;
-    tries++
-  ) {
+  for (let tries = 0; !h.events.some((e) => e.type === "session.ready") && tries < 500; tries++) {
     await vi.advanceTimersByTimeAsync(10);
     await delay(10);
   }
   await h.wait((event) => event.type === "session.ready");
   // One turn before idle writes the native history the resume replays.
   const turnDone = () =>
-    h.events.filter((e) => e.type === "session.turn" && e.state === "completed")
-      .length;
+    h.events.filter((e) => e.type === "session.turn" && e.state === "completed").length;
   await h.prompt();
   for (let tries = 0; turnDone() < 1 && tries < 500; tries++) {
     await vi.advanceTimersByTimeAsync(10);
@@ -1944,8 +1993,7 @@ test("a daemon session reattached after idle re-declares stdio MCP with its env 
   const hosts = async (event: string) =>
     (await h.recorded()).filter((frame) => frame.event === event).length;
   await vi.advanceTimersByTimeAsync(IDLE_MS);
-  for (let tries = 0; (await hosts("hostClosed")) === 0 && tries < 500; tries++)
-    await delay(10);
+  for (let tries = 0; (await hosts("hostClosed")) === 0 && tries < 500; tries++) await delay(10);
   expect(await hosts("hostClosed")).toBe(1);
   await h.prompt();
   for (let tries = 0; turnDone() < 2 && tries < 500; tries++) {
@@ -1953,17 +2001,13 @@ test("a daemon session reattached after idle re-declares stdio MCP with its env 
     await delay(10);
   }
   expect(turnDone()).toBe(2);
-  const resume = (await h.recorded()).find(
-    (f) => f.method === "session/resume"
-  );
+  const resume = (await h.recorded()).find((f) => f.method === "session/resume");
   expect(resume.params.config.mcpServers.srv).toMatchObject({
     command: wrapper,
     args: ["mcp-bin", "--x"],
     env: { ORBIT_BEAD: "bead-r" },
   });
-  expect(await readdir(envDir)).toContain(
-    "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"
-  );
+  expect(await readdir(envDir)).toContain("01a0ee4c-c501-7d50-9020-effa9f9956e1.json");
 }, 15000);
 test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
   const h = await harness();

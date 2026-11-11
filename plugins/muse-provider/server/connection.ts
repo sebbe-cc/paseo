@@ -8,6 +8,16 @@ import { MuseError, classifyExit } from "./errors.js";
 import { assertDaemonSocket } from "./options.js";
 import { frameSchema, initializedSchema, fingerprint } from "./wire.js";
 
+/**
+ * Budget for session/start and session/resume (pa-89is1.21). The first session
+ * operation on a fresh `muse serve` (an own host, or the shared daemon after a
+ * restart) scans every session in the store before it answers: with 3000
+ * sessions that took 1.5-3.7 s at load 30, 2.3-6.6 s for a cold daemon, and up
+ * to 13.5 s for an own host at load 40 with fsync-heavy IO, against 0.1-0.25 s
+ * on an empty store. A daemon that does not answer still fails, after this.
+ */
+export const SESSION_OPEN_TIMEOUT_MS = 30000;
+
 export function commandId(): string {
   const bytes = randomBytes(16);
   bytes.writeUIntBE(Date.now(), 0, 6);
@@ -118,7 +128,12 @@ export class MspConnection {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
   }
-  async command<T, P extends object>(method: string, params: P, schema: z.ZodType<T>): Promise<T> {
+  async command<T, P extends object>(
+    method: string,
+    params: P,
+    schema: z.ZodType<T>,
+    timeoutMs?: number,
+  ): Promise<T> {
     const id =
       "commandId" in params && typeof params.commandId === "string"
         ? params.commandId
@@ -126,7 +141,7 @@ export class MspConnection {
     const input = { ...params, commandId: id };
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.request(method, input, schema);
+        return await this.request(method, input, schema, timeoutMs);
       } catch (error) {
         const retryable =
           error instanceof MuseError && ["overloaded", "backpressured"].includes(error.kind);
@@ -139,15 +154,16 @@ export class MspConnection {
     method: string,
     params: object,
     schema: z.ZodType<T>,
-    timeoutMs = this.options.timeoutMs ?? 10000,
+    timeoutMs: number | undefined = undefined,
   ): Promise<T> {
+    timeoutMs ??= this.options.timeoutMs ?? 10000;
     if (this.failure) throw this.failure;
     if (this.closing) throw new MuseError("closed", "Muse host is closing");
     const id = ++this.sequence;
     const response = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new MuseError("timeout", `Muse ${method} timed out`));
+        reject(new MuseError("timeout", `Muse ${method} timed out after ${timeoutMs / 1000} s`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });

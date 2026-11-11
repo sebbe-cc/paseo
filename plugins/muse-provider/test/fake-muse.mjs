@@ -54,6 +54,10 @@ function receive(line) {
     setTimeout(() => receiveFrame(line), Number(process.env.MUSE_TEST_INITIALIZE_DELAY_MS));
     return;
   }
+  if (parsed.method === process.env.MUSE_TEST_DELAY_METHOD) {
+    setTimeout(() => receiveFrame(line), Number(process.env.MUSE_TEST_DELAY_MS));
+    return;
+  }
   receiveFrame(line);
 }
 function receiveFrame(line) {

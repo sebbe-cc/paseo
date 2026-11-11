@@ -42,8 +42,13 @@ export class IdleHost {
   onExit(listener: (error: MuseError) => void): void {
     this.exitListeners.add(listener);
   }
-  command<T, P extends object>(method: string, params: P, schema: z.ZodType<T>): Promise<T> {
-    return this.use((host) => host.command(method, params, schema));
+  command<T, P extends object>(
+    method: string,
+    params: P,
+    schema: z.ZodType<T>,
+    timeoutMs?: number,
+  ): Promise<T> {
+    return this.use((host) => host.command(method, params, schema, timeoutMs));
   }
   request<T>(method: string, params: object, schema: z.ZodType<T>, timeoutMs?: number): Promise<T> {
     return this.use((host) => host.request(method, params, schema, timeoutMs));

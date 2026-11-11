@@ -13,7 +13,12 @@ import {
   type ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
 import type { z } from "zod";
-import { MspConnection, commandId, type Notification } from "./connection.js";
+import {
+  MspConnection,
+  SESSION_OPEN_TIMEOUT_MS,
+  commandId,
+  type Notification,
+} from "./connection.js";
 import { IdleHost } from "./idle-host.js";
 import { MuseError, actionableError } from "./errors.js";
 import { Timeline, todoItem } from "./timeline.js";
@@ -175,6 +180,7 @@ export class Session {
         "session/resume",
         { sessionId: saved.sessionId, config: { mcpServers } },
         sessionSchema,
+        SESSION_OPEN_TIMEOUT_MS,
       );
       this.config = {
         ...this.config,
@@ -192,6 +198,7 @@ export class Session {
           config: { mcpServers },
         },
         sessionSchema,
+        SESSION_OPEN_TIMEOUT_MS,
       );
     }
     if (!response.viewCursor)
@@ -294,6 +301,7 @@ export class Session {
       "session/resume",
       { sessionId: this.live().nativeId, config: { mcpServers: this.sessionMcpServers() } },
       sessionSchema,
+      SESSION_OPEN_TIMEOUT_MS,
     );
     if (response.viewCursor) this.live().recovery.activity(response.viewCursor, false);
   }
