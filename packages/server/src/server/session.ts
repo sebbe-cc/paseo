@@ -223,7 +223,7 @@ import {
 import type { ServiceProxySubsystem } from "./service-proxy.js";
 import {
   renameCurrentBranch as renameCurrentBranchDefault,
-  resolveWorkspaceBase,
+  resolveWorkspaceBase as resolveWorkspaceBaseDefault,
 } from "../utils/checkout-git.js";
 import {
   createGitMutationService,
@@ -516,6 +516,9 @@ export interface SessionOptions {
   // Injected so tests can substitute the git branch rename without module mocks;
   // defaults to the real checkout-git implementation.
   renameCurrentBranch?: typeof renameCurrentBranchDefault;
+  // Injected so tests can substitute the workspace base resolver without module
+  // mocks; defaults to the real checkout-git implementation.
+  resolveWorkspaceBase?: typeof resolveWorkspaceBaseDefault;
   workspaceGitService: WorkspaceGitService;
   workspaceRuntimeStore: WorkspaceRuntimeStore;
   workspaceAutoName: WorkspaceAutoName;
@@ -725,6 +728,16 @@ interface ClientActivity {
   appVisibilityChangedAt: Date;
 }
 
+type WorkspaceBaseResult = Pick<WorkspaceDescriptorPayload, "base" | "baseError">;
+
+// Background workspace-base resolutions in flight at once. resolveWorkspaceBase
+// runs ~5 git processes per workspace; with hundreds of cold workspaces an
+// unbounded listing fan-out queued 48k processes against the 64/s scheduler
+// (incident 2026-11-05), stalling agent.create, plugin.list and fetch_workspaces
+// behind it. Listings never resolve inline, and this bound keeps the deferred
+// work to a small constant number of concurrent resolutions.
+const WORKSPACE_BASE_BACKGROUND_CONCURRENCY = 4;
+
 export class Session {
   private readonly connectedHostSession: ConnectedHostSession | null;
   private routed = false;
@@ -798,6 +811,17 @@ export class Session {
   private readonly filesystem: SessionFileSystem;
   private readonly github: ForgeService;
   private readonly renameCurrentBranch: typeof renameCurrentBranchDefault;
+  private readonly resolveWorkspaceBaseFn: typeof resolveWorkspaceBaseDefault;
+  // Lazily resolved workspace bases, keyed by resolved cwd. Listings never
+  // resolve with git inline (incident 2026-11-05: 250 cold workspaces each
+  // spawned ~5 git processes against the 64/s scheduler); they serve the
+  // cached/observer value or null and warm this cache in the background.
+  // Entries hold the resolved base or null ("no base") so a miss is cached
+  // too and a listing never retries git for the same workspace.
+  private readonly workspaceBaseCache = new Map<string, WorkspaceBaseResult>();
+  private readonly workspaceBaseInflight = new Map<string, Promise<WorkspaceBaseResult>>();
+  private readonly workspaceBaseQueue: Array<{ key: string; cwd: string }> = [];
+  private workspaceBaseActiveCount = 0;
   private readonly workspaceGitService: WorkspaceGitService;
   private readonly workspaceRuntimeStore: WorkspaceRuntimeStore;
   private readonly workspaceAutoName: WorkspaceAutoName;
@@ -906,6 +930,7 @@ export class Session {
       checkoutDiffManager,
       github,
       renameCurrentBranch,
+      resolveWorkspaceBase,
       workspaceGitService,
       workspaceRuntimeStore,
       workspaceAutoName,
@@ -989,6 +1014,7 @@ export class Session {
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
+    this.resolveWorkspaceBaseFn = resolveWorkspaceBase ?? resolveWorkspaceBaseDefault;
     this.workspaceGitService = workspaceGitService;
     this.workspaceRuntimeStore = workspaceRuntimeStore;
     this.workspaceBaseBranch =
@@ -6073,21 +6099,103 @@ export class Session {
 
   private async describeWorkspaceBase(
     workspace: PersistedWorkspaceRecord,
-  ): Promise<Pick<WorkspaceDescriptorPayload, "base" | "baseError">> {
+  ): Promise<WorkspaceBaseResult> {
+    const cached = this.readCachedWorkspaceBase(workspace);
+    if (cached !== undefined || workspace.kind === "directory") {
+      return cached ?? { base: null };
+    }
+    // Cold cache: serve null now and warm the cache in the background. Never
+    // await git here; this runs once per workspace per listing.
+    this.enqueueWorkspaceBaseResolution(workspace.cwd);
+    return { base: null };
+  }
+
+  private async describeCreatedWorkspaceBase(
+    workspace: PersistedWorkspaceRecord,
+  ): Promise<WorkspaceBaseResult> {
     if (workspace.kind === "directory") return { base: null };
-    // The observer snapshot already carries the base; resolve with git only before it exists.
+    // Single workspace on demand: resolve now instead of via the background
+    // queue so a creation never waits behind a cold fleet, still sharing
+    // single-flight with any background job for the same cwd.
+    return (
+      this.readCachedWorkspaceBase(workspace) ?? (await this.requestWorkspaceBaseNow(workspace.cwd))
+    );
+  }
+
+  // Observer snapshot first (freshest and self-healing), then the lazily
+  // resolved value, including a cached "no base" null. Undefined means neither
+  // has a value yet.
+  private readCachedWorkspaceBase(
+    workspace: PersistedWorkspaceRecord,
+  ): WorkspaceBaseResult | undefined {
+    // The observer snapshot carries the base whenever it exists (null included).
     const snapshot = this.workspaceRuntimeStore.get(workspace.cwd);
     if (snapshot) return { base: snapshot.git.base ?? null };
+    return this.workspaceBaseCache.get(resolve(workspace.cwd));
+  }
+
+  private enqueueWorkspaceBaseResolution(cwd: string): void {
+    if (this.isCleanedUp) return;
+    const key = resolve(cwd);
+    if (this.workspaceBaseCache.has(key) || this.workspaceBaseInflight.has(key)) return;
+    if (this.workspaceBaseQueue.some((entry) => entry.key === key)) return;
+    this.workspaceBaseQueue.push({ key, cwd });
+    this.pumpWorkspaceBaseQueue();
+  }
+
+  private pumpWorkspaceBaseQueue(): void {
+    if (this.isCleanedUp) return;
+    while (
+      this.workspaceBaseActiveCount < WORKSPACE_BASE_BACKGROUND_CONCURRENCY &&
+      this.workspaceBaseQueue.length > 0
+    ) {
+      const entry = this.workspaceBaseQueue.shift();
+      if (!entry || this.workspaceBaseCache.has(entry.key)) continue;
+      this.workspaceBaseActiveCount += 1;
+      const task = this.runWorkspaceBaseResolution(entry.key, entry.cwd);
+      this.workspaceBaseInflight.set(entry.key, task);
+      void task.finally(() => {
+        if (this.workspaceBaseInflight.get(entry.key) === task) {
+          this.workspaceBaseInflight.delete(entry.key);
+        }
+        this.workspaceBaseActiveCount -= 1;
+        this.pumpWorkspaceBaseQueue();
+      });
+    }
+  }
+
+  private requestWorkspaceBaseNow(cwd: string): Promise<WorkspaceBaseResult> {
+    const key = resolve(cwd);
+    const inflight = this.workspaceBaseInflight.get(key);
+    if (inflight) return inflight;
+    const queuedIndex = this.workspaceBaseQueue.findIndex((entry) => entry.key === key);
+    if (queuedIndex >= 0) this.workspaceBaseQueue.splice(queuedIndex, 1);
+    const task = this.runWorkspaceBaseResolution(key, cwd);
+    this.workspaceBaseInflight.set(key, task);
+    void task.finally(() => {
+      if (this.workspaceBaseInflight.get(key) === task) {
+        this.workspaceBaseInflight.delete(key);
+      }
+    });
+    return task;
+  }
+
+  private async runWorkspaceBaseResolution(key: string, cwd: string): Promise<WorkspaceBaseResult> {
+    let result: WorkspaceBaseResult;
     try {
-      return {
-        base: await resolveWorkspaceBase(workspace.cwd, {
+      result = {
+        base: await this.resolveWorkspaceBaseFn(cwd, {
           paseoHome: this.paseoHome,
           worktreesRoot: this.worktreesRoot,
         }),
       };
     } catch (error) {
-      return { base: null, baseError: error instanceof Error ? error.message : String(error) };
+      result = { base: null, baseError: error instanceof Error ? error.message : String(error) };
     }
+    // Cache the outcome including null and errors so later listings serve it
+    // without touching git again.
+    this.workspaceBaseCache.set(key, result);
+    return result;
   }
 
   private async describeWorkspaceRecord(
@@ -6204,7 +6312,7 @@ export class Session {
   ): Promise<WorkspaceDescriptorPayload> {
     const projectRecord = await this.projectRegistry.get(result.workspace.projectId);
     return {
-      ...(await this.describeWorkspaceBase(result.workspace)),
+      ...(await this.describeCreatedWorkspaceBase(result.workspace)),
       id: result.workspace.workspaceId,
       projectId: result.workspace.projectId,
       projectDisplayName: projectRecord
@@ -9366,6 +9474,10 @@ export class Session {
   public async cleanup(): Promise<void> {
     this.sessionLogger.trace({}, "agent.session.lifecycle.cleanup");
     this.isCleanedUp = true;
+    // Drop queued base warmups: they belong to this connection, and a
+    // reconnect creates a fresh session with its own queue. Running jobs
+    // finish without starting another batch (pump is gated above).
+    this.workspaceBaseQueue.length = 0;
     this.unsubscribeSetupObservation();
     await this.delivery.close();
 
