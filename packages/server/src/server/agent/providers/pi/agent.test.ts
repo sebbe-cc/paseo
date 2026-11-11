@@ -1204,7 +1204,7 @@ describe("PiRpcAgentSession", () => {
     });
   });
 
-  test("a process exit mid-turn fails the turn and the next messages still deliver", async () => {
+  test("a process exit mid-turn fails the turn and later messages ask for a reload", async () => {
     const { pi, session } = await createSession();
     onTestFinished(() => session.close());
     const fakeSession = pi.latestSession();
@@ -1217,17 +1217,11 @@ describe("PiRpcAgentSession", () => {
       expect(seen).toContainEqual(expect.objectContaining({ type: "turn_failed" }));
     });
 
-    for (const text of ["one", "two", "three"]) {
-      await session.startTurn(text);
-      await vi.waitFor(() => {
-        expect(promptMessages(fakeSession)).toContain(text);
-      });
-      fakeSession.finishTurn();
-    }
-    await vi.waitFor(() => {
-      expect(completedTurnEvents(seen)).toHaveLength(3);
-    });
-    expect(promptMessages(fakeSession)).toEqual(["doomed", "one", "two", "three"]);
+    // 0.16 (#8718): a dead Pi runtime rejects new messages until the agent is reloaded.
+    await expect(session.startTurn("one")).rejects.toThrow(
+      "Pi process exited. Reload agent before sending another message.",
+    );
+    expect(promptMessages(fakeSession)).toEqual(["doomed"]);
   });
 
   test("treats Pi's aborted terminal response as cancellation after an interrupt", async () => {

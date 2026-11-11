@@ -3850,7 +3850,12 @@ class ClaudeAgentSession implements AgentSession {
     const { thinking, effort, ultracode } = this.resolveThinkingConfig();
     const appendedSystemPrompt = this.buildAppendedSystemPrompt();
     // `fast_mode` is a composer control the provider applies through flag settings.
-    const { fast_mode: _fastMode, ...sdkProviderOptions } = this.config.providerOptions;
+    const {
+      fast_mode: _fastMode,
+      claude_inbox_accept: _inboxAccept,
+      gascity_granted_skills: _grantedSkills,
+      ...sdkProviderOptions
+    } = this.config.providerOptions;
     const providerOptions = applyClaudeToolPolicy(sdkProviderOptions, this.config.toolPolicy);
     const settingsOptions = await this.buildSettingsOptions(providerOptions, { ultracode });
     const sdkEnv = this.harnessEnvironment;
@@ -3875,11 +3880,12 @@ class ClaudeAgentSession implements AgentSession {
     }
     // Gas City session skill scope (pa-uumx5v), computed once: the
     // gascity plugin publishes the granted layer-skill names in
-    // featureValues.gascity_granted_skills; the SDK hides every other
+    // featureValues.gascity_granted_skills (folded into providerOptions since
+    // 0.16 #8744); the SDK hides every other
     // skill from the listing and rejects it in the Skill tool.
     // Sessions without the contract behave exactly as before.
     const grantedSkills = sessionGrantedSkills(
-      this.config.featureValues as Record<string, unknown> | undefined,
+      this.config.providerOptions,
     );
 
     const base: ClaudeOptions = {
@@ -3959,7 +3965,7 @@ class ClaudeAgentSession implements AgentSession {
     // between tool calls instead of being held for a headless approval
     // dialog that can never be answered.
     const inboxAccept = claudeInboxAccept(
-      this.config.featureValues as Record<string, unknown> | undefined,
+      this.config.providerOptions,
     );
     if (
       fastMode === null &&

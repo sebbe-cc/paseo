@@ -37,7 +37,9 @@ export type PluginWireBeforeRequests = Omit<PluginHookRequests, "agent.open.befo
 
 /** Daemon-only results; ownership never crosses the plugin process boundary. */
 export type PluginBeforeResults = PluginWireBeforeRequests & {
-  "agent.open.before": SessionOpenWireRequest & { mcpServerOwners?: Record<string, string> };
+  "agent.open.before": SessionOpenWireRequest & {
+    mcpServerOwners?: Record<string, string>;
+  };
 };
 
 const worktreeRequestFields = {
@@ -58,7 +60,11 @@ const changeRequestFields = {
 };
 const worktreeRequestSchema = z.discriminatedUnion("kind", [
   z
-    .object({ ...worktreeRequestFields, kind: z.literal("branch-off"), baseRef: z.string().min(1) })
+    .object({
+      ...worktreeRequestFields,
+      kind: z.literal("branch-off"),
+      baseRef: z.string().min(1),
+    })
     .strict(),
   z
     .object({
@@ -97,7 +103,12 @@ const beforeSchemas = {
     config: true,
     env: true,
     metadata: true,
-  }).extend({ labels: labelsSchema, initialPrompt: z.string().nullable().default(null) }).strict(),
+  })
+    .extend({
+      labels: labelsSchema,
+      initialPrompt: z.string().nullable().default(null),
+    })
+    .strict(),
   "agent.open.before": z
     .object({
       agentId: z.string(),
@@ -292,7 +303,10 @@ export function publishAgentStream(
   event: AgentStreamEvent,
 ): void {
   if (event.type === "turn_started") {
-    lifecycle.emit("agent.turn.before", { agent, turnId: event.turnId ?? null });
+    lifecycle.emit("agent.turn.before", {
+      agent,
+      turnId: event.turnId ?? null,
+    });
   } else if (event.type === "turn_completed") {
     lifecycle.emit("agent.turn.after", {
       agent,
@@ -305,7 +319,10 @@ export function publishAgentStream(
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
-      outcome: { kind: "failed", error: { message: event.error, code: event.code } },
+      outcome: {
+        kind: "failed",
+        error: { message: event.error, code: event.code },
+      },
     });
   } else if (event.type === "turn_canceled") {
     lifecycle.emit("agent.turn.after", {
@@ -315,7 +332,10 @@ export function publishAgentStream(
       outcome: { kind: "canceled", reason: event.reason },
     });
   } else if (event.type === "permission_requested") {
-    lifecycle.emit("agent.permission.before", { agent, request: event.request });
+    lifecycle.emit("agent.permission.before", {
+      agent,
+      request: event.request,
+    });
   } else if (event.type === "permission_resolved") {
     lifecycle.emit("agent.permission.after", {
       agent,
@@ -342,7 +362,9 @@ function validateSessionOpenResult(
     previous.provider !== next.provider ||
     previous.cwd !== next.cwd ||
     previous.reason !== next.reason ||
-    previous.purpose !== next.purpose || previous.title !== next.title || !sameLabels(previous.labels, next.labels);
+    previous.purpose !== next.purpose ||
+    previous.title !== next.title ||
+    !sameLabels(previous.labels, next.labels);
   if (identityChanged) {
     throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
   }
@@ -417,30 +439,57 @@ function appendTurnContext(
   return { ...input, accumulatedContext: merged };
 }
 
+/**
+ * 0.16 lets a hook omit what it does not change. The fork's create context (labels,
+ * initialPrompt) is read-only, so an omitted value is the one the hook was handed.
+ */
+function withCreateContext(name: string, input: unknown, output: unknown): unknown {
+  if (name !== "agent.create.before" || !output || typeof output !== "object") return output;
+  const previous = input as { labels?: unknown; initialPrompt?: unknown };
+  const next = output as Record<string, unknown>;
+  return {
+    ...next,
+    labels: next.labels ?? previous.labels,
+    initialPrompt: next.initialPrompt === undefined ? previous.initialPrompt : next.initialPrompt,
+  };
+}
+
+type SessionOpenSnapshot = ReturnType<(typeof beforeSchemas)["agent.open.before"]["parse"]>;
+
+function changesSessionOpenIdentity(
+  previous: SessionOpenSnapshot,
+  next: SessionOpenSnapshot,
+): boolean {
+  return (
+    previous.agentId !== next.agentId ||
+    previous.workspaceId !== next.workspaceId ||
+    previous.provider !== next.provider ||
+    previous.cwd !== next.cwd ||
+    previous.reason !== next.reason ||
+    previous.purpose !== next.purpose ||
+    previous.title !== next.title ||
+    !isDeepStrictEqual(previous.labels, next.labels) ||
+    (next.metadata !== undefined && !isDeepStrictEqual(previous.metadata, next.metadata))
+  );
+}
+
 export async function validateBeforeResult<Name extends keyof PluginWireBeforeRequests>(
   name: Name,
   input: PluginWireBeforeRequests[Name],
   output: unknown,
 ): Promise<PluginWireBeforeRequests[Name]> {
   if (name === "agent.turn_prepare.before") {
-    return mergeTurnPrepareResult(input as PluginBeforeRequests["agent.turn_prepare"], output) as PluginWireBeforeRequests[Name];
+    return mergeTurnPrepareResult(
+      input as PluginBeforeRequests["agent.turn_prepare"],
+      output,
+    ) as PluginWireBeforeRequests[Name];
   }
-  const result = validateBeforeRequest(name, output);
+  const result = validateBeforeRequest(name, withCreateContext(name, input, output));
   if (name === "agent.open.before") {
     const previous = beforeSchemas["agent.open.before"].parse(input);
     validateSessionOpenResult(previous, beforeSchemas["agent.open.before"].parse(result));
     const next = beforeSchemas["agent.open.before"].parse(result);
-    if (
-      previous.agentId !== next.agentId ||
-      previous.workspaceId !== next.workspaceId ||
-      previous.provider !== next.provider ||
-      previous.cwd !== next.cwd ||
-      previous.reason !== next.reason ||
-      previous.purpose !== next.purpose ||
-      previous.title !== next.title ||
-      !isDeepStrictEqual(previous.labels, next.labels) ||
-      (next.metadata !== undefined && !isDeepStrictEqual(previous.metadata, next.metadata))
-    ) {
+    if (changesSessionOpenIdentity(previous, next)) {
       throw new Error("agent.open.before hooks can only change env, tools, and mcpServers");
     }
     return { ...result, metadata: previous.metadata };
@@ -519,11 +568,19 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       if (Object.hasOwn(beforeSchemas, name)) {
         const hookName = name as keyof PluginHookRequests;
         if (hookName === "agent.open.before") {
-          return await this.openSession(input, { paseo, signal: controller.signal });
+          return await this.openSession(input, {
+            paseo,
+            signal: controller.signal,
+          });
         }
         let request = validateBeforeRequest(hookName, input);
         if (hookName === "agent.turn_prepare.before") {
-          return this.invokeTurnPrepare(name, request as PluginBeforeRequests["agent.turn_prepare"], paseo, controller);
+          return this.invokeTurnPrepare(
+            name,
+            request as PluginBeforeRequests["agent.turn_prepare"],
+            paseo,
+            controller,
+          );
         }
         type MutableHook = Exclude<typeof hookName, "agent.turn_prepare.before">;
         const mutableHook = hookName as MutableHook;
@@ -533,14 +590,22 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
             { request: structuredClone(request) },
             { paseo, signal: controller.signal },
           );
-          if (result !== undefined) request = await validateBeforeResult(mutableHook, request as PluginWireBeforeRequests[MutableHook], result);
+          if (result !== undefined)
+            request = await validateBeforeResult(
+              mutableHook,
+              request as PluginWireBeforeRequests[MutableHook],
+              result,
+            );
         }
         return request;
       }
       for (const handler of this.handlers.get(name) ?? []) {
         controller.signal.throwIfAborted();
         try {
-          await handler(structuredClone(input), { paseo, signal: controller.signal });
+          await handler(structuredClone(input), {
+            paseo,
+            signal: controller.signal,
+          });
         } catch (error) {
           if (
             Object.hasOwn(pluginHookRegistry, name) &&
@@ -623,7 +688,10 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
     try {
       const result = await handler(
         {
-          request: structuredClone({ ...request, accumulatedContext: [...accumulated] }),
+          request: structuredClone({
+            ...request,
+            accumulatedContext: [...accumulated],
+          }),
         },
         { paseo, signal: controller.signal },
       );
