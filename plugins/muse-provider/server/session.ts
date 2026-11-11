@@ -47,18 +47,23 @@ import { Children } from "./children.js";
 import { Recovery } from "./recovery.js";
 import { Questions } from "./questions.js";
 import { Commands } from "./commands.js";
+import { installSessionEnvScripts, removeSessionEnv, writeSessionEnv } from "./session-env.js";
 
 interface SessionOptions {
   serveArgs: string[];
-  // Daemon mode joins the shared Muse session daemon for the first host; the
-  // same session code runs either way, and a refused join falls back to an own
-  // process below.
+  // Daemon mode serves every host of this session from the shared Muse session
+  // daemon. There is no own-process fallback: a daemon that does not answer
+  // fails the session with daemonUnavailable.
   daemon: boolean;
   id: string;
   config: ProviderSessionConfig;
   launch: ProviderLaunch;
   emit(event: ProviderEvent): void;
   capabilities: readonly string[];
+  // Confines the session to its worktree: an own host runs `muse serve`
+  // through it; a joined session (the daemon cannot sit in one sandbox per
+  // agent) runs its command tools and stdio MCP servers through it.
+  wrapper?: string[];
 }
 
 interface Live {
@@ -84,6 +89,7 @@ export class Session {
   private opening = true;
   private closing = false;
   private firstTurn = true;
+  private envDir: string | undefined;
   private interruptCompletion: {
     turnId: string;
     resolve(): void;
@@ -96,14 +102,20 @@ export class Session {
   }
 
   // The idle host respawns through this factory, so a joined session rejoins
-  // the daemon on wake and a fallen-back session keeps its own process.
+  // the daemon on wake. A joined host is only the client of the shared daemon:
+  // it stays outside the wrapper, which then applies per command (see
+  // session-env.ts).
   private spawn(join: boolean): IdleHost {
+    const { launch, wrapper } = this.options;
+    const wrapHost = wrapper && !join;
     const host = new IdleHost(
       () =>
         new MspConnection({
           launch: {
-            ...this.options.launch,
-            env: { ...this.options.launch.env, ...this.config.env },
+            ...launch,
+            command: wrapHost ? wrapper[0]! : launch.command,
+            args: wrapHost ? [...wrapper.slice(1), launch.command, ...launch.args] : launch.args,
+            env: { ...launch.env, ...this.config.env },
           },
           cwd: this.options.config.cwd,
           serveArgs: join ? [...this.options.serveArgs, "--join"] : this.options.serveArgs,
@@ -119,26 +131,39 @@ export class Session {
     return host;
   }
 
+  // An own host spawns stdio MCP servers as its children, so they inherit the
+  // session's launch environment. The shared daemon spawns them with only their
+  // declared `env`, so daemon sessions declare the launch environment under it.
+  private sessionMcpServers(): Record<string, SessionMcpServerConfig> {
+    const inherited = this.options.daemon ? this.launchEnv() : undefined;
+    const wrapper = this.options.daemon ? this.options.wrapper : undefined;
+    return Object.fromEntries(
+      Object.entries(this.config.mcpServers).map(([id, server]) => [
+        id,
+        mcpServer(server, inherited, wrapper),
+      ]),
+    );
+  }
+
+  // Daemon sessions: the shared daemon runs command tools with its own
+  // environment, so the session's launch environment is stored where the
+  // daemon's PreToolUse hook finds it by session id (see session-env.ts).
+  private launchEnv(): Record<string, string> {
+    return { ...this.options.launch.env, ...this.config.env };
+  }
+  private async storeSessionEnv(nativeId: string): Promise<void> {
+    if (!this.options.daemon) return;
+    this.envDir ??= await installSessionEnvScripts(this.launchEnv());
+    await writeSessionEnv(this.envDir, nativeId, this.launchEnv(), this.options.wrapper);
+  }
+
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
-    try {
-      await this.openOnHost(input);
-    } catch (error) {
-      // A daemon that refuses the join (backpressure at start) must not fail
-      // the turn: fall back to an own host process for this session and log it.
-      // Anything else, or a failure past session creation, keeps its error.
-      if (!this.options.daemon || this.liveState || !isDaemonRefusal(error)) throw error;
-      process.stderr.write(
-        `Muse daemon refused session ${this.options.id} (${describeRefusal(error)}); starting an own host process instead\n`,
-      );
-      await this.host.close().catch(() => {});
-      this.host = this.spawn(false);
-      await this.openOnHost(input);
-    }
+    await this.openOnHost(input);
   }
 
   private async openOnHost(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     await this.host.initialize();
-    const mcpServers = this.mcpServers();
+    const mcpServers = this.sessionMcpServers();
     let response;
     if (input.persistence) {
       if (input.persistence.version !== 1)
@@ -175,6 +200,8 @@ export class Session {
         "Muse returned an empty resume viewCursor; this session cannot be watched.",
       );
     const nativeId = response.session.sessionId;
+    // Before any turn can run a command.
+    await this.storeSessionEnv(nativeId);
     this.liveState = {
       nativeId,
       children: new Children(
@@ -547,6 +574,8 @@ export class Session {
   async close(): Promise<void> {
     this.closing = true;
     if (this.liveState) this.live().recovery.close();
+    if (this.envDir && this.liveState)
+      await removeSessionEnv(this.envDir, this.live().nativeId).catch(() => {});
     await this.host.close();
     await this.notifications;
     if (this.liveState) this.live().children.close();
@@ -825,24 +854,17 @@ export class Session {
     });
   }
 }
-// The daemon admits each joined session; when it is saturated it refuses with a
-// retryable admission error (for example -32031 backpressure). Retries already
-// ran inside MspConnection.command, so a refusal surfacing here means the join
-// itself must give way to an own host process.
-function isDaemonRefusal(error: unknown): boolean {
-  return error instanceof MuseError && ["overloaded", "backpressured"].includes(error.kind);
-}
-
-function describeRefusal(error: unknown): string {
-  return error instanceof MuseError ? `${error.kind}: ${error.message}` : String(error);
-}
-function mcpServer(server: ProviderMcpServerConfig): SessionMcpServerConfig {
+function mcpServer(
+  server: ProviderMcpServerConfig,
+  inherited?: Record<string, string>,
+  wrapper?: string[],
+): SessionMcpServerConfig {
   if (server.type === "stdio")
     return {
       transport: "stdio",
-      command: server.command,
-      args: server.args,
-      env: server.env,
+      command: wrapper ? wrapper[0]! : server.command,
+      args: wrapper ? [...wrapper.slice(1), server.command, ...(server.args ?? [])] : server.args,
+      env: inherited ? { ...inherited, ...server.env } : server.env,
       framing: "lineDelimitedJson",
     };
   return { transport: "streamableHttp", url: server.url, headers: server.headers };

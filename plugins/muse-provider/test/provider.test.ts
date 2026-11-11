@@ -1,7 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { UsageSourceRegistry } from "../../../packages/server/src/server/plugins/usage-sources/index.js";
 import { Usage as MuseUsage } from "../server/usage.js";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import path from "node:path";
@@ -30,16 +31,23 @@ afterEach(async () => {
 });
 function registration(
   registerUsageSource = (_source: UsageSourceRegistration) => {},
+  id = "muse",
 ): ProviderRegistration {
-  let provider: ProviderRegistration | undefined;
+  const providers = new Map<string, ProviderRegistration>();
+  let usageRegistered = false;
   const server = {
-    registerUsageSource,
+    registerUsageSource(source: UsageSourceRegistration) {
+      if (usageRegistered) throw new Error("usage source registered twice");
+      usageRegistered = true;
+      registerUsageSource(source);
+    },
     registerProvider(value: ProviderRegistration) {
-      provider = value;
+      providers.set(value.id, value);
     },
   };
   contribute(server);
-  if (!provider) throw new Error("Provider was not registered");
+  const provider = providers.get(id);
+  if (!provider) throw new Error(`Provider ${id} was not registered`);
   return provider;
 }
 async function harness(
@@ -47,6 +55,7 @@ async function harness(
   env: Record<string, string> = {},
   providerOptions?: Record<string, unknown>,
   connectCapabilities: readonly string[] = PROVIDER_CAPABILITIES,
+  providerId = "muse",
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "muse-provider-test-"));
   roots.push(root);
@@ -60,7 +69,7 @@ async function harness(
   let usageSource!: UsageSourceRegistration;
   const provider = registration((source) => {
     usageSource = source;
-  });
+  }, providerId);
   const connection = await provider.connect({
     launch,
     versions: [1],
@@ -1699,13 +1708,55 @@ test("resuming a session reapplies its provider options to the new host", async 
   ]);
   expect(frames.some((f) => f.method === "session/resume")).toBe(true);
 });
-const DAEMON_SESSION_ENV = { PASEO_MUSE_DAEMON: "1" };
+// Daemon sessions need a daemon that answers on the well-known socket. Each
+// test gets its own XDG_DATA_HOME and a listener standing in for
+// `muse serve --listen`, so no test touches the machine's real daemon.
+const daemons: net.Server[] = [];
+afterEach(async () => {
+  await Promise.all(
+    daemons
+      .splice(0)
+      .map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
+});
+async function daemonHome(listen = true): Promise<string> {
+  const data = await mkdtemp(path.join(os.tmpdir(), "muse-daemon-test-"));
+  roots.push(data);
+  const dir = path.join(data, "muse", "session-server");
+  await mkdir(dir, { recursive: true });
+  if (listen) {
+    const server = net.createServer((socket) => socket.destroy());
+    daemons.push(server);
+    await new Promise<void>((resolve) =>
+      server.listen(path.join(dir, "session-server.sock"), () => resolve()),
+    );
+  }
+  return data;
+}
+let DAEMON_SESSION_ENV: Record<string, string> = {};
+afterEach(() => {
+  DAEMON_SESSION_ENV = {};
+});
+// A wrapper that logs its argv to <wrapper>.log and runs the rest.
+async function writeWrapper(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muse-wrapper-test-"));
+  roots.push(dir);
+  const file = path.join(dir, "wrap");
+  await writeFile(file, `#!/bin/sh\necho "$*" >> "$0.log"\n[ "$1" = --tag ] && shift\nexec "$@"\n`);
+  await chmod(file, 0o755);
+  return file;
+}
+async function daemonEnv(): Promise<Record<string, string>> {
+  DAEMON_SESSION_ENV = { PASEO_MUSE_DAEMON: "1", XDG_DATA_HOME: await daemonHome() };
+  return DAEMON_SESSION_ENV;
+}
 function hostArgs(frames: { event?: string; args?: string[] }[]): string[] {
   const started = frames.find((f) => f.event === "hostStarted");
   if (!started?.args) throw new Error("Expected a hostStarted record");
   return started.args;
 }
 test("a daemon session joins the shared host and keeps the default sandbox posture", async () => {
+  await daemonEnv();
   const h = await harness();
   expect(
     await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
@@ -1719,12 +1770,132 @@ test("a daemon session joins the shared host and keeps the default sandbox postu
     "--join",
   ]);
 });
+test("a daemon session stores its launch env for the daemon's command hook", async () => {
+  const envDir = await daemonHome(false);
+  const env = {
+    ...(await daemonEnv()),
+    PASEO_MUSE_SESSION_ENV_DIR: envDir,
+    ORBIT_BEAD: "bead-1",
+    PATH: "/agent/bin:/usr/bin",
+  };
+  const h = await harness("text-reasoning", { LAUNCH_ONLY: "launch" });
+  expect(await h.open(undefined, "onRequest", "meta/muse-spark-1.3", env)).toMatchObject({
+    type: "session.ready",
+  });
+  const start = (await h.recorded()).find((f) => f.method === "session/start").params;
+  expect(start.limits).toBeUndefined();
+  const files = (await readdir(envDir)).filter((f) => f !== "muse").sort();
+  expect(files).toEqual(
+    ["01a0ee4c-c501-7d50-9020-effa9f9956e1.json", "hook.cjs", "run.cjs"].sort(),
+  );
+  const stored = JSON.parse(
+    await readFile(path.join(envDir, "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"), "utf8"),
+  );
+  expect(stored.wrapper).toEqual([]);
+  expect(stored.env).toMatchObject({
+    ORBIT_BEAD: "bead-1",
+    PATH: "/agent/bin:/usr/bin",
+    LAUNCH_ONLY: "launch",
+  });
+  expect(
+    (await stat(path.join(envDir, "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"))).mode & 0o777,
+  ).toBe(0o600);
+  expect((await stat(envDir)).mode & 0o777).toBe(0o700);
+  await h.connection.close();
+  expect(await readdir(envDir)).not.toContain("01a0ee4c-c501-7d50-9020-effa9f9956e1.json");
+});
+test("an own-host session stores no env file", async () => {
+  const envDir = await daemonHome(false);
+  const h = await harness("text-reasoning", { PASEO_MUSE_SESSION_ENV_DIR: envDir });
+  await h.open();
+  expect(await readdir(envDir)).toEqual(["muse"]);
+});
+test("daemon sessions give stdio MCP servers the launch env under their own env", async () => {
+  const env = { ...(await daemonEnv()), ORBIT_BEAD: "bead-3", TEST_ENV: "session" };
+  const h = await harness();
+  await h.send({
+    type: "session.open",
+    sessionId: "paseo-session",
+    requestId: "mcp-env",
+    history: "replay",
+    config: {
+      cwd: h.root,
+      env,
+      persist: true,
+      settings: {},
+      mcpServers: {
+        stdio: { type: "stdio", command: "srv", args: [], env: { TEST_ENV: "server" } },
+        http: { type: "http", url: "http://localhost/mcp", headers: { A: "b" } },
+      },
+    },
+  });
+  await h.wait((event) => event.type === "session.ready");
+  const servers = (await h.recorded()).find((f) => f.method === "session/start").params.config
+    .mcpServers;
+  expect(servers.stdio.env).toMatchObject({ ORBIT_BEAD: "bead-3", TEST_ENV: "server" });
+  expect(servers.http).toEqual({
+    transport: "streamableHttp",
+    url: "http://localhost/mcp",
+    headers: { A: "b" },
+  });
+});
+test("the plugin registers muse and muse-ws", () => {
+  expect(registration(undefined, "muse").label).toBe("Muse Code");
+  expect(registration(undefined, "muse-ws").label).toBe("Muse Code (worktree sandbox)");
+});
+test("muse-ws without a wrapper fails to open and spawns nothing", async () => {
+  const h = await harness("text-reasoning", {}, undefined, PROVIDER_CAPABILITIES, "muse-ws");
+  expect(await h.open()).toMatchObject({
+    type: "request.failed",
+    error: { code: "wrapperRequired" },
+  });
+  expect((await h.recorded()).filter((f) => f.event === "hostStarted")).toEqual([]);
+});
+test("an own muse-ws host runs muse serve through the wrapper", async () => {
+  const wrapper = await writeWrapper();
+  const h = await harness("text-reasoning", {}, { wrapper: [wrapper, "--tag"] }, PROVIDER_CAPABILITIES, "muse-ws");
+  expect(await h.open()).toMatchObject({ type: "session.ready" });
+  const log = await readFile(`${wrapper}.log`, "utf8");
+  expect(log).toContain("--tag ");
+  expect(log).toMatch(/fake-muse\.mjs serve /);
+});
+test("a joined muse-ws session wraps stdio MCP servers and stores the wrapper, not the host", async () => {
+  const envDir = await daemonHome(false);
+  const wrapper = await writeWrapper();
+  const env = { ...(await daemonEnv()), PASEO_MUSE_SESSION_ENV_DIR: envDir };
+  const h = await harness("text-reasoning", {}, { wrapper: [wrapper] }, PROVIDER_CAPABILITIES, "muse-ws");
+  await h.send({
+    type: "session.open",
+    sessionId: "paseo-session",
+    requestId: "ws",
+    history: "replay",
+    config: {
+      cwd: h.root,
+      env,
+      persist: true,
+      settings: {},
+      providerOptions: { wrapper: [wrapper] },
+      mcpServers: { srv: { type: "stdio", command: "mcp-bin", args: ["--x"] } },
+    },
+  });
+  await h.wait((event) => event.type === "session.ready");
+  expect(hostArgs(await h.recorded())).toContain("--join");
+  await expect(readFile(`${wrapper}.log`, "utf8")).rejects.toThrow();
+  const servers = (await h.recorded()).find((f) => f.method === "session/start").params.config
+    .mcpServers;
+  expect(servers.srv).toMatchObject({ command: wrapper, args: ["mcp-bin", "--x"] });
+  const stored = JSON.parse(
+    await readFile(path.join(envDir, "01a0ee4c-c501-7d50-9020-effa9f9956e1.json"), "utf8"),
+  );
+  expect(stored.wrapper).toEqual([wrapper]);
+});
 test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
   const h = await harness();
   await h.open(undefined, "onRequest", "meta/muse-spark-1.3", { PASEO_MUSE_DAEMON: "0" });
   expect(hostArgs(await h.recorded())).not.toContain("--join");
 });
 test("a daemon-joined session runs the thinking path end to end", async () => {
+  await daemonEnv();
   const h = await harness();
   expect(
     await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
@@ -1744,6 +1915,7 @@ test("a daemon-joined session runs the thinking path end to end", async () => {
 });
 for (const variant of ["tool", "dedicated", "workflow"]) {
   test(`${variant} subagent opens the supplied child on a daemon-joined host`, async () => {
+    await daemonEnv();
     const h = await harness("subagent", { MUSE_TEST_CHILD: variant });
     expect(
       await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
@@ -1765,34 +1937,55 @@ for (const variant of ["tool", "dedicated", "workflow"]) {
   });
 }
 for (const kind of ["overloaded", "backpressured"]) {
-  test(`a ${kind} daemon refusal at start falls back to an own host process`, async () => {
+  test(`a ${kind} daemon refusal at start fails the session instead of spawning an own host`, async () => {
     const h = await harness("text-reasoning", {
       MUSE_TEST_REFUSE_JOIN: "1",
       MUSE_TEST_REFUSE_KIND: kind,
     });
-    const writes: string[] = [];
-    const originalWrite = process.stderr.write;
-    process.stderr.write = ((chunk: unknown) => {
-      writes.push(String(chunk));
-      return true;
-    }) as typeof process.stderr.write;
-    try {
-      expect(
-        await h.open(undefined, "onRequest", "meta/muse-spark-1.3", DAEMON_SESSION_ENV),
-      ).toMatchObject({ type: "session.ready" });
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-    expect(writes.join("")).toContain("Muse daemon refused session paseo-session");
+    expect(
+      await h.open(undefined, "onRequest", "meta/muse-spark-1.3", await daemonEnv()),
+    ).toMatchObject({ type: "request.failed", error: { code: kind } });
     const starts = (await h.recorded()).filter((f) => f.event === "hostStarted");
-    expect(starts).toHaveLength(2);
+    expect(starts).toHaveLength(1);
     expect(starts[0].args).toContain("--join");
-    expect(starts[1].args).not.toContain("--join");
-    await h.prompt();
-    await h.wait((event) => event.type === "session.turn" && event.state === "completed");
   });
 }
+test("a daemon session fails with daemonUnavailable when no daemon socket exists", async () => {
+  const h = await harness();
+  const env = { PASEO_MUSE_DAEMON: "1", XDG_DATA_HOME: await daemonHome(false) };
+  expect(await h.open(undefined, "onRequest", "meta/muse-spark-1.3", env)).toMatchObject({
+    type: "request.failed",
+    error: { code: "daemonUnavailable", message: expect.stringContaining("session-server.sock") },
+  });
+  expect((await h.recorded()).filter((f) => f.event === "hostStarted")).toEqual([]);
+});
+test("a stale socket left by a killed daemon counts as no daemon", async () => {
+  const h = await harness();
+  const data = await daemonHome(false);
+  const socket = path.join(data, "muse", "session-server", "session-server.sock");
+  // SIGKILL leaves the socket file with no listener: the connect is refused.
+  const child = await new Promise<import("node:child_process").ChildProcess>((resolve) => {
+    const proc = spawn(process.execPath, [
+      "-e",
+      `require("net").createServer().listen(${JSON.stringify(socket)}, () => console.log("up"))`,
+    ]);
+    proc.stdout?.once("data", () => resolve(proc));
+  });
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+  expect(
+    await h.open(undefined, "onRequest", "meta/muse-spark-1.3", {
+      PASEO_MUSE_DAEMON: "1",
+      XDG_DATA_HOME: data,
+    }),
+  ).toMatchObject({
+    type: "request.failed",
+    error: { code: "daemonUnavailable", message: expect.stringContaining("ECONNREFUSED") },
+  });
+  expect((await h.recorded()).filter((f) => f.event === "hostStarted")).toEqual([]);
+});
 test("a daemon-joined session resumes inline history after its host restarts", async () => {
+  await daemonEnv();
   const original = await harness();
   const historyPath = path.join(original.root, "native-history.ndjson");
   original.launch.env.MUSE_TEST_HISTORY = historyPath;
