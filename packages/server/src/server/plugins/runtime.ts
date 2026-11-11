@@ -692,6 +692,11 @@ export class PluginRuntime {
     };
   }
 
+  getRpcMethods(pluginId: string): string[] | undefined {
+    const loaded = this.plugins.get(pluginId);
+    return loaded ? [...loaded.methods].sort() : undefined;
+  }
+
   emit<Name extends keyof PluginHookEvents>(name: Name, event: PluginHookEvents[Name]): void {
     for (const loaded of this.plugins.values()) {
       if (!loaded.hooks.includes(name)) {
