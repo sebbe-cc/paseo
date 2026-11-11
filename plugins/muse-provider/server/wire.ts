@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const fingerprint =
-  "sha256:e0e163db6ccf00dbe68402ce55d6319b3edc33c421f31e9583b587b2de8a118f";
+  "sha256:c94c3d1f2f51e6424074b9ec43eac3eedcf532d3dcd77351ec1383a87d3049c6";
 export const effortSchema = z.enum([
   "none",
   "minimal",
