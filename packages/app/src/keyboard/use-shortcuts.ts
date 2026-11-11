@@ -32,6 +32,8 @@ import {
   navigateToLastWorkspace,
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
+import { pluginKeyboardShortcuts } from "@/plugins/keyboard-shortcuts";
+import { setPluginActiveWorkspace } from "@/plugins/recent-navigation";
 
 export function useKeyboardShortcuts({
   enabled,
@@ -62,19 +64,27 @@ export function useKeyboardShortcuts({
   const keyboardWorkspaceSelectionRef = useRef<ActiveWorkspaceSelection | null>(null);
   const publishBrowserShortcutPolicy = useCallback(
     (chordState?: ChordState) => {
-      publishKeyboardPolicy({ bindings, chordState, isMac, enabled });
+      publishKeyboardPolicy({
+        bindings,
+        chordState,
+        isMac,
+        enabled,
+        extraPrefixes: pluginKeyboardShortcuts.browserPrefixes(isMac, overrides),
+      });
     },
-    [bindings, enabled, isMac],
+    [bindings, enabled, isMac, overrides],
   );
 
   useEffect(() => {
     if (activeWorkspaceSelection) {
       keyboardWorkspaceSelectionRef.current = activeWorkspaceSelection;
     }
+    setPluginActiveWorkspace(activeWorkspaceSelection);
   }, [activeWorkspaceSelection]);
 
   useEffect(() => {
     publishBrowserShortcutPolicy();
+    return pluginKeyboardShortcuts.subscribe(publishBrowserShortcutPolicy);
   }, [publishBrowserShortcutPolicy]);
 
   // Only the modifier that actually performs the workspace-index jump on this
@@ -233,6 +243,11 @@ export function useKeyboardShortcuts({
         state.resetModifiers();
       }
     }
+    if (pluginKeyboardShortcuts.dispatch(event, isMac, overrides)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return false;
+    }
 
     return true;
   });
@@ -253,9 +268,17 @@ export function useKeyboardShortcuts({
 
   const handleKeyUp = useStableEvent((event: KeyboardInputEvent) => {
     const key = event.key ?? "";
+    pluginKeyboardShortcuts.release(key, isMac, overrides);
+    // Embedded-browser key releases only release plugin shortcuts.
+    if ("browserId" in event) return;
     if (key === badgeModifierKey) {
       setBadgeModifierDown(false);
     }
+  });
+
+  const handleBlur = useStableEvent(() => {
+    pluginKeyboardShortcuts.release(null, isMac, overrides);
+    resetModifiers();
   });
 
   useEffect(() => {
@@ -263,12 +286,12 @@ export function useKeyboardShortcuts({
     const detach = attachKeyboardSources({
       keyDown: pipeline.keyDown,
       keyUp: handleKeyUp,
-      blur: resetModifiers,
+      blur: handleBlur,
       commandCenterOpen: () => useKeyboardShortcutsStore.getState().commandCenterOpen,
     });
     return () => {
       detach();
       pipeline.dispose();
     };
-  }, [enabled, pipeline, handleKeyUp, resetModifiers]);
+  }, [enabled, pipeline, handleKeyUp, handleBlur]);
 }
