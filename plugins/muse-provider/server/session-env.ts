@@ -87,19 +87,27 @@ export function sessionEnvRunMain(): void {
   const { spawn } = require("node:child_process") as typeof import("node:child_process");
   const [envFile, encoded] = process.argv.slice(2);
   let env: Record<string, string>;
+  let wrapper: string[];
   try {
-    env = JSON.parse(fs.readFileSync(envFile ?? "", "utf8"));
+    const record = JSON.parse(fs.readFileSync(envFile ?? "", "utf8")) as {
+      env: Record<string, string>;
+      wrapper?: string[];
+    };
+    env = record.env;
+    wrapper = record.wrapper ?? [];
   } catch (error) {
     // The file vanished between hook and run (session closed): fail loudly.
     process.stderr.write(`paseo: session environment unavailable (${String(error)})\n`);
     process.exit(126);
   }
   const command = Buffer.from(encoded ?? "", "base64").toString("utf8");
-  const child = spawn("/bin/sh", ["-c", command], { env, stdio: "inherit" });
+  const argv = [...wrapper, "/bin/sh", "-c", command];
+  // A wrapper that cannot start fails the command (exit 127), never runs it unwrapped.
+  const child = spawn(argv[0]!, argv.slice(1), { env, stdio: "inherit" });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
     process.on(signal, () => child.kill(signal));
   child.on("error", (error) => {
-    process.stderr.write(`paseo: cannot start /bin/sh (${error.message})\n`);
+    process.stderr.write(`paseo: cannot start ${argv[0]} (${error.message})\n`);
     process.exit(127);
   });
   child.on("exit", (code, signal) => {
@@ -133,13 +141,16 @@ export async function installSessionEnvScripts(
   return dir;
 }
 
+/** `wrapper`, when set, prefixes every command (e.g. a worktree sandbox launcher). */
 export async function writeSessionEnv(
   dir: string,
   sessionId: string,
   env: Readonly<Record<string, string>>,
+  wrapper?: readonly string[],
 ): Promise<void> {
   if (!SESSION_ID.test(sessionId)) throw new Error(`invalid Muse session id ${sessionId}`);
-  await writeAtomic(path.join(dir, `${sessionId}.json`), JSON.stringify(env), 0o600);
+  const record = { env, wrapper: wrapper ?? [] };
+  await writeAtomic(path.join(dir, `${sessionId}.json`), JSON.stringify(record), 0o600);
 }
 
 export async function removeSessionEnv(dir: string, sessionId: string): Promise<void> {

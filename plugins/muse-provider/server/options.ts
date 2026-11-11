@@ -15,10 +15,16 @@ const optionsSchema = z
       .strict()
       .prefault({}),
     trustWorkspace: z.boolean().default(true),
+    // An external command prefix (argv) that confines the session to its
+    // worktree, e.g. a namespace launcher. An own host runs `muse serve` through
+    // it; a daemon session runs its command tools and stdio MCP servers through
+    // it. Required by the wrapped provider (`muse-ws`), which has no unwrapped
+    // fallback.
+    wrapper: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 
-export function serveArgs(providerOptions: unknown): string[] {
+function parseOptions(providerOptions: unknown) {
   const parsed = optionsSchema.safeParse(providerOptions === undefined ? {} : providerOptions);
   if (!parsed.success) {
     const errors = parsed.error.issues
@@ -26,7 +32,16 @@ export function serveArgs(providerOptions: unknown): string[] {
       .join("; ");
     throw new MuseError("invalidProviderOptions", `Invalid Muse providerOptions: ${errors}`);
   }
-  const { sandbox, trustWorkspace } = parsed.data;
+  return parsed.data;
+}
+
+/** The configured wrapper, or undefined when the session runs unwrapped. */
+export function wrapperArgv(providerOptions: unknown): string[] | undefined {
+  return parseOptions(providerOptions).wrapper;
+}
+
+export function serveArgs(providerOptions: unknown): string[] {
+  const { sandbox, trustWorkspace } = parseOptions(providerOptions);
   return [
     "--sandbox-network",
     sandbox.network,
