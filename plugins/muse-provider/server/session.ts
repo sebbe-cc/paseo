@@ -60,6 +60,10 @@ interface SessionOptions {
   launch: ProviderLaunch;
   emit(event: ProviderEvent): void;
   capabilities: readonly string[];
+  // Confines the session to its worktree: an own host runs `muse serve`
+  // through it; a joined session (the daemon cannot sit in one sandbox per
+  // agent) runs its command tools and stdio MCP servers through it.
+  wrapper?: string[];
 }
 
 interface Live {
@@ -100,12 +104,18 @@ export class Session {
   // The idle host respawns through this factory, so a joined session rejoins
   // the daemon on wake and a fallen-back session keeps its own process.
   private spawn(join: boolean): IdleHost {
+    const { launch, wrapper } = this.options;
+    // A joined host is only the client of the shared daemon: it stays outside
+    // the wrapper, which then applies per command (see session-env.ts).
+    const wrapHost = wrapper && !join;
     const host = new IdleHost(
       () =>
         new MspConnection({
           launch: {
-            ...this.options.launch,
-            env: { ...this.options.launch.env, ...this.config.env },
+            ...launch,
+            command: wrapHost ? wrapper[0]! : launch.command,
+            args: wrapHost ? [...wrapper.slice(1), launch.command, ...launch.args] : launch.args,
+            env: { ...launch.env, ...this.config.env },
           },
           cwd: this.options.config.cwd,
           serveArgs: join ? [...this.options.serveArgs, "--join"] : this.options.serveArgs,
@@ -126,10 +136,11 @@ export class Session {
   // declared `env`, so daemon sessions declare the launch environment under it.
   private sessionMcpServers(): Record<string, SessionMcpServerConfig> {
     const inherited = this.options.daemon ? this.launchEnv() : undefined;
+    const wrapper = this.options.daemon ? this.options.wrapper : undefined;
     return Object.fromEntries(
       Object.entries(this.config.mcpServers).map(([id, server]) => [
         id,
-        mcpServer(server, inherited),
+        mcpServer(server, inherited, wrapper),
       ]),
     );
   }
@@ -143,7 +154,7 @@ export class Session {
   private async storeSessionEnv(nativeId: string): Promise<void> {
     if (!this.options.daemon) return;
     this.envDir ??= await installSessionEnvScripts(this.launchEnv());
-    await writeSessionEnv(this.envDir, nativeId, this.launchEnv());
+    await writeSessionEnv(this.envDir, nativeId, this.launchEnv(), this.options.wrapper);
   }
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
@@ -846,12 +857,13 @@ export class Session {
 function mcpServer(
   server: ProviderMcpServerConfig,
   inherited?: Record<string, string>,
+  wrapper?: string[],
 ): SessionMcpServerConfig {
   if (server.type === "stdio")
     return {
       transport: "stdio",
-      command: server.command,
-      args: server.args,
+      command: wrapper ? wrapper[0]! : server.command,
+      args: wrapper ? [...wrapper.slice(1), server.command, ...(server.args ?? [])] : server.args,
       env: inherited ? { ...inherited, ...server.env } : server.env,
       framing: "lineDelimitedJson",
     };

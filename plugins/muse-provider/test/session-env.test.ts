@@ -94,3 +94,21 @@ test("exit codes pass through and a session without an env file is left alone", 
   expect(other.hook).toBe("");
   expect(other.stdout).toBe("d=d\n");
 });
+
+test("a stored wrapper prefixes the command, and a missing wrapper fails it", async () => {
+  const dir = await installSessionEnvScripts({ PASEO_MUSE_SESSION_ENV_DIR: await tempDir("dir") });
+  const bin = await tempDir("wrap");
+  const wrap = path.join(bin, "wrap");
+  await writeFile(wrap, '#!/bin/sh\necho "wrapped:$1 root=$SANDBOX_ROOT"\nexec "$@"\n');
+  await chmod(wrap, 0o755);
+  const id = "01a1c7f0-98bc-7e92-93ef-05c3e1ff9456";
+  await writeSessionEnv(dir, id, { PATH: process.env.PATH ?? "", SANDBOX_ROOT: "/wt/a" }, [wrap]);
+  const run = await daemonRuns(dir, id, "echo inner");
+  expect(run.stdout).toBe("wrapped:/bin/sh root=/wt/a\ninner\n");
+  const missing = "01a1c7f0-98bc-7e92-93ef-05c3e1ff9457";
+  await writeSessionEnv(dir, missing, { PATH: process.env.PATH ?? "" }, ["/nonexistent/wrap"]);
+  const failed = await daemonRuns(dir, missing, "echo should-not-run");
+  expect(failed.code).toBe(127);
+  expect(failed.stdout).toBe("");
+  expect(failed.stderr).toContain("cannot start /nonexistent/wrap");
+});
