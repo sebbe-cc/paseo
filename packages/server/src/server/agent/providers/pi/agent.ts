@@ -273,6 +273,7 @@ interface PiMcpServerConfig {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  exposure?: "direct";
 }
 
 // Pi's built-in MCP extension takes servers from Paseo's extension; pi-mcp-adapter replaces it
@@ -553,7 +554,11 @@ function toPiBuiltinMcpServers(
         `Pi's built-in MCP cannot register SSE server "${name}": use streamable HTTP or load pi-mcp-adapter.`,
       );
     }
-    piServers[name] = toPiMcpConfig(config);
+    // alwaysLoad declares the tools to the model; Pi's default codemode hides them behind search.
+    piServers[name] = {
+      ...toPiMcpConfig(config),
+      ...(config.alwaysLoad === true ? { exposure: "direct" as const } : {}),
+    };
   }
   return piServers;
 }
