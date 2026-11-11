@@ -1,5 +1,14 @@
+import type {
+  DictationProviderSelection,
+  PluginDictationHost,
+  PluginVoiceHost,
+  VoiceProviderSelection,
+  VoiceProviderSession,
+  VoiceProviderEvent,
+} from "@getpaseo/plugin/server";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { createPluginDictationStt } from "../../speech/plugin-dictation-stt.js";
 import type pino from "pino";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
@@ -31,6 +40,16 @@ const MIN_STREAMING_SEGMENT_BYTES = Math.round(
   PCM_BYTES_PER_MS * MIN_STREAMING_SEGMENT_DURATION_MS,
 );
 const AgentIdSchema = z.guid();
+
+/**
+ * The target agent was closed or resumed concurrently — for example by a
+ * plugin tool refresh or an explicit reload racing voice mode — so the live
+ * lookup misses it. These errors mean "re-resolve and retry", not failure.
+ */
+function isUnknownAgentError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unknown agent|agent .* not found|no managed session/i.test(message);
+}
 
 type ProcessingPhase = "idle" | "transcribing";
 
@@ -140,7 +159,9 @@ export interface VoiceSessionOptions {
   tts: Resolvable<TextToSpeechProvider | null>;
   stt: Resolvable<SpeechToTextProvider | null>;
   voice?: {
+    clientSupportsPluginVoice?: boolean;
     turnDetection?: Resolvable<TurnDetectionProvider | null>;
+    plugin?: { getSelection(): VoiceProviderSelection | null; host: PluginVoiceHost };
   };
   voiceBridge?: {
     registerVoiceSpeakHandler?: (agentId: string, handler: VoiceSpeakHandler) => void;
@@ -153,6 +174,8 @@ export interface VoiceSessionOptions {
     stt?: Resolvable<SpeechToTextProvider | null>;
     sttLanguage?: string;
     getSpeechReadiness?: () => SpeechReadinessSnapshot;
+    clientSupportsPluginDictation?: boolean;
+    plugin?: { getSelection(): DictationProviderSelection | null; host: PluginDictationHost };
   };
 }
 
@@ -207,6 +230,13 @@ export class VoiceSession {
   private readonly unregisterVoiceCallerContext?: (agentId: string) => void;
   private readonly getSpeechReadiness?: () => SpeechReadinessSnapshot;
 
+  private readonly pluginVoice: NonNullable<VoiceSessionOptions["voice"]>["plugin"];
+  // COMPAT(pluginDictationProviders): clients without the capability keep built-in dictation.
+  private readonly pluginDictation: NonNullable<VoiceSessionOptions["dictation"]>["plugin"];
+  private readonly clientSupportsPluginVoice: boolean;
+  private pluginConnection: VoiceProviderSession | null = null;
+  private pluginAbort: AbortController | null = null;
+  private voiceModeTransition: Promise<void> = Promise.resolve();
   private voiceModeAgentId: string | null = null;
   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
 
@@ -220,12 +250,15 @@ export class VoiceSession {
     this.sttLanguage = sttLanguage ?? "en";
     this.abortController = new AbortController();
 
+    this.pluginVoice = voice?.plugin;
+    this.clientSupportsPluginVoice = voice?.clientSupportsPluginVoice !== false;
     this.resolveVoiceTurnDetection = toResolver(voice?.turnDetection ?? null);
     this.registerVoiceSpeakHandler = voiceBridge?.registerVoiceSpeakHandler;
     this.unregisterVoiceSpeakHandler = voiceBridge?.unregisterVoiceSpeakHandler;
     this.registerVoiceCallerContext = voiceBridge?.registerVoiceCallerContext;
     this.unregisterVoiceCallerContext = voiceBridge?.unregisterVoiceCallerContext;
     this.getSpeechReadiness = dictation?.getSpeechReadiness;
+    this.pluginDictation = dictation?.clientSupportsPluginDictation ? dictation.plugin : undefined;
 
     this.ttsManager = new TTSManager(this.sessionId, this.sessionLogger, tts);
     this.sttManager = new STTManager(this.sessionId, this.sessionLogger, stt, {
@@ -276,6 +309,26 @@ export class VoiceSession {
   async handleDictationStreamStart(
     msg: Extract<SessionInboundMessage, { type: "dictation_stream_start" }>,
   ): Promise<void> {
+    const selection = this.pluginDictation?.getSelection();
+    if (selection && this.pluginDictation) {
+      if (this.pluginDictation.host.hasDictationProvider(selection)) {
+        const stt = createPluginDictationStt(this.pluginDictation.host, selection);
+        await this.dictationStreamManager.handleStart(msg.dictationId, msg.format, {
+          agentId: msg.agentId,
+          stt,
+        });
+        return;
+      }
+      this.emit({
+        type: "dictation_stream_error",
+        payload: {
+          dictationId: msg.dictationId,
+          error: "Selected dictation plugin is unavailable",
+          retryable: true,
+        },
+      });
+      return;
+    }
     const unavailable = this.resolveVoiceFeatureUnavailableContext("dictation");
     if (unavailable) {
       this.emit({
@@ -290,7 +343,9 @@ export class VoiceSession {
       });
       return;
     }
-    await this.dictationStreamManager.handleStart(msg.dictationId, msg.format);
+    await this.dictationStreamManager.handleStart(msg.dictationId, msg.format, {
+      agentId: msg.agentId,
+    });
   }
 
   private toVoiceFeatureUnavailableContext(
@@ -351,13 +406,28 @@ export class VoiceSession {
   /**
    * Handle voice mode toggle
    */
-  async handleSetVoiceMode(enabled: boolean, agentId?: string, requestId?: string): Promise<void> {
+  handleSetVoiceMode(enabled: boolean, agentId?: string, requestId?: string): Promise<void> {
+    // Stop bootstrap promptly even while an earlier start owns the transition queue.
+    if (!enabled || (agentId && agentId !== this.voiceModeAgentId)) this.pluginAbort?.abort();
+    const transition = this.voiceModeTransition.then(() =>
+      this.setVoiceMode(enabled, agentId, requestId),
+    );
+    this.voiceModeTransition = transition.catch(() => undefined);
+    return transition;
+  }
+
+  private async setVoiceMode(
+    enabled: boolean,
+    agentId?: string,
+    requestId?: string,
+  ): Promise<void> {
     const startedAt = Date.now();
     try {
       this.sessionLogger.info(
         { enabled, requestedAgentId: agentId ?? null, requestId: requestId ?? null },
         "set_voice_mode started",
       );
+      if (await this.tryStartPluginVoice(enabled, agentId, requestId)) return;
       if (enabled) {
         const unavailable = this.resolveVoiceFeatureUnavailableContext("voice_mode");
         if (unavailable) {
@@ -480,6 +550,128 @@ export class VoiceSession {
     }
   }
 
+  private async tryStartPluginVoice(
+    enabled: boolean,
+    agentId?: string,
+    requestId?: string,
+  ): Promise<boolean> {
+    const selection = this.pluginVoice?.getSelection();
+    if (!enabled || !selection) return false;
+    // COMPAT(pluginVoiceProviders): added in fork v0.12.0; remove after 2027-04-20 once all clients handle sessionEnded.
+    if (!this.clientSupportsPluginVoice)
+      throw new Error("Update the Paseo app to use plugin voice providers.");
+    await this.startPluginVoice(
+      selection,
+      this.parseVoiceTargetAgentId(agentId ?? "", "set_voice_mode"),
+    );
+    if (requestId)
+      this.emit({
+        type: "set_voice_mode_response",
+        payload: {
+          requestId,
+          enabled: true,
+          agentId: this.voiceModeAgentId,
+          accepted: true,
+          error: null,
+        },
+      });
+    return true;
+  }
+
+  private async startPluginVoice(
+    selection: VoiceProviderSelection,
+    agentId: string,
+  ): Promise<void> {
+    if (!this.pluginVoice) throw new Error("Plugin voice is unavailable");
+    if (this.pluginConnection && this.voiceModeAgentId === agentId) return;
+    await this.disableVoiceModeForActiveAgent(true);
+    this.isVoiceMode = false;
+    await this.host.loadAgent(agentId);
+    if (this.closed) throw new Error("Voice source is closed");
+    const abort = new AbortController();
+    this.pluginAbort = abort;
+    this.voiceModeAgentId = agentId;
+    try {
+      const connection = await this.pluginVoice.host.startVoiceProvider(selection, {
+        agentId,
+        signal: abort.signal,
+        emit: (event) => {
+          if (!this.closed && this.pluginAbort === abort && !abort.signal.aborted)
+            this.handlePluginVoiceEvent(event);
+        },
+      });
+      if (this.closed || abort.signal.aborted) {
+        await connection.close();
+        throw new Error("Voice startup cancelled");
+      }
+      this.pluginConnection = connection;
+      this.isVoiceMode = true;
+    } catch (error) {
+      abort.abort();
+      if (this.pluginAbort === abort) {
+        this.pluginAbort = null;
+        this.voiceModeAgentId = null;
+      }
+      throw error;
+    }
+  }
+
+  private handlePluginVoiceEvent(event: VoiceProviderEvent): void {
+    switch (event.type) {
+      case "audio":
+        this.emit({
+          type: "audio_output",
+          payload: {
+            audio: event.audio,
+            format: "pcm",
+            id: uuidv4(),
+            isVoiceMode: true,
+            groupId: event.utteranceId,
+            chunkIndex: event.chunkIndex,
+            isLastChunk: event.isLastChunk,
+          },
+        });
+        return;
+      case "speech":
+        this.emit({ type: "voice_input_state", payload: { isSpeaking: event.isSpeaking } });
+        return;
+      case "transcript":
+        if (event.role === "user")
+          this.emit({
+            type: "transcription_result",
+            payload: { text: event.text, requestId: uuidv4() },
+          });
+        else
+          this.emit({
+            type: "activity_log",
+            payload: {
+              id: uuidv4(),
+              timestamp: new Date(),
+              type: "assistant",
+              content: event.text,
+            },
+          });
+        return;
+      case "closed":
+        this.endPluginVoice(event.error);
+    }
+  }
+
+  private endPluginVoice(reason?: string): void {
+    const connection = this.pluginConnection;
+    this.pluginConnection = null;
+    this.pluginAbort?.abort();
+    this.pluginAbort = null;
+    this.voiceModeAgentId = null;
+    this.isVoiceMode = false;
+    this.emit({
+      type: "voice_input_state",
+      payload: { isSpeaking: false, sessionEnded: true, ...(reason ? { error: reason } : {}) },
+    });
+    void Promise.resolve(connection?.close()).catch(() => undefined);
+    this.onIdle?.();
+  }
+
   private parseVoiceTargetAgentId(rawId: string, source: string): string {
     const parsed = AgentIdSchema.safeParse(rawId.trim());
     if (!parsed.success) {
@@ -513,7 +705,7 @@ export class VoiceSession {
         { agentId, elapsedMs: Date.now() - startedAt },
         "enableVoiceModeForAgent.reloadAgentSession.start",
       );
-      const refreshed = await this.host.reloadAgentSession(agentId, refreshOverrides);
+      const refreshed = await this.reloadVoiceAgentSessionWithRetry(agentId, refreshOverrides);
       this.sessionLogger.info(
         { agentId, refreshedAgentId: refreshed.id, elapsedMs: Date.now() - startedAt },
         "enableVoiceModeForAgent.reloadAgentSession.done",
@@ -527,7 +719,36 @@ export class VoiceSession {
     }
   }
 
+  /**
+   * Reload the voice target agent, surviving a concurrent close/resume. When
+   * the agent disappears between the load and the reload — a plugin tool
+   * refresh or an explicit agent reload racing this enable — re-resolve it
+   * from storage and retry once instead of failing with Unknown agent.
+   */
+  private async reloadVoiceAgentSessionWithRetry(
+    agentId: string,
+    overrides: Partial<AgentSessionConfig>,
+  ): Promise<ManagedAgent> {
+    try {
+      return await this.host.reloadAgentSession(agentId, overrides);
+    } catch (error) {
+      if (!isUnknownAgentError(error)) throw error;
+      this.sessionLogger.info(
+        { agentId },
+        "enableVoiceModeForAgent: agent went missing during enable; re-resolving and retrying",
+      );
+      await this.host.loadAgent(agentId);
+      if (this.closed) throw new Error("Voice source is closed", { cause: error });
+      return await this.host.reloadAgentSession(agentId, overrides);
+    }
+  }
+
   private async disableVoiceModeForActiveAgent(restoreAgentConfig: boolean): Promise<void> {
+    const connection = this.pluginConnection;
+    this.pluginConnection = null;
+    this.pluginAbort?.abort();
+    this.pluginAbort = null;
+    if (connection) await Promise.resolve(connection.close()).catch(() => undefined);
     await this.stopVoiceTurnController();
 
     const agentId = this.voiceModeAgentId;
@@ -726,6 +947,7 @@ export class VoiceSession {
     msg: Extract<SessionInboundMessage, { type: "voice_audio_chunk" }>,
     chunkFormat: string,
   ): Promise<void> {
+    if (this.pluginConnection) return this.appendPluginAudio(msg);
     if (!this.voiceTurnController) {
       throw new Error("Voice mode is enabled but the voice turn controller is not running");
     }
@@ -751,6 +973,19 @@ export class VoiceSession {
       audioBase64: msg.audio,
       format: chunkFormat,
     });
+  }
+
+  private async appendPluginAudio(
+    msg: Extract<SessionInboundMessage, { type: "voice_audio_chunk" }>,
+  ): Promise<void> {
+    if (!this.pluginConnection) return;
+    try {
+      if (msg.format !== "audio/pcm;rate=16000;bits=16")
+        throw new Error("Plugin voice requires PCM16 at 16 kHz");
+      await this.pluginConnection.appendAudio(msg.audio);
+    } catch {
+      this.endPluginVoice("Voice audio transport failed");
+    }
   }
 
   async handleAudioChunk(
@@ -1108,18 +1343,28 @@ export class VoiceSession {
       try {
         await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
       } catch (error) {
-        const message = `Voice interruption failed: ${getErrorMessage(error)}`;
-        this.emit({
-          type: "activity_log",
-          payload: {
-            id: uuidv4(),
-            timestamp: new Date(),
-            type: "error",
-            content: message,
-            metadata: { voiceAbortFailed: true },
-          },
-        });
-        throw error;
+        if (isUnknownAgentError(error)) {
+          // The target agent was reloaded or resumed concurrently and is not
+          // live right now. There is nothing to interrupt; the next transcript
+          // re-resolves the agent instead of failing here.
+          this.sessionLogger.info(
+            { err: error, agentId: this.voiceModeAgentId },
+            "Voice abort: target agent is not live; skipping interruption",
+          );
+        } else {
+          const message = `Voice interruption failed: ${getErrorMessage(error)}`;
+          this.emit({
+            type: "activity_log",
+            payload: {
+              id: uuidv4(),
+              timestamp: new Date(),
+              type: "error",
+              content: message,
+              metadata: { voiceAbortFailed: true },
+            },
+          });
+          throw error;
+        }
       }
     }
 
@@ -1319,6 +1564,7 @@ export class VoiceSession {
   cancel(): void {
     if (this.closed) return;
     this.closed = true;
+    this.pluginAbort?.abort();
     this.abortController.abort();
     this.clearBufferTimeout();
     this.pendingAudioSegments = [];

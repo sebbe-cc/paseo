@@ -6,6 +6,7 @@ import { buildDeterministicWorkspaceTabId } from "@/workspace-tabs/identity";
 export type WorkspaceTabMenuSurface = "desktop" | "mobile";
 
 export interface WorkspaceTabMenuLabels {
+  makeVoiceTarget?: string;
   copyResumeCommand: string;
   copyAgentId: string;
   copyTerminalId: string;
@@ -74,6 +75,7 @@ interface BuildWorkspaceTabMenuEntriesInput {
   tabCount: number;
   menuTestIDBase: string;
   onCopyResumeCommand: (agentId: string) => Promise<void> | void;
+  onMakeVoiceTarget?: (agentId: string) => Promise<void> | void;
   onCopyAgentId: (agentId: string) => Promise<void> | void;
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
@@ -91,6 +93,7 @@ interface BuildWorkspaceDesktopTabActionsInput {
   index: number;
   tabCount: number;
   onCopyResumeCommand: (agentId: string) => Promise<void> | void;
+  onMakeVoiceTarget?: (agentId: string) => Promise<void> | void;
   onCopyAgentId: (agentId: string) => Promise<void> | void;
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
@@ -196,6 +199,17 @@ export function buildWorkspaceTabMenuEntries(
 
   if (tab.target.kind === "agent") {
     const { agentId } = tab.target;
+    if (input.onMakeVoiceTarget) {
+      entries.push({
+        kind: "item",
+        key: "make-voice-target",
+        label: labels.makeVoiceTarget ?? i18n.t("globalVoice.makeTarget"),
+        testID: `${menuTestIDBase}-make-voice-target`,
+        onSelect: () => {
+          void input.onMakeVoiceTarget?.(agentId);
+        },
+      });
+    }
     entries.push({
       kind: "item",
       key: "copy-resume-command",
@@ -340,6 +354,7 @@ export function buildWorkspaceDesktopTabActions(
       tabCount: input.tabCount,
       menuTestIDBase: contextMenuTestId,
       onCopyResumeCommand: input.onCopyResumeCommand,
+      onMakeVoiceTarget: input.onMakeVoiceTarget,
       onCopyAgentId: input.onCopyAgentId,
       onCopyTerminalId: input.onCopyTerminalId,
       onCopyFilePath: input.onCopyFilePath,
