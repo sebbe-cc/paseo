@@ -229,7 +229,11 @@ export function createWorkspaceScriptsService(deps: {
     }
 
     // The launcher's terminal exit listener owns route removal and runtime state updates.
-    await available.terminalManager.killTerminalAndWait(runtime.terminalId);
+    await available.terminalManager.killTerminalAndWait(runtime.terminalId, {
+      gracefulTimeoutMs: 5000,
+      forceTimeoutMs: 3000,
+    });
+    await available.runtimeStore.flush();
 
     const script = (await buildSnapshot(workspace, project)).find(
       (entry) => entry.scriptName === input.scriptName,
