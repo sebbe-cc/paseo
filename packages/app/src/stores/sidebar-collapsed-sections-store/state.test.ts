@@ -6,6 +6,7 @@ import {
   setProjectCollapsed,
   togglePinnedCollapsed,
   toggleProjectCollapsed,
+  toggleProjectContainerCollapsed,
   toggleWorkspaceGroupCollapsed,
 } from "@/stores/sidebar-collapsed-sections-store/state";
 
@@ -13,6 +14,7 @@ function emptyState(): CollapsedProjectsState {
   return {
     collapsedProjectKeys: new Set(),
     collapsedWorkspaceGroupKeys: new Set(),
+    collapsedProjectContainerKeys: new Set(),
     collapsedPinned: false,
   };
 }
@@ -34,14 +36,29 @@ describe("sidebar collapsed projects transitions", () => {
     const state: CollapsedProjectsState = {
       collapsedProjectKeys: new Set(["project-a", "project-b"]),
       collapsedWorkspaceGroupKeys: new Set(["running"]),
+      collapsedProjectContainerKeys: new Set(["heads"]),
       collapsedPinned: true,
     };
 
     expect(serializeCollapsedProjects(state)).toEqual({
       collapsedProjectKeys: ["project-a", "project-b"],
       collapsedWorkspaceGroupKeys: ["running"],
+      collapsedProjectContainerKeys: ["heads"],
       collapsedPinned: true,
     });
+  });
+
+  it("toggles and restores collapsed project containers", () => {
+    const toggled = toggleProjectContainerCollapsed(emptyState(), "heads");
+    expect(Array.from(toggled.collapsedProjectContainerKeys)).toEqual(["heads"]);
+    const restored = mergePersistedCollapsedProjects(
+      serializeCollapsedProjects(toggled),
+      emptyState(),
+    );
+    expect(Array.from(restored.collapsedProjectContainerKeys)).toEqual(["heads"]);
+    expect(
+      toggleProjectContainerCollapsed(toggled, "heads").collapsedProjectContainerKeys.size,
+    ).toBe(0);
   });
 
   it("toggles and restores the pinned section collapse flag", () => {
