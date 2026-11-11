@@ -1281,7 +1281,7 @@ function createToolCatalog(
     .strict();
   const commonSendAgentPromptInputSchema = {
     activeTurnBehavior: ActiveTurnBehaviorSchema.optional().describe(
-      'How to send into a running turn: "steer" joins it, falling back to interrupt when unavailable; "interrupt" replaces it. Defaults to steer for agent callers and interrupt otherwise.',
+      'How to send into a running turn: "steer" joins it, falling back to interrupt when unavailable; "interrupt" replaces it; "queue" starts a new turn at the next boundary without touching the active turn. Defaults to steer for agent callers and interrupt otherwise.',
     ),
     agentId: z.string(),
     prompt: z.string(),
@@ -1972,7 +1972,7 @@ function createToolCatalog(
       inputSchema: sendAgentPromptInputSchema,
       outputSchema: {
         success: z.boolean(),
-        disposition: z.enum(["turn_started", "out_of_band", "steered"]).optional(),
+        disposition: z.enum(["turn_started", "out_of_band", "steered", "queued"]).optional(),
         deliveryStatus: z.literal("queued").optional(),
         messageId: z.string().optional(),
         status: AgentStatusEnum,
