@@ -2009,6 +2009,51 @@ test("a daemon session reattached after idle re-declares stdio MCP with its env 
   });
   expect(await readdir(envDir)).toContain("01a0ee4c-c501-7d50-9020-effa9f9956e1.json");
 }, 15000);
+async function openSavedWithMcp(
+  h: Awaited<ReturnType<typeof harness>>,
+  env: Record<string, string>,
+) {
+  await h.send({
+    type: "session.open",
+    sessionId: "paseo-session",
+    requestId: "resume",
+    history: "replay",
+    persistence: { version: 1, data: { sessionId: "01a0ee4c-c501-7d50-9020-effa9f9956e1" } },
+    config: {
+      cwd: h.root,
+      env,
+      persist: true,
+      settings: {},
+      mcpServers: { srv: { type: "stdio", command: "mcp-bin", args: ["--x"] } },
+    },
+  });
+  return h.wait((event) => event.type === "session.ready" || event.type === "request.failed");
+}
+test("a daemon session still loaded with other MCP servers attaches to the loaded runtime", async () => {
+  const envDir = await daemonHome(false);
+  const env = { ...(await daemonEnv()), PASEO_MUSE_SESSION_ENV_DIR: envDir };
+  const h = await harness("resume-without-cursor", {
+    MUSE_TEST_MCP_CONFLICT: "1",
+    MUSE_TEST_RESUME_ECHO: "1",
+  });
+  expect(await openSavedWithMcp(h, env)).toMatchObject({ type: "session.ready" });
+  const resumes = (await h.recorded()).filter((f) => f.method === "session/resume");
+  expect(resumes).toHaveLength(2);
+  expect(resumes[0].params.config.mcpServers.srv).toMatchObject({ transport: "stdio" });
+  expect(resumes[1].params.config).toEqual({});
+  expect(resumes[1].params.sessionId).toBe(resumes[0].params.sessionId);
+});
+test("an own-host session keeps the loaded MCP conflict as an error", async () => {
+  const h = await harness("resume-without-cursor", {
+    MUSE_TEST_MCP_CONFLICT: "1",
+    MUSE_TEST_RESUME_ECHO: "1",
+  });
+  expect(await openSavedWithMcp(h, {})).toMatchObject({
+    type: "request.failed",
+    error: { message: expect.stringContaining("conflicts with the loaded session runtime") },
+  });
+  expect((await h.recorded()).filter((f) => f.method === "session/resume")).toHaveLength(1);
+});
 test("a non-daemon PASEO_MUSE_DAEMON value spawns an own host", async () => {
   const h = await harness();
   await h.open(undefined, "onRequest", "meta/muse-spark-1.3", { PASEO_MUSE_DAEMON: "0" });

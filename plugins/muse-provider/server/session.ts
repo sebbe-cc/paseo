@@ -176,12 +176,7 @@ export class Session {
       const saved = persistenceSchema.parse(input.persistence.data);
       // A fresh timeline needs history. MSP cursor resumes return only the suffix,
       // so even legacy persistence cursors cannot restore this session's projection.
-      response = await this.host.command(
-        "session/resume",
-        { sessionId: saved.sessionId, config: { mcpServers } },
-        sessionSchema,
-        SESSION_OPEN_TIMEOUT_MS,
-      );
+      response = await this.resumeSession(this.host, saved.sessionId, mcpServers);
       this.config = {
         ...this.config,
         model: this.config.model ?? saved.model,
@@ -297,13 +292,33 @@ export class Session {
   // wrapper, as at open; its env file stays in place until close.
   private async reattach(host: MspConnection): Promise<void> {
     await host.initialize();
-    const response = await host.command(
-      "session/resume",
-      { sessionId: this.live().nativeId, config: { mcpServers: this.sessionMcpServers() } },
-      sessionSchema,
-      SESSION_OPEN_TIMEOUT_MS,
-    );
+    const response = await this.resumeSession(host, this.live().nativeId, this.sessionMcpServers());
     if (response.viewCursor) this.live().recovery.activity(response.viewCursor, false);
+  }
+  // The shared daemon keeps a session loaded after its client goes (a Paseo
+  // restart mid-turn, an idle host), and a warm resume must then declare the
+  // exact MCP configuration the session was loaded with, or Muse rejects it.
+  // A daemon session inlines its launch environment into stdio MCP servers, so
+  // a Paseo deploy that moves a store path on PATH changes that configuration.
+  // The loaded runtime already runs the session's MCP servers: attach to it
+  // without re-declaring them. A cold load still gets the current servers.
+  private async resumeSession(
+    host: Pick<MspConnection, "command">,
+    sessionId: string,
+    mcpServers: Record<string, SessionMcpServerConfig>,
+  ) {
+    const resume = (config: { mcpServers?: Record<string, SessionMcpServerConfig> }) =>
+      host.command("session/resume", { sessionId, config }, sessionSchema, SESSION_OPEN_TIMEOUT_MS);
+    try {
+      return await resume({ mcpServers });
+    } catch (error) {
+      if (!this.options.daemon || !isLoadedMcpConflict(error)) throw error;
+      process.stderr.write(
+        `Muse session ${sessionId} is loaded in the daemon with other MCP configuration; ` +
+          "attaching to the loaded runtime and its MCP servers\n",
+      );
+      return resume({});
+    }
   }
   private async busy(host: MspConnection): Promise<boolean> {
     if (this.closing || this.activeTurnIds().length > 0 || this.approvals.size > 0) return true;
@@ -859,6 +874,16 @@ export class Session {
     });
   }
 }
+// Muse 1.4.15 rejects a warm resume whose mcpServers differ from the loaded
+// session's with this commandRejected message (no finer kind on the wire).
+function isLoadedMcpConflict(error: unknown): boolean {
+  return (
+    error instanceof MuseError &&
+    error.kind === "commandRejected" &&
+    error.message.includes("session MCP configuration conflicts with the loaded session runtime")
+  );
+}
+
 function mcpServer(
   server: ProviderMcpServerConfig,
   inherited?: Record<string, string>,

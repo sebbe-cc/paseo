@@ -147,8 +147,27 @@ function resumeHistoryResponse(frame) {
   }
   return false;
 }
+// A session still loaded in the shared daemon with other MCP servers: Muse
+// rejects a warm resume that re-declares any (pa-89is1.23).
+function rejectLoadedMcpConflict(frame) {
+  if (
+    process.env.MUSE_TEST_MCP_CONFLICT &&
+    frame.method === "session/resume" &&
+    Object.keys(frame.params.config?.mcpServers ?? {}).length > 0
+  ) {
+    rpcError(
+      frame,
+      -32030,
+      "commandRejected",
+      `command ${frame.params.commandId} rejected: session MCP configuration conflicts with the loaded session runtime`,
+    );
+    return true;
+  }
+  return false;
+}
 function controlResponse(frame) {
   if (refuseSaturatedJoin(frame)) return true;
+  if (rejectLoadedMcpConflict(frame)) return true;
   if (resumeHistoryResponse(frame)) return true;
   if (frame.method === "initialized") return true;
   if (frame.method === "initialize" && process.env.MUSE_TEST_EXIT) {
