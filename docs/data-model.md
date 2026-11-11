@@ -30,6 +30,11 @@ An explicit base selection is stored in the checkout's Git-directory Paseo metad
 mirrored to `baseBranch` in every workspace record sharing that checkout. The record keeps
 recovery possible after the checkout metadata is deleted. A newly opened workspace inherits
 the checkout's selected base; separate worktrees keep separate bases.
+A branch base (`refs/heads/*`, `refs/remotes/*`) is stored with its fork point (`forkSha`,
+metadata version 3): the merge-base when the worktree was created, recomputed whenever the base
+changes. If that branch is later deleted, diffs, commits and status compare against the saved
+fork point instead, and checkout status and workspace descriptors report
+`base: { ref, forkSha, missing: true }`. Tag and commit bases carry no fork point.
 Workspace archive runs lifecycle teardown from the exact `cwd` but removes only the backing
 `worktreeRoot` after its last active reference disappears. Worktree recovery recreates that backing
 checkout from `mainRepoRoot`, then restores the relative path from `worktreeRoot` to `cwd`.
