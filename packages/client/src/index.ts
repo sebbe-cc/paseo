@@ -55,7 +55,7 @@ export type {
   PaseoTerminalCaptureResult,
   PaseoWorkspaceTerminalActions,
 } from "./terminals/index.js";
-import type { PluginTimelineItem } from "@getpaseo/protocol/agent-types";
+import type { AgentProviderNotice, PluginTimelineItem } from "@getpaseo/protocol/agent-types";
 import type {
   AgentBackgroundWorkItem,
   FetchAgentsEntry,
@@ -512,6 +512,20 @@ export interface PaseoAgentHandle {
    * running agent without sending a message.
    */
   cancel(): Promise<void>;
+   * Switches the agent's provider mode, mirroring `paseo agent mode`.
+   * Returns the provider notice when the daemon reports one, else null.
+   */
+  setMode(modeId: string): Promise<AgentProviderNotice | null>;
+  /**
+   * Switches the agent's provider model (`null` clears to the default),
+   * mirroring `paseo agent model`.
+   */
+  setModel(modelId: string | null): Promise<void>;
+  /**
+   * Sets a provider feature flag on the agent, mirroring
+   * `paseo agent feature`.
+   */
+  setFeature(featureId: string, value: unknown): Promise<void>;
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
@@ -1236,6 +1250,13 @@ function createAgentHandleFactory(
       commands: (options) => daemonClient.listCommands({ agentId: id, ...options }),
       cancel: async () => {
         await daemonClient.cancelAgent(id);
+      },
+      setMode: async (modeId) => daemonClient.setAgentMode(id, modeId),
+      setModel: async (modelId) => {
+        await daemonClient.setAgentModel(id, modelId);
+      },
+      setFeature: async (featureId, value) => {
+        await daemonClient.setAgentFeature(id, featureId, value);
       },
       archive: async () => {
         const result = await daemonClient.archiveAgent(id);
