@@ -82,6 +82,7 @@ export function createPluginWorker(options: {
   }
 
   const agentTools = new PluginAgentTools();
+  const disabledUsageSources = new Set<string>();
   const hooks = new PluginHookHandlers(() => {
     send({ type: "hooks.changed", hooks: hooks.catalog() });
   }, agentTools);
@@ -187,6 +188,24 @@ export function createPluginWorker(options: {
     providers.set(id, { ...provider, id });
   }
 
+  function normalizeReplaces(source: UsageSourceRegistration, id: string): string[] | undefined {
+    if (source.replaces === undefined) return undefined;
+    if (!Array.isArray(source.replaces)) throw new Error(`Invalid usage source replaces: ${id}`);
+    const seen = new Set<string>();
+    const replaces: string[] = [];
+    for (const target of source.replaces) {
+      if (typeof target !== "string") throw new Error(`Invalid usage source replaces: ${id}`);
+      const trimmed = target.trim();
+      if (!/^[a-z][a-z0-9._-]*$/.test(trimmed) || trimmed === id)
+        throw new Error(`Invalid usage source replaces: ${id}`);
+      if (!seen.has(trimmed)) {
+        seen.add(trimmed);
+        replaces.push(trimmed);
+      }
+    }
+    return replaces.length > 0 ? replaces : undefined;
+  }
+
   function registerUsageSource(source: UsageSourceRegistration): void {
     const id = source.id.trim();
     if (
@@ -200,7 +219,14 @@ export function createPluginWorker(options: {
       throw new Error(`Invalid usage source: ${source.id}`);
     }
     if (usageSources.has(id)) throw new Error(`Duplicate usage source: ${id}`);
-    usageSources.set(id, { ...source, id });
+    const replaces = normalizeReplaces(source, id);
+    usageSources.set(id, { ...source, id, replaces });
+  }
+
+  function disableUsageSource(sourceId: string): void {
+    if (typeof sourceId !== "string" || !/^[a-z][a-z0-9._-]*$/.test(sourceId.trim()))
+      throw new Error(`Invalid disabled usage source: ${sourceId}`);
+    disabledUsageSources.add(sourceId.trim());
   }
 
   function providerMetadata(provider: ProviderRegistration) {
@@ -338,6 +364,7 @@ export function createPluginWorker(options: {
       registerDictationProvider: dictation.register,
       registerProvider,
       registerUsageSource,
+      disableUsageSource,
       registerSettings,
       addHook: hooks.addHook,
       on: hooks.on,
@@ -356,6 +383,7 @@ export function createPluginWorker(options: {
           icon: source.icon
             ? await readPluginProviderIcon(message.pluginDirectory, source.icon)
             : undefined,
+          replaces: source.replaces,
         })),
     );
     send({
@@ -369,6 +397,8 @@ export function createPluginWorker(options: {
       usageSources: usageSourceMetadata,
       voiceProviders: voice.catalog(),
       dictationProviders: dictation.catalog(),
+      disabledUsageSources:
+        disabledUsageSources.size > 0 ? [...disabledUsageSources].sort() : undefined,
     });
   }
 

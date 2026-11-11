@@ -828,3 +828,190 @@ test("failed discovery preserves history until discovery confirms account remova
   present = true;
   expect((await registry.listReports())[0]?.lastSuccessful).toBeUndefined();
 });
+
+function nativeSource(input: {
+  id: string;
+  label: string;
+  discover?: () => Promise<Array<{ key: string; label?: string; input: unknown }>>;
+  fetch?: (value: unknown) => Promise<unknown>;
+  replaces?: string[];
+}) {
+  return {
+    id: input.id,
+    label: input.label,
+    replaces: input.replaces,
+    discover: input.discover ?? (async () => []),
+    fetch: input.fetch ?? (async () => ({ status: "available", windows: [] })),
+  };
+}
+
+test("a takeover publishes plugin windows on the native card", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: { origin: "builtin" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "builtin", label: "Builtin", usedPct: 11 }],
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cliproxy",
+      label: "CLIProxy",
+      replaces: ["codex"],
+      discover: async () => [{ key: "shared", input: { origin: "override" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "session", label: "Override", usedPct: 42 }],
+      }),
+    }),
+  );
+  expect([...registry.overrides()]).toEqual([["codex", "cliproxy"]]);
+  const reports = await registry.listReports();
+  // The override never publishes under its own id; the native card keeps its identity.
+  expect(reports.map((entry) => entry.id)).toEqual(["codex:shared"]);
+  expect(reports[0]).toMatchObject({ sourceId: "codex", sourceLabel: "Codex" });
+  if (reports[0]?.report.status !== "available") throw new Error("Expected override usage");
+  expect(reports[0].report.windows).toEqual([
+    { id: "session", label: "Override", usedPct: 42 },
+  ]);
+});
+
+test("a failing takeover falls back to the built-in source with its errors kept", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: { origin: "builtin" } }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "builtin", label: "Builtin", usedPct: 11 }],
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cliproxy",
+      label: "CLIProxy",
+      replaces: ["codex"],
+      discover: async () => [{ key: "shared", input: { origin: "override" } }],
+      fetch: async () => {
+        throw new Error("proxy down");
+      },
+    }),
+  );
+  const [entry] = await registry.listReports();
+  expect(entry?.id).toBe("codex:shared");
+  expect(entry?.sourceId).toBe("codex");
+  if (entry?.report.status !== "available") throw new Error("Expected built-in fallback usage");
+  expect(entry.report.windows).toEqual([{ id: "builtin", label: "Builtin", usedPct: 11 }]);
+  expect(entry.loginErrors).toHaveLength(1);
+  expect(entry.loginErrors?.[0]).toMatchObject({ harness: "CLIProxy" });
+  expect(entry.loginErrors?.[0]?.report).toEqual({ status: "error", error: "proxy down" });
+});
+
+test("takeover conflicts resolve deterministically and log once", async () => {
+  const warnings: unknown[][] = [];
+  const registry = new UsageSourceRegistry(Date.now, 300_000, {
+    warn: (...args: unknown[]) => {
+      warnings.push(args);
+    },
+  });
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: {} }],
+    }),
+  );
+  for (const id of ["zzz-override", "aaa-override"]) {
+    registry.register(
+      nativeSource({
+        id,
+        label: id,
+        replaces: ["codex"],
+        discover: async () => [{ key: "shared", input: {} }],
+        fetch: async () => ({
+          status: "available",
+          windows: [{ id: "session", label: id, usedPct: 1 }],
+        }),
+      }),
+    );
+  }
+  expect([...registry.overrides()]).toEqual([["codex", "aaa-override"]]);
+  const conflicts = warnings.filter(([meta]) => (meta as { target?: string }).target === "codex");
+  expect(conflicts).toHaveLength(1);
+  expect(conflicts[0]?.[0]).toEqual({
+    target: "codex",
+    winner: "aaa-override",
+    ignored: ["zzz-override"],
+  });
+  const reports = await registry.listReports();
+  // The losing claimant keeps its own cards; only the winner takes the native card.
+  expect(reports.map((entry) => entry.id).sort()).toEqual(["codex:shared", "zzz-override:shared"]);
+  const entry = reports.find((report) => report.id === "codex:shared");
+  if (entry?.report.status !== "available") throw new Error("Expected winner usage");
+  expect(entry.report.windows).toEqual([{ id: "session", label: "aaa-override", usedPct: 1 }]);
+});
+
+test("disabling hides a built-in source without replacing it", async () => {
+  const registry = new UsageSourceRegistry();
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: {} }],
+    }),
+  );
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["codex:shared"]);
+  registry.disable("codex");
+  expect(await registry.listReports()).toEqual([]);
+  registry.enable("codex");
+  expect((await registry.listReports()).map((entry) => entry.id)).toEqual(["codex:shared"]);
+});
+
+test("a takeover whose discovery fails keeps the built-in card", async () => {
+  const warnings: unknown[][] = [];
+  const registry = new UsageSourceRegistry(Date.now, 300_000, {
+    warn: (...args: unknown[]) => {
+      warnings.push(args);
+    },
+  });
+  registry.register(
+    nativeSource({
+      id: "codex",
+      label: "Codex",
+      discover: async () => [{ key: "shared", input: {} }],
+      fetch: async () => ({
+        status: "available",
+        windows: [{ id: "builtin", label: "Builtin", usedPct: 11 }],
+      }),
+    }),
+  );
+  registry.register(
+    nativeSource({
+      id: "cliproxy",
+      label: "CLIProxy",
+      replaces: ["codex"],
+      discover: async () => {
+        throw new Error("proxy store unreadable");
+      },
+    }),
+  );
+  const [entry] = await registry.listReports();
+  expect(entry?.id).toBe("codex:shared");
+  if (entry?.report.status !== "available") throw new Error("Expected built-in usage");
+  expect(entry.report.windows).toEqual([{ id: "builtin", label: "Builtin", usedPct: 11 }]);
+  expect(
+    warnings.some(
+      ([meta, message]) =>
+        (meta as { target?: string }).target === "codex" &&
+        message === "Usage source takeover failed; falling back to built-in source",
+    ),
+  ).toBe(true);
+});
