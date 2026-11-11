@@ -1040,3 +1040,70 @@ it("rejects duplicate selection actions", () => {
     ),
   ).toThrow("Duplicate timeline selection action");
 });
+
+describe("imperative app-lifetime inputs", () => {
+  it("emits hosts before any surface mounts and tracks changes until entry cleanup", async () => {
+    let hosts = [{ serverId: "host", label: "Host", status: "online" as const }];
+    const listeners = new Set<() => void>();
+    const plugin = runPluginClientBundle(
+      "lifetime",
+      bundle(`
+      globalThis.__lifetimeHosts = [];
+      plugin.subscribeHosts(hosts => globalThis.__lifetimeHosts.push(hosts));
+      plugin.addSidebarFooterItem({ id: "hidden", title: "Hidden", Component: () => { throw new Error("must not mount"); } });
+    `),
+      {
+        ...runtime,
+        hosts: {
+          getSnapshot: () => hosts,
+          subscribe(listener) {
+            listeners.add(listener);
+            return () => {
+              listeners.delete(listener);
+            };
+          },
+          getPaseoClient() {
+            throw new Error("unused");
+          },
+        },
+      },
+    );
+    const seen = Reflect.get(globalThis, "__lifetimeHosts");
+    expect(seen).toEqual([hosts]);
+    hosts = [{ serverId: "new", label: "Renamed", status: "online" }];
+    for (const listener of listeners) listener();
+    expect(seen).toEqual([[{ serverId: "host", label: "Host", status: "online" }], hosts]);
+    await plugin.cleanup();
+    expect(listeners.size).toBe(0);
+    Reflect.deleteProperty(globalThis, "__lifetimeHosts");
+  });
+
+  it("releases app inputs when plugin setup fails", () => {
+    let active = 0;
+    expect(() =>
+      runPluginClientBundle(
+        "failed-inputs",
+        bundle(`
+      plugin.subscribeHosts(() => {});
+      throw new Error("setup failed");
+    `),
+        {
+          ...runtime,
+          hosts: {
+            getSnapshot: () => [],
+            subscribe() {
+              active++;
+              return () => {
+                active--;
+              };
+            },
+            getPaseoClient() {
+              throw new Error("unused");
+            },
+          },
+        },
+      ),
+    ).toThrow("setup failed");
+    expect(active).toBe(0);
+  });
+});

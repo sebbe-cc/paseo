@@ -1,3 +1,5 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { subscribePluginSettings } from "./settings/subscribe";
 import { createPlayAudio, type AudioEngine } from "@/audio";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { getPluginClientApi } from "./client-state/api";
@@ -38,6 +40,16 @@ export function createPluginClientRuntime(
     hid: getAppHidCapability(),
     clientContext: getAppClientContextCapability(),
     i18n: installation.i18n,
+    subscribeSettings: (definition, listener) =>
+      subscribePluginSettings(
+        {
+          definition,
+          queryClient: installation.queryClient,
+          read: () => capabilities.rpc(settingsRpc(definition.id).read, {}),
+          signal: installation.lifetime.signal,
+        },
+        listener,
+      ),
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
     navigation: pluginRecentNavigation,
     addKeyboardShortcut: (contribution) =>
