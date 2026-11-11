@@ -7,6 +7,7 @@ import { runLabelRemoveCommand, runLabelSetCommand, runLabelsCommand } from "./l
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
 import { runSetupCommand } from "./setup.js";
+import { runShowCommand } from "./show.js";
 
 export function createWorkspaceCommand(): Command {
   const workspace = new Command("workspace").description("Manage workspaces");
@@ -91,6 +92,13 @@ export function createWorkspaceCommand(): Command {
       .argument("<label>", "Label name to remove")
       .allowExcessArguments(false),
   ).action(withOutput(runLabelRemoveCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("show")
+      .description("Show a workspace and its comparison base")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runShowCommand));
 
   return workspace;
 }

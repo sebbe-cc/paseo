@@ -1016,6 +1016,7 @@ export const ptBR: TranslationResources = {
         refresh: "Atualizar",
         refreshState: "Atualizar estado do git e do {{brand}}",
         failedRefresh: "Falha ao atualizar estado do git.",
+        missingBase: "A base {{ref}} não existe mais. Comparando com o ponto de bifurcação salvo.",
         seeUncommittedChanges: "Ver alterações sem commit",
         seeCommittedChanges: "Ver alterações com commit",
         checkingRepository: "Verificando repositório...",

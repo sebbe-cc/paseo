@@ -1409,9 +1409,20 @@ export const createWorktree = async ({
       });
     }
 
+    // pa-9av7: save the fork point with a branch base so a later-deleted base still compares.
+    const forkSha =
+      sourcePlan.metadataBaseRef && /^refs\/(heads|remotes)\//.test(sourcePlan.metadataBaseRef)
+        ? (
+            await runGitCommand(["merge-base", sourcePlan.metadataBaseRef, "HEAD"], {
+              cwd: worktreePath,
+              acceptExitCodes: [0, 1],
+            })
+          ).stdout.trim()
+        : "";
     await writePaseoWorktreeMetadata(worktreePath, {
       baseRefName: sourcePlan.metadataBaseRefName,
       ...(sourcePlan.metadataBaseRef ? { baseRef: sourcePlan.metadataBaseRef } : {}),
+      ...(forkSha ? { forkSha } : {}),
       ...(sourcePlan.changeRequestLookupTarget
         ? { changeRequestLookupTarget: sourcePlan.changeRequestLookupTarget }
         : {}),

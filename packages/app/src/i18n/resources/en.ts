@@ -1003,6 +1003,7 @@ export const en = {
         refresh: "Refresh",
         refreshState: "Refresh git and {{brand}} state",
         failedRefresh: "Failed to refresh git state.",
+        missingBase: "Base {{ref}} no longer exists. Comparing against the saved fork point.",
         seeUncommittedChanges: "See uncommitted changes",
         seeCommittedChanges: "See committed changes",
         checkingRepository: "Checking repository...",

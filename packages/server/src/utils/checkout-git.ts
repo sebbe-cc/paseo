@@ -14,7 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { setImmediate } from "node:timers/promises";
 import { TTLCache } from "@isaacs/ttlcache";
-import type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
+import type {
+  CheckoutCommit,
+  CheckoutCommitFile,
+  WorkspaceBase,
+} from "@getpaseo/protocol/messages";
 import { parseGitHubRemoteIdentity, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import { maxSecuredPlaintextByteLength } from "@getpaseo/relay";
 import type { Logger } from "pino";
@@ -614,9 +618,13 @@ async function listCheckoutFileChanges(
   return Array.from(byPath.values());
 }
 
-async function tryResolveMergeBase(cwd: string, baseRef: string): Promise<string | null> {
+async function tryResolveMergeBase(
+  cwd: string,
+  baseRef: string,
+  context?: CheckoutContext,
+): Promise<string | null> {
   try {
-    const { stdout } = await runGitCommand(["merge-base", baseRef, "HEAD"], {
+    const { stdout } = await getRunGitCommand(context)(["merge-base", baseRef, "HEAD"], {
       cwd,
       envOverlay: READ_ONLY_GIT_ENV,
     });
@@ -897,6 +905,7 @@ export interface CheckoutStatusGitNonPaseo {
   baseRef: string | null;
   baseRefExact?: string | null;
   comparisonBaseRef?: string | null;
+  base?: WorkspaceBase | null;
   aheadBehind: AheadBehind | null;
   // Remote-tracking ref for currentBranch, e.g. "refs/remotes/origin/main". Null when the
   // branch has no upstream or git could not resolve it. aheadOfOrigin/behindOfOrigin are
@@ -918,6 +927,7 @@ export interface CheckoutStatusGitPaseo {
   baseRef: string;
   baseRefExact?: string | null;
   comparisonBaseRef?: string | null;
+  base?: WorkspaceBase | null;
   aheadBehind: AheadBehind | null;
   upstreamRef: string | null;
   aheadOfOrigin: number | null;
@@ -975,6 +985,7 @@ export type CheckoutSnapshotFacts =
       paseoWorktree: PaseoWorktreeForCwd;
       storedBaseRef: string | null;
       resolvedBaseRef: string | null;
+      base?: WorkspaceBase | null;
       mainRepoRoot: string | null;
       comparisonBaseRef: string | null;
       branchRemoteName: string | null;
@@ -1344,7 +1355,13 @@ export async function setCheckoutBaseBranch(input: {
     if (valid.exitCode !== 0 || !(await doesGitRefExist(input.cwd, candidate))) continue;
     const worktreeRoot = await getWorktreeRoot(input.cwd);
     if (!worktreeRoot) throw new NotGitRepoError(input.cwd);
-    await setPaseoWorktreeBaseRef({ worktreeRoot, baseRef: candidate });
+    // pa-9av7: the fork point follows the base; a new base gets its own merge-base.
+    const forkSha = await tryResolveMergeBase(input.cwd, candidate);
+    await setPaseoWorktreeBaseRef({
+      worktreeRoot,
+      baseRef: candidate,
+      ...(forkSha ? { forkSha } : {}),
+    });
     return candidate;
   }
   throw new Error(`Base branch not found: ${requested}`);
@@ -1745,6 +1762,68 @@ function isQualifiedBranchRef(ref: string): boolean {
   return ref.startsWith("refs/heads/") || ref.startsWith("refs/remotes/");
 }
 
+function savedForkPointFor(metadata: PaseoWorktreeMetadata | null, baseRef: string): string | null {
+  return metadata?.version === 3 && metadata.baseRef === baseRef ? metadata.forkSha : null;
+}
+
+// pa-9av7: a deleted branch base keeps comparing against the fork point saved with it.
+async function readSavedForkPoint(
+  cwd: string,
+  baseRef: string,
+  context?: CheckoutContext,
+): Promise<string | null> {
+  const root = await getWorktreeRoot(cwd, context);
+  if (!root) return null;
+  const metadata = await readPaseoWorktreeMetadata(root).catch(() => null);
+  return savedForkPointFor(metadata, baseRef);
+}
+
+async function describeCheckoutBase(
+  cwd: string,
+  metadata: PaseoWorktreeMetadata | null,
+  ref: string | null,
+  comparisonBaseRef: string | null,
+  context?: CheckoutContext,
+): Promise<WorkspaceBase | null> {
+  if (!ref) return null;
+  const missing = isQualifiedBranchRef(ref) && !(await doesGitRefExist(cwd, ref, context));
+  const forkSha =
+    savedForkPointFor(metadata, ref) ??
+    (comparisonBaseRef && !missing
+      ? await tryResolveMergeBase(cwd, comparisonBaseRef, context)
+      : null);
+  return { ref, forkSha, missing };
+}
+
+async function resolveCheckoutBaseUncached(
+  cwd: string,
+  context?: CheckoutContext,
+): Promise<{ base: WorkspaceBase | null; comparisonBaseRef: string | null }> {
+  const worktreeRoot = await getWorktreeRoot(cwd, context);
+  if (!worktreeRoot) return { base: null, comparisonBaseRef: null };
+  const ownership = await getPaseoWorktreeForCwd(cwd, {
+    context,
+    knownWorktreeRoot: worktreeRoot,
+  });
+  const metadata = ownership.isPaseoOwnedWorktree
+    ? await readPaseoWorktreeMetadata(ownership.worktreeRoot)
+    : null;
+  const ref = storedBaseRefFromMetadata(metadata) ?? (await resolveBaseRef(cwd, context));
+  if (!ref) return { base: null, comparisonBaseRef: null };
+  const comparisonBaseRef = await resolveBestComparisonBaseRef(cwd, ref, context).catch(() => null);
+  const base = await describeCheckoutBase(cwd, metadata, ref, comparisonBaseRef, context);
+  return { base, comparisonBaseRef };
+}
+
+/** The checkout's comparison base: its ref, fork point, and whether the ref still exists. */
+export async function resolveWorkspaceBase(
+  cwd: string,
+  context?: CheckoutContext,
+): Promise<WorkspaceBase | null> {
+  if (context?.facts?.isGit && context.facts.base !== undefined) return context.facts.base;
+  return (await resolveCheckoutBaseUncached(cwd, context)).base;
+}
+
 async function resolveCommitComparisonRef(
   cwd: string,
   name: string,
@@ -1774,6 +1853,8 @@ async function resolveBestComparisonBaseRef(
     if (await doesGitRefExist(cwd, baseRef, context)) {
       return baseRef;
     }
+    const forkSha = await readSavedForkPoint(cwd, baseRef, context);
+    if (forkSha) return forkSha;
     throw new Error(`Base ref not found: ${baseRef}`);
   }
   const normalized = normalizeComparisonBaseRefName(baseRef);
@@ -2202,6 +2283,13 @@ export async function getCheckoutSnapshotFacts(
       () => null,
     );
   }
+  const base = await describeCheckoutBase(
+    cwd,
+    paseoWorktreeMetadata,
+    resolvedBaseRef,
+    comparisonBaseRef,
+    context,
+  );
 
   let branchRemoteName: string | null = null;
   let branchMergeRef: string | null = null;
@@ -2251,6 +2339,7 @@ export async function getCheckoutSnapshotFacts(
     paseoWorktree: inspected.paseoWorktree,
     storedBaseRef,
     resolvedBaseRef,
+    base,
     mainRepoRoot,
     comparisonBaseRef,
     branchRemoteName,
@@ -2421,9 +2510,12 @@ export async function getCheckoutStatus(
   const mainRepoRoot = facts.mainRepoRoot;
   const factsContext = { ...context, facts };
   // Ref-derived counts skip the current base branch; the diff consumer still needs its ref.
-  const comparisonBaseRef = baseRef
-    ? await resolveQualifiedComparisonBaseRef(cwd, baseRef, factsContext).catch(() => null)
-    : null;
+  // A missing base keeps its ref on the wire: diff requests name it and resolve to the fork point.
+  const comparisonBaseRef = facts.base?.missing
+    ? baseRef
+    : baseRef
+      ? await resolveQualifiedComparisonBaseRef(cwd, baseRef, factsContext).catch(() => null)
+      : null;
   const aheadBehind =
     baseRef && currentBranch
       ? await getAheadBehind(cwd, baseRef, currentBranch, factsContext)
@@ -2447,6 +2539,7 @@ export async function getCheckoutStatus(
       baseRef: displayBaseRef ?? baseRef,
       baseRefExact: baseRef,
       comparisonBaseRef,
+      base: facts.base,
       aheadBehind,
       upstreamRef,
       aheadOfOrigin,
@@ -2467,6 +2560,7 @@ export async function getCheckoutStatus(
     baseRef: displayBaseRef,
     baseRefExact: baseRef,
     comparisonBaseRef,
+    base: facts.base,
     aheadBehind,
     upstreamRef,
     aheadOfOrigin,
@@ -2691,6 +2785,8 @@ async function tryResolveCheckoutCommitsBaseRef(
     return await resolveMostAheadBaseRef(cwd, baseRef);
   } catch (error) {
     if (isQualifiedBranchRef(baseRef)) {
+      const forkSha = await readSavedForkPoint(cwd, baseRef);
+      if (forkSha) return forkSha;
       throw error;
     }
     return null;
@@ -3104,6 +3200,8 @@ export interface CheckoutRefDerivedState {
   aheadBehind: AheadBehind | null;
   diffStat: CheckoutShortstat | null;
   upstreamStatus: UpstreamStatus | null;
+  base?: WorkspaceBase | null;
+  comparisonBaseRef?: string | null;
 }
 
 function normalizeRemoteTrackingRef(ref: string): string {
@@ -3176,6 +3274,14 @@ export async function getCheckoutRefDerivedState(
     upstreamRef,
   } = getCheckoutRefMovement(facts, movedRemoteRefs);
 
+  // A moved branch base may have been deleted (or restored): refresh it before counting.
+  let base = facts.base;
+  if (baseMoved && base !== undefined) {
+    const fresh = await resolveCheckoutBaseUncached(cwd, { ...context, facts: null });
+    base = fresh.base;
+    facts = { ...facts, base, comparisonBaseRef: fresh.comparisonBaseRef };
+  }
+
   let aheadBehind = current.aheadBehind;
   let diffStat = current.diffStat;
   if (baseMoved && currentBranch && facts.resolvedBaseRef) {
@@ -3208,7 +3314,12 @@ export async function getCheckoutRefDerivedState(
       : null;
   }
 
-  return { aheadBehind, diffStat, upstreamStatus };
+  return {
+    aheadBehind,
+    diffStat,
+    upstreamStatus,
+    ...(base !== undefined ? { base, comparisonBaseRef: facts.comparisonBaseRef } : {}),
+  };
 }
 
 export interface CheckoutWorktreeState {
