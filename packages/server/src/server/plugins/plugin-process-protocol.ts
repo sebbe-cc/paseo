@@ -39,6 +39,7 @@ export interface PluginUsageSourceMetadata {
   label: string;
   icon?: string;
   replaces?: string[];
+  skipNativeFallback?: boolean;
 }
 
 export type PluginProcessRequest =
@@ -161,6 +162,7 @@ const usageSourceMetadataSchema = z
     label: z.string().min(1),
     icon: z.string().optional(),
     replaces: z.array(z.string().min(1)).optional(),
+    skipNativeFallback: z.boolean().optional(),
   })
   .strict();
 const providerConnectRequestSchema = z
