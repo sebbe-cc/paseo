@@ -12,6 +12,8 @@ import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
 import type { InstalledPlugin } from "./types";
+import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
+import { pluginRecentNavigation } from "./recent-navigation";
 
 export function createPluginClientRuntime(
   installation: InstalledPlugin,
@@ -26,6 +28,9 @@ export function createPluginClientRuntime(
     ...capabilities,
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
+    navigation: pluginRecentNavigation,
+    addKeyboardShortcut: (contribution) =>
+      pluginKeyboardShortcuts.add(installation.serverId, installation.id, contribution),
     hosts: getPluginClientApi(installation).hosts,
     addComposerPill(contribution) {
       return pluginButtonStore.addComposerPill(installation, contribution);
@@ -50,7 +55,10 @@ function openClientPanel(input: {
   const { installation, state, panelId, options } = input;
   const workspaceId = options.workspaceId.trim();
   const agentId = options.agentId?.trim();
-  const navigation = createPluginNavigation({ serverId: installation.serverId, workspaceId });
+  const navigation = createPluginNavigation({
+    serverId: installation.serverId,
+    workspaceId,
+  });
   const action = agentId
     ? createPluginAgentActionContext({
         plugin: installation,
@@ -66,5 +74,9 @@ function openClientPanel(input: {
         workspaceId,
       });
   if (!action) throw new Error("Plugin panel context is unavailable");
-  action.openPanel(panelId, { location: options.location });
+  action.openPanel(panelId, {
+    location: options.location,
+    ...(options.params === undefined ? {} : { params: options.params }),
+    ...(options.newTab === true ? { newTab: true as const } : {}),
+  });
 }
