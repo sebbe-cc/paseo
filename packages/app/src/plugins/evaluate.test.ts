@@ -110,6 +110,7 @@ describe("evaluatePluginClientBundle", () => {
           plugin.addTimelineTransformer({ id: "transformer", query: { itemType: "tool_call" }, transform() { return { items: [] }; } }),
           plugin.addTimelineRenderer({ kind: "card", version: 1, schema, Component }),
           plugin.addInlineDecorator({ id: "bead", pattern: /pa-[a-z0-9]+/, onPress() {} }).remove,
+          plugin.addWorkspaceLabelPresenter({ id: "labels", present() {} }),
         ];
       `),
       {
@@ -141,6 +142,7 @@ describe("evaluatePluginClientBundle", () => {
         plugin.timelineTransformers,
         plugin.timelineRenderers,
         plugin.inlineDecorators,
+        plugin.workspaceLabelPresenters,
       ].every((items) => items.length === 1),
     ).toBe(true);
     expect(pillCount).toBe(1);
@@ -162,6 +164,7 @@ describe("evaluatePluginClientBundle", () => {
         plugin.timelineTransformers,
         plugin.timelineRenderers,
         plugin.inlineDecorators,
+        plugin.workspaceLabelPresenters,
       ].every((items) => items.length === 0),
     ).toBe(true);
     expect(pillCount).toBe(0);
@@ -236,6 +239,37 @@ describe("evaluatePluginClientBundle", () => {
         `),
       ),
     ).toThrow("Timeline transformer bad-query has invalid item type: settled");
+  });
+
+  it("collects workspace label presenters", () => {
+    const plugin = evaluatePluginClientBundle(
+      "labels",
+      bundle(`
+        plugin.addWorkspaceLabelPresenter({
+          id: "shortener",
+          present({ labels }) {
+            const raw = labels.find((name) => name.startsWith("queue="));
+            if (!raw) return undefined;
+            return { hide: [raw], add: [{ name: "inbox" }] };
+          },
+        });
+      `),
+    );
+
+    expect(plugin.workspaceLabelPresenters.map(({ id }) => id)).toEqual(["shortener"]);
+  });
+
+  it.each([
+    [
+      `plugin.addWorkspaceLabelPresenter({ id: "dup", present() {} }); plugin.addWorkspaceLabelPresenter({ id: "dup", present() {} });`,
+      "Duplicate workspace label presenter: dup",
+    ],
+    [
+      `plugin.addWorkspaceLabelPresenter({ id: "no-present" });`,
+      "Workspace label presenter no-present has no present",
+    ],
+  ])("rejects a malformed workspace label presenter: %s", (call, message) => {
+    expect(() => evaluatePluginClientBundle("labels", bundle(call))).toThrow(message);
   });
 
   it("collects screens and sidebar header and footer items", () => {
