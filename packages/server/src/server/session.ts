@@ -5140,7 +5140,7 @@ export class Session {
   private async handleRefreshAgentRequest(
     msg: Extract<SessionInboundMessage, { type: "refresh_agent_request" }>,
   ): Promise<void> {
-    const { agentId, requestId } = msg;
+    const { agentId, requestId, env } = msg;
     this.sessionLogger.info({ agentId }, `Refreshing agent ${agentId} from persistence`);
 
     try {
@@ -5152,6 +5152,7 @@ export class Session {
         await this.interruptAgentIfRunning(agentId);
         snapshot = await this.agentManager.reloadAgentSession(agentId, undefined, {
           rehydrateFromDisk: true,
+          ...(env ? { launchEnv: env } : {}),
         });
       } else {
         const record = await this.agentStorage.get(agentId);
@@ -5165,6 +5166,8 @@ export class Session {
         if (!toAgentPersistenceHandle(registeredProviderIds, record.persistence)) {
           throw new Error(`Agent ${agentId} cannot be refreshed because it lacks persistence`);
         }
+        // A new launch env goes on the record the resume reads it from.
+        if (env) await this.agentStorage.upsert({ ...record, launchEnv: { ...env } });
         // Share the loader's per-agent in-flight operation with timeline fetches.
         // Unarchiving publishes the record before provider resume finishes, so
         // the agent pane can otherwise race this request and resume it twice.

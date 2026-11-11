@@ -434,9 +434,13 @@ export interface PaseoAgentHandle {
   refresh(requestId?: string): Promise<PaseoAgentRefetchResult | null>;
   /**
    * Reopens the provider session with current configuration, rerunning session-open hooks.
-   * Interrupts a running turn and returns the refreshed snapshot.
+   * Interrupts a running turn and returns the refreshed snapshot. `env` replaces the agent's
+   * stored launch env (kept for later resumes) before the session reopens.
    */
-  reload(options?: { requestId?: string }): Promise<PaseoAgentRefetchResult | null>;
+  reload(options?: {
+    requestId?: string;
+    env?: Record<string, string>;
+  }): Promise<PaseoAgentRefetchResult | null>;
   send(text: string, options?: PaseoAgentSendOptions): Promise<void>;
   respondToPermission(options: PaseoAgentRespondToPermissionOptions): Promise<void>;
   /**
@@ -1139,7 +1143,11 @@ function createAgentHandleFactory(
         return result;
       },
       reload: async (options) => {
-        await daemonClient.refreshAgent(id, options?.requestId);
+        await daemonClient.refreshAgent(
+          id,
+          options?.requestId,
+          options?.env ? { env: options.env } : undefined,
+        );
         const result = await daemonClient.fetchAgent({ agentId: id });
         current = result?.agent ?? null;
         return result;
