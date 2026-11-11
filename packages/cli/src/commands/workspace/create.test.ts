@@ -28,6 +28,24 @@ describe("workspace create source", () => {
     });
   });
 
+  it.each([
+    "main",
+    "origin/main",
+    "refs/remotes/origin/main",
+    "refs/heads/epic-branch",
+    "refs/remotes/upstream/main",
+  ])("passes --base %s through verbatim", (base) => {
+    expect(
+      buildWorkspaceSource({
+        isolation: "worktree",
+        path: "/tmp/project",
+        mode: "branch-off",
+        newBranch: "feature/auth",
+        base,
+      }),
+    ).toMatchObject({ kind: "worktree", action: "branch-off", baseBranch: base });
+  });
+
   it("uses a project as the worktree source without capturing the ambient directory", () => {
     expect(
       buildWorkspaceSource({
