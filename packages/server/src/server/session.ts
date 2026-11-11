@@ -6313,6 +6313,7 @@ export class Session {
       aheadBehind: snapshot.git.aheadBehind,
       aheadOfOrigin: snapshot.git.aheadOfOrigin,
       behindOfOrigin: snapshot.git.behindOfOrigin,
+      base: snapshot.git.base ?? null,
     };
   }
 
