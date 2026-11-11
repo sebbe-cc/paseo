@@ -200,7 +200,9 @@ function gapPageResult(frame) {
   const result = replace(
     responseFor(
       readFixture(
-        frame.params.sessionId === "fixture-child" ? "phase3-child-read" : "phase3-controls",
+        String(frame.params.sessionId).startsWith("fixture-child")
+          ? "phase3-child-read"
+          : "phase3-controls",
       ),
       "view/page",
     ),
@@ -483,9 +485,16 @@ function applyTestVariants(message) {
     message.params.item.fallbackText = "New MSP item";
   }
 }
+const childSequence = new Map();
 function applyParityVariants(message) {
   if (process.env.MUSE_TEST_CHILD && message.params?.item?.tool === "subagent_spawn") {
-    message.params.item.childSessionId = "fixture-child";
+    if (process.env.MUSE_TEST_CHILD_SEQ) {
+      const key = message.params.item.itemId;
+      if (!childSequence.has(key)) childSequence.set(key, childSequence.size + 1);
+      message.params.item.childSessionId = `fixture-child-${childSequence.get(key)}`;
+    } else {
+      message.params.item.childSessionId = "fixture-child";
+    }
     if (process.env.MUSE_TEST_CHILD === "workflow") message.params.item.kind = "workflow";
     if (process.env.MUSE_TEST_CHILD === "dedicated") {
       message.params.item.kind = "subagent";
