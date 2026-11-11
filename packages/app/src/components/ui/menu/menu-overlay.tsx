@@ -1,5 +1,5 @@
 import { navigateMenuKeyboard } from "./keyboard-navigation";
-import { useOverlayRegistration, type KeyboardInputEvent } from "@/keyboard";
+import { focusFirstElement, useOverlayRegistration, type KeyboardInputEvent } from "@/keyboard";
 import { Modal } from "@/components/ui/modal";
 import {
   useCallback,
@@ -196,6 +196,7 @@ export function useAnchoredPosition({
 }
 
 export interface AnchoredSurfaceProps {
+  autoFocus?: boolean;
   open: boolean;
   onClose: () => void;
   onExited?: () => void;
@@ -249,6 +250,7 @@ export function AnchoredSurface({
   onPointerLeave,
   testID,
   keyboardFocusScope,
+  autoFocus,
   children,
 }: AnchoredSurfaceProps): ReactElement | null {
   const { t } = useTranslation();
@@ -273,15 +275,14 @@ export function AnchoredSurface({
   useWebContentEntering({ placed, surfaceNativeID });
 
   useEffect(() => {
-    if (!isWeb || !open || !placed || typeof document === "undefined") return undefined;
+    if (autoFocus === false || !isWeb || !open || !placed || typeof document === "undefined")
+      return undefined;
     const frame = requestAnimationFrame(() => {
-      document
-        .getElementById(surfaceNativeID)
-        ?.querySelector<HTMLElement>('[data-menu-item="true"]:not([data-menu-disabled="true"])')
-        ?.focus();
+      const surface = document.getElementById(surfaceNativeID);
+      if (surface && !surface.contains(document.activeElement)) focusFirstElement(surface);
     });
     return () => cancelAnimationFrame(frame);
-  }, [open, placed, surfaceNativeID]);
+  }, [autoFocus, open, placed, surfaceNativeID]);
 
   const frame = useMemo(() => surfaceFrameStyles(position), [position]);
   const frameStyle = useMemo<StyleProp<ViewStyle>>(() => {
@@ -391,12 +392,14 @@ export function AnchoredSurface({
  * than opening another one, so there is exactly one Modal per menu no matter how deep it goes.
  */
 export function MenuOverlay({
+  manageFocus,
   visible,
   onClose,
   restoreFocusRef,
   children,
 }: {
   visible: boolean;
+  manageFocus?: boolean;
   onClose: () => void;
   restoreFocusRef?: RefObject<View | null>;
   children: ReactElement | null;
@@ -422,6 +425,7 @@ export function MenuOverlay({
     layer: floatingLayer,
     onKeyDown: handleOverlayKeyDown,
     restoreFocusRef,
+    manageFocus,
   });
 
   if (!visible) return null;
