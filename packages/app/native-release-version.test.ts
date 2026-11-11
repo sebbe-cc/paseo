@@ -23,6 +23,12 @@ describe("native release version", () => {
     });
   });
 
+  it("ignores build metadata", () => {
+    expect(getNativeReleaseVersion("0.2.6+desvio.3f9a1c2")).toEqual(
+      getNativeReleaseVersion("0.2.6"),
+    );
+  });
+
   it("rejects beta numbers that consume the stable iOS build slot", () => {
     expect(() => getNativeReleaseVersion("0.2.6-beta.999")).toThrow(
       "iOS beta number must be between 1 and 998",

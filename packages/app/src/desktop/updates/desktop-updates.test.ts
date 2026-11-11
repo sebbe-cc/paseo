@@ -27,6 +27,32 @@ describe("desktop-updates helpers", () => {
     expect(isVersionMismatch("v0.1.15", "0.1.15")).toBe(false);
     expect(isVersionMismatch("0.1.15", "0.1.16")).toBe(true);
     expect(isVersionMismatch("0.1.15", null)).toBe(false);
+    expect(isVersionMismatch("0.1.15+desvio.aaaaaaa", "0.1.15+desvio.bbbbbbb")).toBe(false);
+    expect(isVersionMismatch("0.1.15", "0.1.16+desvio.aaaaaaa")).toBe(true);
+    expect(isVersionMismatch("0.1.15-desvio.20260927.c755425", "0.1.15+desvio.c755425")).toBe(
+      false,
+    );
+    expect(isVersionMismatch("0.1.15-beta.2", "0.1.15")).toBe(true);
+    // g-prefixed shas (pa-mthssm) are the same release regardless of rev.
+    expect(isVersionMismatch("0.1.15-desvio.20260927.g0660291", "0.1.15+desvio.g0660291")).toBe(
+      false,
+    );
+    expect(
+      isVersionMismatch("0.1.15-desvio.20260927.g0660291", "0.1.15-desvio.20260927.g123abcd"),
+    ).toBe(false);
+  });
+
+  it("keeps fork desktop versions valid semver for every sha (pa-mthssm)", async () => {
+    const { valid: semverValid } = await import("semver");
+    const stamp = (sha: string) => `0.14.0-desvio.20261029192938.g${sha}`;
+
+    // Digit-only sha with a leading zero: invalid as a bare numeric
+    // identifier, valid with the g prefix the releaseVersion now adds.
+    expect(semverValid("0.14.0-desvio.20261029192938.0660291")).toBeNull();
+    expect(semverValid(stamp("0660291"))).toBe("0.14.0-desvio.20261029192938.g0660291");
+    // Ordinary hex sha, with and without a leading digit.
+    expect(semverValid(stamp("c755425"))).toBe("0.14.0-desvio.20261029192938.gc755425");
+    expect(semverValid(stamp("0a1b2c3"))).toBe("0.14.0-desvio.20261029192938.g0a1b2c3");
   });
 
   it("formats display versions with v prefix and unavailable fallback", async () => {
