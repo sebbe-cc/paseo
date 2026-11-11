@@ -1,3 +1,5 @@
+import { recoverLegacyWorkspaceScripts } from "./workspace-script-legacy-recovery.js";
+import { restoreWorkspaceScripts } from "./workspace-script-recovery.js";
 import { createRestartRecovery } from "./agent/restart-recovery/index.js";
 import { sendPromptToAgent } from "./agent/agent-prompt.js";
 import { createIdleRuntimeCleanup } from "./agent/idle-runtime-cleanup/index.js";
@@ -786,7 +788,10 @@ export async function createPaseoDaemon(
     logger,
     publicBaseUrl: serviceProxyPublicBaseUrl,
   });
-  const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
+  const scriptRuntimeStore = await WorkspaceScriptRuntimeStore.open({
+    path: path.join(config.paseoHome, "workspace-scripts.json"),
+    logger,
+  });
   const workspaceSetupRuntime = new WorkspaceSetupRuntime();
   let configuredHostnames = config.hostnames ?? config.allowedHosts;
   let appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
@@ -798,22 +803,20 @@ export async function createPaseoDaemon(
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
-  const scriptHealthMonitor = new ScriptHealthMonitor({
+  const emitScriptStatus = createScriptStatusEmitter({
+    sessions: () =>
+      wsServer?.listSessions().map((session) => ({
+        emit: (message) => session.emitServerMessage(message),
+      })) ?? [],
     serviceProxy,
-    onChange: createScriptStatusEmitter({
-      sessions: () =>
-        wsServer?.listSessions().map((session) => ({
-          emit: (message) => session.emitServerMessage(message),
-        })) ?? [],
-      serviceProxy,
-      runtimeStore: scriptRuntimeStore,
-      daemonPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
-      resolveWorkspaceDirectory: async (workspaceId) =>
-        (await workspaceRegistry?.get(workspaceId))?.cwd ?? null,
-      logger,
-      serviceProxyPublicBaseUrl,
-    }),
+    runtimeStore: scriptRuntimeStore,
+    daemonPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+    resolveWorkspaceDirectory: async (workspaceId) =>
+      (await workspaceRegistry?.get(workspaceId))?.cwd ?? null,
+    logger,
+    serviceProxyPublicBaseUrl,
   });
+  const scriptHealthMonitor = new ScriptHealthMonitor({ serviceProxy, onChange: emitScriptStatus });
   const handleBranchChange = createBranchChangeRouteHandler({
     serviceProxy,
     onRoutesChanged: (workspaceId) => {
@@ -991,6 +994,26 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  await recoverLegacyWorkspaceScripts({
+    paseoHome: config.paseoHome,
+    runtimeStore: scriptRuntimeStore,
+    terminalManager,
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+  });
+  await restoreWorkspaceScripts({
+    runtimeStore: scriptRuntimeStore,
+    terminalManager,
+    workspaceRegistry,
+    serviceProxy,
+    publicBaseUrl: serviceProxyPublicBaseUrl,
+    logger,
+    onLifecycleChanged: (workspaceId) => {
+      scriptHealthMonitor.invalidateWorkspace(workspaceId);
+      void emitScriptStatus(workspaceId, []);
+    },
+  });
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
@@ -2064,6 +2087,7 @@ export async function createPaseoDaemon(
       terminalShutdownError = error;
       logger.error({ err: error }, "Terminal shutdown failed");
     }
+    await scriptRuntimeStore.flush();
     await speechService.stop();
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
