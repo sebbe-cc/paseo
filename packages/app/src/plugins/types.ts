@@ -20,10 +20,12 @@ import type {
   PluginScreenContribution as SDKPluginScreenContribution,
   PluginSettingsScreenContribution as SDKPluginSettingsScreenContribution,
   PluginTimelineRendererContribution,
+  PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
   PluginPanelLocation,
   PluginWorkspacePanelContribution as SDKPluginWorkspacePanelContribution,
 } from "@getpaseo/plugin/client";
+import type { InlineDecorator } from "./inline-decorators/model";
 
 type PluginFilePanelContribution = SDKPluginFilePanelContribution<PluginText>;
 type PluginAttachmentSourceContribution = SDKPluginAttachmentSourceContribution<PluginText>;
@@ -66,6 +68,8 @@ export interface EvaluatedPlugin {
   themes: PluginThemeContribution[];
   timelineTransformers: PluginTimelineTransformerContribution[];
   timelineRenderers: PluginTimelineRendererContribution[];
+  timelineSelectionActions: PluginTimelineSelectionActionContribution[];
+  inlineDecorators: InlineDecorator[];
 }
 
 export interface InstalledPlugin extends EvaluatedPlugin {
@@ -99,6 +103,7 @@ export type {
   PluginSettingsScreenContribution,
   PluginThemeContribution,
   PluginTimelineRendererContribution,
+  PluginTimelineSelectionActionContribution,
   PluginTimelineTransformerContribution,
   PluginWorkspacePanelContribution,
 };

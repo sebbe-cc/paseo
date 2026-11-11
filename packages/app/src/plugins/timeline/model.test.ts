@@ -46,6 +46,8 @@ function plugin(input: {
       },
     ],
     timelineRenderers: [],
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 

@@ -20,6 +20,11 @@ import { PENDING_MARKDOWN_IMAGE } from "./source";
 import { splitStreamingMarkdown } from "./streaming";
 import { useMarkdownSource, type MarkdownImageContext } from "./images";
 
+import {
+  combineLinkRecognition,
+  InlineDecoratorEntriesProvider,
+  useInlineDecorators,
+} from "@/plugins/inline-decorators";
 import { MermaidFence, MermaidStreamingContext, splitMermaidFences } from "./fence/mermaid";
 
 const ThemedMarkdown = withUnistyles(EnrichedMarkdownText);
@@ -107,8 +112,14 @@ const MarkdownPart = memo(function MarkdownPart({
     },
     { commandNames: commandHints?.names, forgeReferencePattern: forgeShorthand?.pattern },
   );
+  const decorators = useInlineDecorators();
+  const recognition = useMemo(
+    () => combineLinkRecognition(linkRecognition, decorators.entries.map((entry) => entry.decorator)),
+    [linkRecognition, decorators.entries],
+  );
   const [image, setImage] = useState<ImageLightboxSource | null>(null);
   const pressLink = useStableEvent(({ url, sourceType }: LinkPressEvent) => {
+    if (sourceType !== "markdown" && decorators.press(url)) return;
     const command = commandHints && matchCommandLink(url, sourceType, commandHints.names);
     if (command) {
       commandHints.insert(command);
@@ -133,6 +144,7 @@ const MarkdownPart = memo(function MarkdownPart({
     [markdown],
   );
   return (
+    <InlineDecoratorEntriesProvider serverId={decorators.serverId} entries={decorators.entries}>
     <MermaidStreamingContext.Provider value={streaming}>
       <MarkdownBlockStack imageSources={imageSources}>
         {segments.map((segment) =>
@@ -146,7 +158,7 @@ const MarkdownPart = memo(function MarkdownPart({
               flavor="github"
               selectable={selectable}
               md4cFlags={MD4C_FLAGS}
-              linkRecognition={linkRecognition}
+              linkRecognition={recognition}
               enableTaskListItemToggle={false}
               enableLinkPreview={false}
               enableBlockContextMenu={false}
@@ -161,5 +173,6 @@ const MarkdownPart = memo(function MarkdownPart({
       </MarkdownBlockStack>
       {image ? <AttachmentLightbox source={image} onClose={closeImage} /> : null}
     </MermaidStreamingContext.Provider>
+    </InlineDecoratorEntriesProvider>
   );
 });
