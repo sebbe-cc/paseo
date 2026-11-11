@@ -3,6 +3,8 @@ import { useLayoutEffect, useRef } from "react";
 import { overlays } from "./overlays";
 
 const setScope = (_node: unknown) => {};
+// Native overlays have no DOM focus scope to move into.
+export function focusFirstElement(_scope: HTMLElement): void {}
 export function useOverlayRegistration(input: OverlayRegistration) {
   const current = useRef(input);
   current.current = input;
