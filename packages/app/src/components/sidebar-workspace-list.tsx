@@ -2070,6 +2070,7 @@ export function SidebarWorkspaceList({
     groupMode !== "project" ? (
       <SidebarGroupedModeList
         workspaceGroups={workspaceGroups}
+        groupMode={groupMode}
         pinnedGroups={pinnedGroups}
         workspaceEntriesByKey={workspaceEntriesByKey}
         projectIconByProjectViewKey={projectIconByProjectViewKey}
@@ -2122,6 +2123,7 @@ export function SidebarWorkspaceList({
  */
 function SidebarGroupedModeList({
   workspaceGroups,
+  groupMode,
   pinnedGroups,
   workspaceEntriesByKey,
   projectIconByProjectViewKey,
@@ -2137,6 +2139,7 @@ function SidebarGroupedModeList({
   dragGestureHostActive,
 }: {
   workspaceGroups: SidebarWorkspaceGroup[];
+  groupMode: SidebarGroupMode;
   pinnedGroups: PinnedSidebarGroups;
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
   projectIconByProjectViewKey: ReadonlyMap<string, string | null>;
@@ -2160,10 +2163,36 @@ function SidebarGroupedModeList({
       }),
     [pinnedGroups.pinnedChats, workspaceEntriesByKey],
   );
+  // Label sections reorder like the project headers: same drag interaction, same persistence.
+  const getLabelGroupOrder = useSidebarOrderStore((state) => state.getLabelGroupOrder);
+  const setLabelGroupOrder = useSidebarOrderStore((state) => state.setLabelGroupOrder);
+  const handleLabelGroupDragEnd = useCallback(
+    (reorderedGroups: SidebarWorkspaceGroup[]) => {
+      const reorderedGroupKeys = reorderedGroups.map((group) => group.key);
+      const currentOrder = getLabelGroupOrder();
+      if (
+        !hasVisibleOrderChanged({
+          currentOrder,
+          reorderedVisibleKeys: reorderedGroupKeys,
+        })
+      ) {
+        return;
+      }
+
+      setLabelGroupOrder(
+        mergeWithRemainder({
+          currentOrder,
+          reorderedVisibleKeys: reorderedGroupKeys,
+        }),
+      );
+    },
+    [getLabelGroupOrder, setLabelGroupOrder],
+  );
 
   return (
     <SidebarStatusWorkspaceList
       groups={workspaceGroups}
+      groupMode={groupMode}
       pinnedWorkspaces={pinnedWorkspaces}
       projectIconByProjectViewKey={projectIconByProjectViewKey}
       shortcutIndexByWorkspaceKey={_projectShortcutIndex}
@@ -2173,6 +2202,7 @@ function SidebarGroupedModeList({
       supportsPinningByServerId={supportsPinningByServerId}
       onToggleWorkspacePin={onToggleWorkspacePin}
       onPinnedWorkspaceReorder={onPinnedWorkspaceReorder}
+      onGroupDragEnd={handleLabelGroupDragEnd}
       listHeaderComponent={listHeaderComponent}
       sidebarFilterEmpty={sidebarFilterEmpty}
       parentGestureRef={parentGestureRef}
