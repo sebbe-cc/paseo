@@ -38,6 +38,7 @@ function installation(): InstalledPlugin {
     timelineRenderers: [],
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 
