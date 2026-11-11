@@ -25,6 +25,8 @@ import type {
   PluginHeaderButtonContribution,
   PluginComposerPillContribution,
 } from "./buttons.js";
+import type { PluginHidCapability } from "./hid.js";
+import type { PluginClientContextCapability } from "./client-context.js";
 import type {
   PluginTheme,
   PluginWorkspaceSnapshot,
@@ -217,6 +219,20 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   playAudio(source: { base64: string; mimeType: string }): Promise<void>;
   readonly navigation: PluginRecentNavigation;
   addKeyboardShortcut(contribution: PluginKeyboardShortcutContribution): PluginCleanup;
+  /**
+   * Trusted local device (HID) broker. Present only on clients with a
+   * local broker (desktop); undefined on browser and mobile, where the
+   * plugin reports "unsupported" and stays a no-op. App-owned with app
+   * lifetime: subscribe in contribute() and release in cleanup.
+   */
+  readonly hid?: PluginHidCapability;
+  /**
+   * Trusted global client context (window/server/workspace/pane/agent/
+   * focus) with app lifetime. Available on every client and works
+   * without a mounted plugin panel. Null snapshot until the app has
+   * resolved its installation and window identities.
+   */
+  readonly clientContext?: PluginClientContextCapability;
   addSettingsScreen(contribution: PluginSettingsScreenContribution<PluginText>): PluginCleanup;
   addScreen(contribution: PluginScreenContribution<PluginText>): PluginCleanup;
   addSidebarView(contribution: PluginSidebarViewContribution<PluginText>): PluginCleanup;

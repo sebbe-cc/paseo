@@ -11,6 +11,7 @@ import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
+import { getAppClientContextCapability, getAppHidCapability } from "./devices/app-context";
 import type { InstalledPlugin } from "./types";
 import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
 import { pluginRecentNavigation } from "./recent-navigation";
@@ -26,6 +27,8 @@ export function createPluginClientRuntime(
   );
   return {
     ...capabilities,
+    hid: getAppHidCapability(),
+    clientContext: getAppClientContextCapability(),
     i18n: installation.i18n,
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
     navigation: pluginRecentNavigation,
