@@ -176,10 +176,14 @@ export class DictationStreamManager {
     if (failures.length) throw new AggregateError(failures, "Dictation cleanup failed");
   }
 
-  public async handleStart(dictationId: string, format: string): Promise<void> {
+  public async handleStart(
+    dictationId: string,
+    format: string,
+    options: { agentId?: string; stt?: SpeechToTextProvider } = {},
+  ): Promise<void> {
     this.cleanupDictationStream(dictationId);
 
-    const sttProvider = this.resolveStt();
+    const sttProvider = options.stt ?? this.resolveStt();
     if (!sttProvider) {
       this.failDictationStream(dictationId, "Dictation STT not configured", false);
       return;
@@ -195,6 +199,7 @@ export class DictationStreamManager {
         logger: this.logger.child({ dictationId }),
         language: this.language,
         prompt: transcriptionPrompt,
+        agentId: options.agentId,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

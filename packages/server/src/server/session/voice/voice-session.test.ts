@@ -466,3 +466,77 @@ describe("plugin voice", () => {
     await f.voice.cleanup();
   });
 });
+
+describe("plugin dictation", () => {
+  const selection = { pluginId: "codex-live", providerId: "live" };
+  const format = "audio/pcm;rate=16000;bits=16";
+
+  function setup(clientSupportsPluginDictation: boolean) {
+    const audio: string[] = [];
+    const startDictationProvider = vi.fn(async () => ({
+      appendAudio: (chunk: string) => void audio.push(chunk),
+      commit: async () => `heard ${audio.length} chunk(s)`,
+      close: vi.fn(),
+    }));
+    const builtin = new FakeVoiceSttSession();
+    const builtinStt: SpeechToTextProvider = { id: "local", createSession: vi.fn(() => builtin) };
+    const host = createFakeHost();
+    const voiceSession = new VoiceSession({
+      host,
+      logger: pino({ level: "silent" }),
+      sessionId: "plugin-dictation-test",
+      tts: null,
+      stt: null,
+      dictation: {
+        stt: builtinStt,
+        clientSupportsPluginDictation,
+        plugin: {
+          getSelection: () => selection,
+          host: { hasDictationProvider: () => true, startDictationProvider },
+        },
+      },
+    });
+    return { voiceSession, host, startDictationProvider, builtinStt };
+  }
+
+  test("sends the chat's agentId to the provider and returns its committed text", async () => {
+    const { voiceSession, host, startDictationProvider, builtinStt } = setup(true);
+    await voiceSession.handleDictationStreamStart({
+      type: "dictation_stream_start",
+      dictationId: "d1",
+      format,
+      agentId: VOICE_AGENT_ID,
+    });
+    expect(startDictationProvider).toHaveBeenCalledWith(selection, {
+      agentId: VOICE_AGENT_ID,
+      signal: expect.any(AbortSignal),
+    });
+    const loud = Buffer.alloc(3200);
+    for (let index = 0; index < loud.length; index += 2) loud.writeInt16LE(8000, index);
+    await voiceSession.handleDictationChunk({
+      dictationId: "d1",
+      seq: 0,
+      audioBase64: loud.toString("base64"),
+      format,
+    });
+    await voiceSession.handleDictationFinish("d1", 0);
+    await vi.waitFor(() =>
+      expect(host.emitted).toContainEqual({
+        type: "dictation_stream_final",
+        payload: { dictationId: "d1", text: "heard 1 chunk(s)" },
+      }),
+    );
+    expect(builtinStt.createSession).not.toHaveBeenCalled();
+  });
+
+  test("a client without the capability keeps built-in dictation", async () => {
+    const { voiceSession, startDictationProvider, builtinStt } = setup(false);
+    await voiceSession.handleDictationStreamStart({
+      type: "dictation_stream_start",
+      dictationId: "d1",
+      format,
+    });
+    expect(startDictationProvider).not.toHaveBeenCalled();
+    expect(builtinStt.createSession).toHaveBeenCalled();
+  });
+});
