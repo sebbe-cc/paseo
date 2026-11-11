@@ -6488,6 +6488,137 @@ test("markAgentUnread dispatches stored attention to every subscriber", async ()
   });
 });
 
+test("markStoredAgentError persists error attention on stored agents and preserves the handle", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-mark-stored-error-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const created = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Stored recovery error" },
+    undefined,
+    { workspaceId: "workspace-1" },
+  );
+  await manager.closeAgent(created.id);
+  const before = await storage.get(created.id);
+  expect(before?.persistence).toBeDefined();
+
+  const events: ManagedAgent[] = [];
+  manager.subscribe(
+    (event) => {
+      if (event.type === "agent_state" && event.agent.id === created.id) {
+        events.push(event.agent);
+      }
+    },
+    { replayState: false },
+  );
+
+  const failure = new Error(
+    'Cannot resume Pi session "abc": session file is missing: /tmp/pi-sessions/abc.jsonl. The previous context is unavailable. Restore the file or start a new session instead.',
+  );
+  await expect(manager.markStoredAgentError(created.id, failure)).resolves.toBe(true);
+
+  // The failure is user-visible: error attention plus the message are
+  // persisted and dispatched, while the provider handle is preserved so the
+  // original context can be retried or inspected.
+  const after = await storage.get(created.id);
+  expect(after?.persistence).toEqual(before?.persistence);
+  expect(after).toMatchObject({
+    lastStatus: "closed",
+    requiresAttention: true,
+    attentionReason: "error",
+    attentionTimestamp: expect.any(String),
+    lastError: failure.message,
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    id: created.id,
+    lifecycle: "closed",
+    attention: {
+      requiresAttention: true,
+      attentionReason: "error",
+      attentionTimestamp: expect.any(Date),
+    },
+  });
+
+  // Flagging again, or flagging an unknown agent, is a no-op.
+  await expect(manager.markStoredAgentError(created.id, failure)).resolves.toBe(false);
+  await expect(manager.markStoredAgentError("no-such-agent", failure)).resolves.toBe(false);
+  expect(await storage.get(created.id)).toMatchObject({ lastError: failure.message });
+});
+
+test("markStoredAgentError overwrites pre-existing attention with the current recovery error", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-mark-stored-error-stale-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const created = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Stored recovery error with stale attention" },
+    undefined,
+    { workspaceId: "workspace-1" },
+  );
+  await manager.closeAgent(created.id);
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  const stored = await storage.get(created.id);
+  if (!stored) throw new Error("Created agent was not persisted");
+  await storage.upsert({
+    ...stored,
+    requiresAttention: true,
+    attentionReason: "finished",
+    attentionTimestamp: staleAt,
+    lastError: "previous finished attention",
+  });
+
+  const events: ManagedAgent[] = [];
+  manager.subscribe(
+    (event) => {
+      if (event.type === "agent_state" && event.agent.id === created.id) {
+        events.push(event.agent);
+      }
+    },
+    { replayState: false },
+  );
+
+  const failure = new Error(
+    'Cannot resume Pi session "abc": session file is missing: /tmp/pi-sessions/abc.jsonl. The previous context is unavailable. Restore the file or start a new session instead.',
+  );
+  await expect(manager.markStoredAgentError(created.id, failure)).resolves.toBe(true);
+
+  // The stale finished attention is replaced by the current recovery error,
+  // while the provider handle is preserved.
+  const after = await storage.get(created.id);
+  expect(after?.persistence).toEqual(stored?.persistence);
+  expect(after).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "error",
+    attentionTimestamp: expect.any(String),
+    lastError: failure.message,
+  });
+  expect(after?.attentionTimestamp).not.toBe(staleAt);
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    id: created.id,
+    attention: {
+      requiresAttention: true,
+      attentionReason: "error",
+      attentionTimestamp: expect.any(Date),
+    },
+  });
+
+  // A different recovery error still overwrites recorded error attention.
+  const other = new Error("Cannot resume Pi session: provider unavailable.");
+  await expect(manager.markStoredAgentError(created.id, other)).resolves.toBe(true);
+  expect(await storage.get(created.id)).toMatchObject({
+    attentionReason: "error",
+    lastError: other.message,
+  });
+});
+
 test("reloadAgentSession cancels active run and resumes existing session once thread_started is observed", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-active-"));
   const storagePath = join(workdir, "agents");
