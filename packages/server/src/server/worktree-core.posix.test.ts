@@ -458,6 +458,54 @@ describe.skipIf(isPlatform("win32"))("worktree-core POSIX-only", () => {
       expect(getBranchUpstream(result.worktree.worktreePath)).toBeNull();
     });
 
+    test("cuts an omitted-ref branch-off from origin main when the local default is stale", async () => {
+      const { tempDir, repoDir, paseoHome } = createGitRepoWithOriginMain();
+      cleanupPaths.push(tempDir);
+
+      // Advance origin/main past the local main: the new workspace must start
+      // from what the default means everywhere else, not the stale local ref.
+      const remoteDir = path.join(tempDir, "origin.git");
+      const cloneDir = path.join(tempDir, "origin-clone");
+      execFileSync("git", ["clone", remoteDir, cloneDir], { stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", "test@test.com"], {
+        cwd: cloneDir,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: cloneDir, stdio: "pipe" });
+      execFileSync("git", ["checkout", "-B", "main", "origin/main"], {
+        cwd: cloneDir,
+        stdio: "pipe",
+      });
+      writeFileSync(path.join(cloneDir, "from-origin.txt"), "from-origin\n");
+      execFileSync("git", ["add", "from-origin.txt"], { cwd: cloneDir, stdio: "pipe" });
+      execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "advance origin main"], {
+        cwd: cloneDir,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["push", "origin", "main"], { cwd: cloneDir, stdio: "pipe" });
+      execFileSync("git", ["fetch", "origin"], { cwd: repoDir, stdio: "pipe" });
+
+      // No action/refName: this is what the app sends when no base is picked, and
+      // the server resolves its repository default for it.
+      const result = await createCoreWorktree(
+        {
+          cwd: repoDir,
+          worktreeSlug: "omitted-ref-feature",
+          paseoHome,
+        },
+        createCoreDeps(),
+      );
+
+      expect(result.intent).toEqual({
+        kind: "branch-off",
+        baseBranch: "main",
+        branchName: "omitted-ref-feature",
+      });
+      expect(readFileSync(path.join(result.worktree.worktreePath, "from-origin.txt"), "utf8")).toBe(
+        "from-origin\n",
+      );
+    });
+
     test("creates a branch-off worktree with a mnemonic slug when no slug is supplied", async () => {
       const { tempDir, repoDir, paseoHome } = createGitRepo();
       cleanupPaths.push(tempDir);
