@@ -30,6 +30,7 @@ import {
 } from "@/git/file-header-presentation";
 import type { DiffFileHeader } from "@/git/diff-snapshot";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 export interface FileHeaderProps {
   file: DiffFileHeader;
@@ -317,6 +318,7 @@ export const FileHeader = memo(function FileHeader({
         accessibilityLabel={accessibilityLabel}
         aria-expanded={expandedAriaValue(showsBodyState, bodyVisible)}
         aria-selected={isSelected}
+        dataSet={NAV_ROW_DATASET}
       >
         {renderedContent}
       </ContextMenuTrigger>
