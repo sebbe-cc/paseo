@@ -402,6 +402,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       (state) =>
         state.sessions[resolvedServerId]?.serverInfo?.features?.agentForkContextCursor === true,
     );
+    const supportsAssistantFileResolve = useSessionStore(
+      (state) =>
+        state.sessions[resolvedServerId]?.serverInfo?.features?.assistantFileResolve === true,
+    );
     const supportsChatOutline = useSessionStore(
       (state) =>
         state.sessions[resolvedServerId]?.serverInfo?.features?.agentTimelinePromptIndex === true,
@@ -745,6 +749,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             workspaceRoot={workspaceRoot}
             onOpenWorkspaceFile={handleInlinePathPress}
             toast={toast}
+            batchResolve={supportsAssistantFileResolve}
           >
             <InlineDecorationScopeProvider
               serverId={resolvedServerId}
@@ -776,6 +781,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         context.workspaceId,
         handleInlinePathPress,
         resolvedServerId,
+        supportsAssistantFileResolve,
         toast,
         workspaceRoot,
       ],
