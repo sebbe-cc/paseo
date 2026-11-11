@@ -448,6 +448,33 @@ for (const cursor of [undefined, "v:old:7"]) {
     ).not.toHaveProperty("cursor");
   });
 }
+test("resume keeps the configured model and re-selects it on the native session", async () => {
+  const h = await harness("resume-without-cursor");
+  await h.open(
+    { version: 1, data: { sessionId: "saved-session" } },
+    "onRequest",
+    "meta/muse-spark-1.3-contributor",
+  );
+  await h.wait((event) => event.type === "session.ready");
+  // The native fixture session stands on the base model; the configured
+  // contributor model must win and be re-selected, not drift.
+  const config = h.events.findLast((event) => event.type === "session.config");
+  expect(config).toMatchObject({ config: { model: "meta/muse-spark-1.3-contributor" } });
+  expect(
+    (await h.recorded()).find((frame) => frame.method === "session/setModel")?.params,
+  ).toMatchObject({ model: { modelId: "meta/muse-spark-1.3-contributor" } });
+  const saved = h.events.findLast((event) => event.type === "session.persistence");
+  expect(saved?.persistence.data.model).toBe("meta/muse-spark-1.3-contributor");
+});
+test("resume without model drift does not re-select the model", async () => {
+  const h = await harness("resume-without-cursor");
+  await h.open({ version: 1, data: { sessionId: "saved-session" } });
+  await h.wait((event) => event.type === "session.ready");
+  expect((await h.recorded()).filter((frame) => frame.method === "session/setModel")).toEqual([]);
+  expect(h.events.findLast((event) => event.type === "session.config")).toMatchObject({
+    config: { model: "meta/muse-spark-1.3" },
+  });
+});
 test("steer sends ifBusy steer and joins the running turn", async () => {
   const h = await harness("steer");
   await h.open();
