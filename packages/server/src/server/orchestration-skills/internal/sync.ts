@@ -16,6 +16,52 @@ export interface SkillSyncResult {
   processedSkills: number;
 }
 
+/** One skill whose target directory cannot be written (read-only, nix-managed). */
+export interface ReadOnlySkillTarget {
+  skillName: string;
+  targetDir: string;
+}
+
+/**
+ * Thrown when a skill target directory is read-only (for example a symlink
+ * into the read-only nix store of a home-manager-owned skill catalog). The
+ * targets are managed externally, so maintenance skips them instead of failing.
+ */
+export class SkillTargetReadOnlyError extends Error {
+  readonly code = "PASEO_SKILL_TARGET_READ_ONLY";
+  readonly targets: ReadOnlySkillTarget[];
+  constructor(targets: ReadOnlySkillTarget[], options?: { cause?: unknown }) {
+    const detail = targets.map((t) => `${t.skillName} in ${t.targetDir}`).join("; ");
+    super(
+      `skill targets are read-only, skipping maintenance (managed externally?): ${detail}`,
+    );
+    this.name = "SkillTargetReadOnlyError";
+    this.targets = targets;
+    if (options?.cause !== undefined) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+export function isSkillTargetReadOnlyError(value: unknown): value is SkillTargetReadOnlyError {
+  return value instanceof SkillTargetReadOnlyError;
+}
+
+const READ_ONLY_FS_CODES = new Set(["EROFS", "EACCES", "EPERM"]);
+
+function asReadOnlyError(
+  error: unknown,
+  skillName: string,
+  targetDir: string,
+): unknown {
+  if (error instanceof SkillTargetReadOnlyError) return error;
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (typeof code === "string" && READ_ONLY_FS_CODES.has(code)) {
+    return new SkillTargetReadOnlyError([{ skillName, targetDir }], { cause: error });
+  }
+  return error;
+}
+
 const MANAGED_FILES_MANIFEST = ".paseo-managed-files.json";
 
 interface ManagedFilesManifest {
@@ -134,7 +180,11 @@ async function assertManagedPathsStayInsideSkill(rootDir: string, rels: readonly
   }
 }
 
-async function syncDirectoryFiles(srcDir: string, dstDir: string): Promise<number> {
+async function syncDirectoryFiles(
+  srcDir: string,
+  dstDir: string,
+  skillName: string,
+): Promise<number> {
   const files = await listFilesRecursive(srcDir);
   const srcFileSet = new Set(files);
   const srcHashes: Record<string, string> = {};
@@ -148,26 +198,30 @@ async function syncDirectoryFiles(srcDir: string, dstDir: string): Promise<numbe
     ...files,
     ...Object.keys(previousManifest?.files ?? {}),
   ]);
-  let changed = 0;
-  for (const rel of files) {
-    if (await writeFileIfChanged(path.join(srcDir, rel), path.join(dstDir, rel))) {
+  try {
+    let changed = 0;
+    for (const rel of files) {
+      if (await writeFileIfChanged(path.join(srcDir, rel), path.join(dstDir, rel))) {
+        changed++;
+      }
+    }
+
+    const deletedRels: string[] = [];
+    for (const [rel, previousHash] of Object.entries(previousManifest?.files ?? {})) {
+      if (srcFileSet.has(rel)) continue;
+      const dstPath = path.join(dstDir, rel);
+      const currentHash = await hashFile(dstPath).catch(() => null);
+      if (currentHash !== previousHash) continue;
+      await fs.rm(dstPath, { force: true });
+      deletedRels.push(rel);
       changed++;
     }
+    await pruneEmptyParentDirs(dstDir, deletedRels);
+    if (await writeManifestIfChanged(dstDir, srcHashes)) changed++;
+    return changed;
+  } catch (error) {
+    throw asReadOnlyError(error, skillName, dstDir);
   }
-
-  const deletedRels: string[] = [];
-  for (const [rel, previousHash] of Object.entries(previousManifest?.files ?? {})) {
-    if (srcFileSet.has(rel)) continue;
-    const dstPath = path.join(dstDir, rel);
-    const currentHash = await hashFile(dstPath).catch(() => null);
-    if (currentHash !== previousHash) continue;
-    await fs.rm(dstPath, { force: true });
-    deletedRels.push(rel);
-    changed++;
-  }
-  await pruneEmptyParentDirs(dstDir, deletedRels);
-  if (await writeManifestIfChanged(dstDir, srcHashes)) changed++;
-  return changed;
 }
 
 export interface RemoveSkillTargets {
@@ -208,32 +262,37 @@ export async function isLegacyCodexCopy(
   return true;
 }
 
-async function retireManagedSkill(dstDir: string): Promise<number> {
+async function retireManagedSkill(dstDir: string, skillName: string): Promise<number> {
   const info = await fs.lstat(dstDir).catch(() => null);
   if (!info?.isDirectory()) return 0;
   const manifest = await readManagedFilesManifest(dstDir);
   if (!manifest) return 0;
   const files = Object.keys(manifest.files);
   await assertManagedPathsStayInsideSkill(dstDir, [MANAGED_FILES_MANIFEST, ...files]);
-  const removed: string[] = [];
-  for (const [rel, previousHash] of Object.entries(manifest.files)) {
-    const filePath = path.join(dstDir, rel);
-    const currentHash = await hashFile(filePath).catch(() => null);
-    if (currentHash !== previousHash) continue;
-    await fs.rm(filePath);
-    removed.push(rel);
+  try {
+    const removed: string[] = [];
+    for (const [rel, previousHash] of Object.entries(manifest.files)) {
+      const filePath = path.join(dstDir, rel);
+      const currentHash = await hashFile(filePath).catch(() => null);
+      if (currentHash !== previousHash) continue;
+      await fs.rm(filePath);
+      removed.push(rel);
+    }
+    await pruneEmptyParentDirs(dstDir, removed);
+    await fs.rm(path.join(dstDir, MANAGED_FILES_MANIFEST));
+    await fs.rmdir(dstDir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOTEMPTY" && error.code !== "ENOENT") throw error;
+    });
+    return removed.length + 1;
+  } catch (error) {
+    throw asReadOnlyError(error, skillName, dstDir);
   }
-  await pruneEmptyParentDirs(dstDir, removed);
-  await fs.rm(path.join(dstDir, MANAGED_FILES_MANIFEST));
-  await fs.rmdir(dstDir).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOTEMPTY" && error.code !== "ENOENT") throw error;
-  });
-  return removed.length + 1;
 }
 
 export async function syncSkills(options: SkillSyncOptions): Promise<SkillSyncResult> {
   let changedFiles = 0;
   let processedSkills = 0;
+  const readOnly: ReadOnlySkillTarget[] = [];
 
   for (const skillName of options.skillNames) {
     const bundleSkillDir = path.join(options.sourceDir, skillName);
@@ -241,28 +300,55 @@ export async function syncSkills(options: SkillSyncOptions): Promise<SkillSyncRe
     const bundleStat = await fs.stat(bundleSkillDir).catch(() => null);
     if (!bundleStat?.isDirectory()) continue;
 
-    try {
-      changedFiles += await syncDirectoryFiles(
-        bundleSkillDir,
-        path.join(options.agentsDir, skillName),
-      );
-
-      changedFiles += await syncDirectoryFiles(
-        bundleSkillDir,
-        path.join(options.claudeDir, skillName),
-      );
-
-      // Retain user edits to the old dedicated Codex copy.
-      if (await isLegacyCodexCopy(skillName, options)) {
-        changedFiles += await retireManagedSkill(path.join(options.codexDir, skillName));
+    // A read-only target (nix-managed catalog) skips that target but never
+    // stops the remaining targets or skills; any other error keeps the old
+    // abort-the-skill semantics.
+    let skillFailed = false;
+    let skillAborted = false;
+    const reportTargetError = (error: unknown): void => {
+      if (isSkillTargetReadOnlyError(error)) {
+        skillFailed = true;
+        if (options.onSkillError) options.onSkillError(skillName, error);
+        else readOnly.push(...error.targets);
+        return;
       }
-
-      processedSkills++;
-    } catch (error) {
+      skillFailed = true;
+      skillAborted = true;
       if (!options.onSkillError) throw error;
       options.onSkillError(skillName, error);
+    };
+
+    for (const dstDir of [
+      path.join(options.agentsDir, skillName),
+      path.join(options.claudeDir, skillName),
+    ]) {
+      if (skillAborted) break;
+      try {
+        changedFiles += await syncDirectoryFiles(bundleSkillDir, dstDir, skillName);
+      } catch (error) {
+        reportTargetError(error);
+      }
     }
+
+    // Retain user edits to the old dedicated Codex copy.
+    if (!skillAborted) {
+      try {
+        if (await isLegacyCodexCopy(skillName, options)) {
+          changedFiles += await retireManagedSkill(
+            path.join(options.codexDir, skillName),
+            skillName,
+          );
+        }
+      } catch (error) {
+        reportTargetError(error);
+      }
+    }
+
+    if (!skillFailed) processedSkills++;
   }
 
+  if (readOnly.length > 0 && !options.onSkillError) {
+    throw new SkillTargetReadOnlyError(readOnly);
+  }
   return { changedFiles, processedSkills };
 }
