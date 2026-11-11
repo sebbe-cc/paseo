@@ -3720,6 +3720,7 @@ function WorkspaceScreenContent({
     if (!workspaceLayout || !explorerSidebarPaneId || !persistenceKey) return null;
     const explorerPane = findPaneById(workspaceLayout.root, explorerSidebarPaneId);
     if (!explorerPane) return null;
+    const isExplorerPaneFocused = workspaceLayout.focusedPaneId === explorerSidebarPaneId;
     const dock = (
       <ExplorerSidebarDock
         pane={explorerPane}
@@ -3728,6 +3729,8 @@ function WorkspaceScreenContent({
         normalizedWorkspaceId={normalizedWorkspaceId}
         isWorkspaceFocused={isRouteFocused}
         paneFocusSuspended={paneFocusSuspended}
+        isPaneFocused={isExplorerPaneFocused}
+        onFocusPane={handleFocusPane}
         closingTabIds={closingTabIds}
         hoveredCloseTabKey={hoveredCloseTabKey}
         setHoveredCloseTabKey={setHoveredCloseTabKey}
@@ -3787,6 +3790,7 @@ function WorkspaceScreenContent({
     handleCloseOtherTabsInPane,
     toggleFocusMode,
     handleReorderTabsInPane,
+    handleFocusPane,
     buildDesktopPaneContentModel,
     renderExplorerSidebarHeaderAction,
     workspaceViewportWidth,

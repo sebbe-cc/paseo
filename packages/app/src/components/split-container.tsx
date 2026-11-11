@@ -24,6 +24,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
 import { ResizeHandle } from "@/components/resize-handle";
+import { PaneFocusRing, resolvePaneFocusRingVisible } from "@/components/pane-focus-ring";
 import { RetainedPanel } from "@/components/retained-panel";
 import {
   hasMultipleVisiblePanes,
@@ -891,6 +892,13 @@ const SplitPaneView = memo(function SplitPaneView({
           />
           <SplitDropZone paneId={pane.id} active={showDropZones} preview={dropPreview} />
         </View>
+        <PaneFocusRing
+          visible={resolvePaneFocusRingVisible({
+            isWorkspaceFocused,
+            isPaneFocused: isFocused,
+          })}
+          testID={`pane-focus-ring-${pane.id}`}
+        />
       </View>
     </RenderProfile>
   );
