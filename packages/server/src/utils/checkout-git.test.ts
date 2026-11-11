@@ -24,6 +24,7 @@ import {
   CHECKOUT_DIFF_MAX_STRUCTURED_BYTES,
   createPullRequest,
   getCachedCheckoutShortstat,
+  getCheckoutRefDerivedState,
   getCheckoutSnapshotFacts,
   getCurrentBranch,
   getCheckoutDiff,
@@ -32,6 +33,8 @@ import {
   getCheckoutStatus,
   checkoutResolvedBranch,
   listBranchSuggestions,
+  listCheckoutCommits,
+  resolveWorkspaceBase,
   setCheckoutBaseBranch,
   mergeToBase,
   mergeFromBase,
@@ -293,6 +296,110 @@ describe("checkout git utilities", () => {
     expect(await getCheckoutSnapshotFacts(worktree.worktreePath, { paseoHome })).toMatchObject({
       storedBaseRef: "refs/heads/release",
     });
+  });
+
+  it("recomputes the saved fork point when the base changes", async () => {
+    const worktree = await createLegacyWorktreeForTest({
+      cwd: repoDir,
+      branchName: "feature/fork",
+      baseBranch: "main",
+      worktreeSlug: "fork",
+      paseoHome,
+      runSetup: false,
+    });
+    const mainSha = execFileSync("git", ["rev-parse", "main"], { cwd: repoDir }).toString().trim();
+    expect(await readPaseoWorktreeMetadata(worktree.worktreePath)).toMatchObject({
+      version: 3,
+      baseRef: "refs/heads/main",
+      forkSha: mainSha,
+    });
+    execFileSync("git", ["checkout", "-b", "release"], { cwd: repoDir });
+    writeFileSync(join(repoDir, "release.txt"), "release\n");
+    execFileSync("git", ["add", "release.txt"], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "release"], {
+      cwd: repoDir,
+    });
+    execFileSync("git", ["checkout", "main"], { cwd: repoDir });
+    execFileSync("git", ["merge", "--ff-only", "release"], { cwd: worktree.worktreePath });
+    const releaseSha = execFileSync("git", ["rev-parse", "release"], { cwd: repoDir })
+      .toString()
+      .trim();
+    await setCheckoutBaseBranch({
+      cwd: worktree.worktreePath,
+      baseRef: "release",
+      context: { paseoHome },
+    });
+    expect(await readPaseoWorktreeMetadata(worktree.worktreePath)).toMatchObject({
+      version: 3,
+      baseRef: "refs/heads/release",
+      forkSha: releaseSha,
+    });
+  });
+
+  it("compares against the saved fork point after the base branch is deleted", async () => {
+    execFileSync("git", ["branch", "epic"], { cwd: repoDir });
+    const worktree = await createLegacyWorktreeForTest({
+      cwd: repoDir,
+      branchName: "feature/epic",
+      baseBranch: "epic",
+      worktreeSlug: "epic",
+      paseoHome,
+      runSetup: false,
+    });
+    const forkSha = execFileSync("git", ["rev-parse", "epic"], { cwd: repoDir }).toString().trim();
+    writeFileSync(join(worktree.worktreePath, "feature.txt"), "feature\n");
+    execFileSync("git", ["add", "feature.txt"], { cwd: worktree.worktreePath });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "Feature work"], {
+      cwd: worktree.worktreePath,
+    });
+    const facts = await getCheckoutSnapshotFacts(worktree.worktreePath, { paseoHome });
+    if (!facts.isGit) throw new Error("Expected a Git checkout");
+    expect(facts.base).toEqual({ ref: "refs/heads/epic", forkSha, missing: false });
+
+    execFileSync("git", ["branch", "-D", "epic"], { cwd: repoDir });
+    __resetCheckoutShortstatCacheForTests();
+    const derived = await getCheckoutRefDerivedState(
+      worktree.worktreePath,
+      facts,
+      { aheadBehind: { ahead: 1, behind: 0 }, diffStat: { additions: 1, deletions: 0 } },
+      new Set(["refs/heads/epic"]),
+      { paseoHome },
+    );
+    expect(derived).toMatchObject({
+      base: { ref: "refs/heads/epic", forkSha, missing: true },
+      comparisonBaseRef: forkSha,
+      aheadBehind: { ahead: 1, behind: 0 },
+    });
+
+    const expectedBase = { ref: "refs/heads/epic", forkSha, missing: true };
+    await expect(resolveWorkspaceBase(worktree.worktreePath, { paseoHome })).resolves.toEqual(
+      expectedBase,
+    );
+    await expect(getCheckoutStatus(worktree.worktreePath, { paseoHome })).resolves.toMatchObject({
+      baseRef: "epic",
+      baseRefExact: "refs/heads/epic",
+      comparisonBaseRef: "refs/heads/epic",
+      base: expectedBase,
+      aheadBehind: { ahead: 1, behind: 0 },
+    });
+    const diff = await getCheckoutDiff(
+      worktree.worktreePath,
+      { mode: "base", baseRef: "refs/heads/epic" },
+      { paseoHome },
+    );
+    expect(diff.diff).toContain("feature.txt");
+    await expect(getCheckoutShortstat(worktree.worktreePath, { paseoHome })).resolves.toEqual({
+      additions: 1,
+      deletions: 0,
+    });
+    const history = await listCheckoutCommits({
+      cwd: worktree.worktreePath,
+      context: { paseoHome },
+    });
+    expect(history.commits.map((commit) => [commit.subject, commit.isOnBase])).toEqual([
+      ["Feature work", false],
+      ["initial", true],
+    ]);
   });
 
   it("lists exact local and all remote refs separately for the base picker", async () => {

@@ -113,6 +113,8 @@ export interface Agent {
 }
 
 export interface WorkspaceDescriptor {
+  base?: WorkspaceDescriptorPayload["base"];
+  baseError?: string;
   parentWorkspaceId?: string;
   createdAt: Date | null;
   lastUserMessageAt: Date | null;
@@ -155,6 +157,8 @@ export function normalizeWorkspaceDescriptor(
     // COMPAT(workspaceSortTimes): added in v0.13.0, remove after 2027-04-22.
     createdAt: payload.createdAt ? new Date(payload.createdAt) : null,
     lastUserMessageAt: payload.lastUserMessageAt ? new Date(payload.lastUserMessageAt) : null,
+    base: payload.base,
+    baseError: payload.baseError,
     id: normalizeWorkspaceOpaqueId(payload.id) ?? payload.id,
     projectId: payload.projectId,
     projectDisplayName: payload.projectDisplayName,

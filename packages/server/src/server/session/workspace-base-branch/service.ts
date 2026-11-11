@@ -76,6 +76,7 @@ export function createWorkspaceBaseBranchService(deps: Dependencies) {
           await setPaseoWorktreeBaseRef({
             worktreeRoot: root,
             baseRef: metadata.baseRef ?? metadata.baseRefName,
+            ...(metadata.version === 3 ? { forkSha: metadata.forkSha } : {}),
           });
         for (const record of matching) {
           await deps.workspaceRegistry.update(record.workspaceId, (latest) => ({

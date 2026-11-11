@@ -362,6 +362,8 @@ describe("ReplicaCache", () => {
       ...workspacePayload(),
       createdAt: "2026-07-18T08:00:00.000Z",
       lastUserMessageAt: "2026-07-18T09:00:00.000Z",
+      base: { ref: "refs/remotes/upstream/epic", forkSha: "a".repeat(40), missing: true },
+      baseError: "Base ref not found: refs/remotes/upstream/epic",
     });
     baseline.workspaces.set(workspace.id, workspace);
     commitDirectory(writer, SERVER_ID, baseline);
