@@ -285,17 +285,14 @@ export class Session {
   get awake(): boolean {
     return this.host.awake;
   }
-  private mcpServers(): Record<string, SessionMcpServerConfig> {
-    return Object.fromEntries(
-      Object.entries(this.config.mcpServers).map(([id, server]) => [id, mcpServer(server)]),
-    );
-  }
   // The idle host ran no turn, so the timeline is current; only the view cursor is new.
+  // A daemon session re-declares its stdio MCP servers with the session env and
+  // wrapper, as at open; its env file stays in place until close.
   private async reattach(host: MspConnection): Promise<void> {
     await host.initialize();
     const response = await host.command(
       "session/resume",
-      { sessionId: this.live().nativeId, config: { mcpServers: this.mcpServers() } },
+      { sessionId: this.live().nativeId, config: { mcpServers: this.sessionMcpServers() } },
       sessionSchema,
     );
     if (response.viewCursor) this.live().recovery.activity(response.viewCursor, false);
