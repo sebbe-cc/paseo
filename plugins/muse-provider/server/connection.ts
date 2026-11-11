@@ -25,6 +25,7 @@ export interface Notification {
   method: string;
   params: unknown;
 }
+export type MspHost = Pick<MspConnection, "request" | "command">;
 
 export class MspConnection {
   private readonly child;
