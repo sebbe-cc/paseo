@@ -479,6 +479,126 @@ It must resolve inside that directory to a regular file that follows the
 [SVG icon rules](#svg-rules). Paseo reads and validates the file when the plugin starts; the string
 is never inline SVG or a URL.
 
+### Voice providers (experimental fork API)
+
+This API requires the `feat/plugin-voice-provider` topic on Paseo 0.12. It is not in
+upstream 0.12. Check `server_info.features.pluginVoiceProviders` before using the
+feature. Clients advertise `plugin_voice_providers` to confirm they handle remote
+session termination; an older app gets an update error before voice starts. The Codex Live provider in fleet/paseo `plugins/codex-live` is a complete example.
+
+Register from the server entry:
+
+```ts
+import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { startVoice } from "./server/voice";
+
+export default function contribute(server: PluginServerContext) {
+  server.registerVoiceProvider({ id: "live", label: "Live", start: startVoice });
+  return () => {};
+}
+```
+
+Select the registration in the daemon's `config.json`, then start the isolated
+daemon with that home. Selection is a startup setting. Omit `provider` to use
+Paseo's existing STT/agent/TTS voice mode. An unavailable selected plugin fails
+explicitly; it does not select another provider.
+
+```json
+{
+  "features": {
+    "voiceMode": {
+      "provider": { "pluginId": "my-plugin", "providerId": "live" }
+    }
+  }
+}
+```
+
+`start({ agentId, directory, paseo, signal, emit })` returns a
+`Promise<VoiceProviderSession>`. `directory` is the installed plugin directory.
+`paseo` is the normal SDK bound to the trusted plugin session. Resolve once the
+remote session accepts audio. The selected agent already exists; do not create a
+replacement agent. Authentication, remote session bootstrap and delegation stay
+in the daemon plugin. Never include credentials in events or errors.
+
+The returned session implements:
+
+| Method                | Contract                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `appendAudio(base64)` | Accept PCM16 little-endian, mono, 16 kHz promptly. Bound any queue; reject on overflow.                             |
+| `close()`             | Idempotent `void` or `Promise<void>`. Release transports, media, timers and observations. Leave agent work running. |
+
+`signal` aborts on stop, source disconnect, agent switch or plugin shutdown,
+including during bootstrap. Honour it before completing `start`. Paseo also
+closes a session that finishes starting after cancellation. A plugin crash or
+unload ends voice; reload never resumes the old remote call.
+
+`emit` accepts these `VoiceProviderEvent` values, exported with the registration
+and session types from `@getpaseo/plugin/server`:
+
+| `type`       | Fields                                              | Meaning                                                                                                                                                                          |
+| ------------ | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `audio`      | `audio`, `utteranceId`, `chunkIndex`, `isLastChunk` | Base64 PCM16 little-endian, mono, 24 kHz. Use a unique utterance ID, contiguous indexes starting at zero, and a terminal chunk. Each base64 chunk is at most 128,000 characters. |
+| `speech`     | `isSpeaking`                                        | User speech detection. A start clears queued playback without cancelling the coding agent.                                                                                       |
+| `transcript` | `role: "user" \| "assistant"`, `text`               | Completed voice transcript for Paseo's existing voice display. It does not submit another agent message.                                                                         |
+| `closed`     | optional `error`                                    | Remote session ended or failed. Paseo stops capture and playback; errors must be safe to show to the user.                                                                       |
+
+Paseo owns the normal voice button, selected agent, client audio engine and
+source-scoped delivery. Plugins receive no native microphone handle and need no
+client entry. Web, Electron, iOS and Android use the existing PCM transport.
+Transport reuse does not establish device-specific QA evidence.
+
+For delegation, subscribe to the selected agent's timeline and await its `ready`
+promise before sending work. Give each message a `messageId`; match its accepted
+`user_message.clientMessageId` and subsequent `turnId`. Stop attributing output
+when the observation is replaced, reconnects, or another prompt changes the
+context. Do not attach stale output to a later delegation.
+
+On capable hosts, `agent.send(text, { activeTurnBehavior: "steer_only" })` guides
+an active turn without replacement. If steering is unavailable, it rejects and
+the current job continues. An idle agent starts a new turn. The SDK rejects this
+option on older hosts before sending it. Explicit agent cancellation remains a
+separate Paseo action.
+
+### Dictation providers (experimental fork API)
+
+This API requires the `feat/plugin-dictation-provider` topic. Check
+`server_info.features.pluginDictationProviders` before using it. It drives the
+composer's dictation button, not voice mode. Clients that advertise
+`plugin_dictation_providers` send the composer's `agentId` with
+`dictation_stream_start`; older clients keep Paseo's built-in dictation.
+
+```ts
+server.registerDictationProvider({ id: "live", label: "Live", start: startDictation });
+```
+
+Select it in `config.json`; like voice, selection is read at startup and an
+unavailable plugin fails explicitly:
+
+```json
+{
+  "features": {
+    "dictation": {
+      "provider": { "pluginId": "my-plugin", "providerId": "live" }
+    }
+  }
+}
+```
+
+`start({ agentId, directory, paseo, signal })` resolves with a
+`DictationProviderSession` once it accepts audio. `agentId` is the chat being
+dictated into and is absent outside an agent chat, so read its timeline only
+when present.
+
+| Method                | Contract                                                                         |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `appendAudio(base64)` | PCM16 little-endian, mono, 16 kHz. Accept promptly; bound any queue.             |
+| `commit()`            | Resolve with the text spoken since the previous commit. Paseo joins the commits. |
+| `close()`             | Idempotent. Drop uncommitted audio; release transports and timers.               |
+
+Paseo commits when the user stops dictating and every 15 s of audio during long
+dictation. Audio and commits arrive in order. A rejected commit fails the
+dictation with a retryable error.
+
 ### Usage sources
 
 **Requires Paseo 0.11.** Register a source from your server entry with
