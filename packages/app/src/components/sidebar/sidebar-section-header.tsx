@@ -5,6 +5,7 @@ import { StyleSheet } from "react-native-unistyles";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 import { density } from "@/styles/density";
 
 /** A sidebar section label such as "Pinned" or "Workspaces". A section with `onToggle`
@@ -59,6 +60,8 @@ function CollapsibleTitle({
     <Pressable
       accessibilityRole="button"
       accessibilityState={accessibilityState}
+      aria-expanded={!collapsed}
+      dataSet={NAV_ROW_DATASET}
       onPress={onToggle}
       style={styles.toggle}
       testID={testID}

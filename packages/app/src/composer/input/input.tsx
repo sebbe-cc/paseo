@@ -82,6 +82,7 @@ import { getShortcutOs } from "@/utils/shortcut-platform";
 import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
 import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { isNative, isWeb } from "@/constants/platform";
+import { keyboardFocusHeldElsewhere } from "@/keyboard/focus-regions";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useComposerKeyboardScope } from "@/composer/keyboard-scope";
 import { RenderProfile } from "@/utils/render-profiler";
@@ -243,6 +244,7 @@ const MIN_INPUT_HEIGHT_MOBILE = 30;
 const MIN_INPUT_HEIGHT_DESKTOP = 46;
 const DEFAULT_MAX_INPUT_HEIGHT = 160;
 const MAX_INPUT_VIEWPORT_RATIO = 0.5;
+const COMPOSER_REGION_DATASET = { focusRegion: "composer" };
 const MIN_INPUT_HEIGHT = isWeb ? MIN_INPUT_HEIGHT_DESKTOP : MIN_INPUT_HEIGHT_MOBILE;
 type WebTextInputKeyPressEvent = NativeSyntheticEvent<
   TextInputKeyPressEventData & {
@@ -580,9 +582,15 @@ function useAutoFocusOnWebEffect(
 ): void {
   useEffect(() => {
     if (!isWeb || !autoFocus) return;
+    // Don't pull focus back from a region the user moved to with ⌥H/J/K/L.
+    const heldElsewhere = () =>
+      keyboardFocusHeldElsewhere(getTextInputNativeElement(textInputRef.current));
     return focusWithRetries({
-      focus: () => textInputRef.current?.focus(),
+      focus: () => {
+        if (!heldElsewhere()) textInputRef.current?.focus();
+      },
       isFocused: () => {
+        if (heldElsewhere()) return true;
         const element = getTextInputNativeElement(textInputRef.current);
         const active = typeof document !== "undefined" ? document.activeElement : null;
         return Boolean(element) && active === element;
@@ -2329,6 +2337,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             : [styles.container, Platform.OS === "ios" && isCompact && styles.inputWrapperCompact]
         }
         testID="message-input-root"
+        dataSet={COMPOSER_REGION_DATASET}
         onLayout={handleComposerLayout}
       >
         <MessageInputAutoFocus
