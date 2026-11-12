@@ -6,6 +6,7 @@ import type {
   PluginCommandCapabilities,
   PluginOpenPanelOptions,
   PluginPanelLocation,
+  PluginPanelSplit,
   PluginScreenParams,
   PluginWorkspaceCommandContext,
 } from "@getpaseo/plugin/client";
@@ -15,13 +16,14 @@ import { resolvePluginPanelOpenLocation } from "./workspace-panels/locations";
 import { parsePluginOpenScreenInput } from "./surface-contribution";
 import type { InstalledPlugin } from "./types";
 
-type PanelNavigationTail = [] | [params: JsonValue | undefined, newTab: boolean | undefined];
+type PanelNavigationTail = [params?: JsonValue, newTab?: boolean, split?: PluginPanelSplit];
 
 /**
  * Trailing navigation args for an openPanel call. Empty when the caller passed
- * neither params nor newTab, so existing callers keep their exact call shape.
+ * neither params, newTab nor split, so existing callers keep their exact call shape.
  */
 export function panelNavigationTail(options?: PluginOpenPanelOptions): PanelNavigationTail {
+  if (options?.split) return [options.params, options.newTab, options.split];
   return options?.params === undefined && options?.newTab === undefined
     ? []
     : [options?.params, options?.newTab];
@@ -36,6 +38,7 @@ export interface PluginNavigation {
     location: PluginPanelLocation,
     params?: JsonValue,
     newTab?: boolean,
+    split?: PluginPanelSplit,
   ): void;
   openAgentPanel(
     pluginId: string,
@@ -44,6 +47,7 @@ export interface PluginNavigation {
     location: PluginPanelLocation,
     params?: JsonValue,
     newTab?: boolean,
+    split?: PluginPanelSplit,
   ): void;
 }
 

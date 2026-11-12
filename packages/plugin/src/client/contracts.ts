@@ -138,6 +138,20 @@ export interface PluginOpenPanelOptions {
   params?: JsonValue;
   /** Always open a new tab instead of focusing an existing tab of the same panel. */
   newTab?: boolean;
+  /**
+   * Opens the panel in a new pane split off the workspace's main pane, unless a tab of the panel
+   * is already open (then it is revealed where it is). Calls compose: each split divides the main
+   * pane again, so a plugin can build a layout of several panes, side by side or stacked. Ignored
+   * for the explorer and where the workspace shows one pane at a time (compact layouts).
+   */
+  split?: PluginPanelSplit;
+}
+
+export interface PluginPanelSplit {
+  /** Which side of the main pane the new pane takes. */
+  position: "left" | "right" | "top" | "bottom";
+  /** The new pane's share of the main pane, 0.1 to 0.9; half when absent. */
+  size?: number;
 }
 
 interface PluginWorkspacePanelBase<Text extends PluginText = string> {

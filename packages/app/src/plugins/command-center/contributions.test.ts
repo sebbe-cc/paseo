@@ -288,6 +288,50 @@ describe("plugin Command Center contributions", () => {
     ]);
   });
 
+  it("forwards a panel split to navigation", async () => {
+    const calls: unknown[][] = [];
+    const installed = plugin(async (context) => {
+      context.openPanel("details", {
+        location: "workspace",
+        split: { position: "left", size: 0.25 },
+      });
+    });
+    const actions = buildPluginCommandCenterContributions({
+      plugins: [installed],
+      state: stateSource(),
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      navigation: {
+        openSettings() {},
+        openSurface() {},
+        openWorkspacePanel(...args: unknown[]) {
+          calls.push(["workspace", ...args]);
+        },
+        openAgentPanel(...args: unknown[]) {
+          calls.push(["agent", ...args]);
+        },
+      },
+      reportError(error) {
+        throw error;
+      },
+    });
+
+    await actions.find((action) => action.id === "review:agent")?.run();
+
+    expect(calls).toEqual([
+      [
+        "agent",
+        "review",
+        "details",
+        "agent-1",
+        "workspace",
+        undefined,
+        undefined,
+        { position: "left", size: 0.25 },
+      ],
+    ]);
+  });
+
   it("keeps the navigation call shape for openPanel without params or newTab", async () => {
     const calls: unknown[][] = [];
     const installed = plugin(async (context) => {
