@@ -4040,12 +4040,17 @@ export class DaemonClient {
     return status.agent;
   }
 
-  async refreshAgent(agentId: string, requestId?: string): Promise<AgentRefreshedStatusPayload> {
+  async refreshAgent(
+    agentId: string,
+    requestId?: string,
+    options?: { env?: Record<string, string> },
+  ): Promise<AgentRefreshedStatusPayload> {
     const resolvedRequestId = this.createRequestId(requestId);
     const message = SessionInboundMessageSchema.parse({
       type: "refresh_agent_request",
       agentId,
       requestId: resolvedRequestId,
+      ...(options?.env ? { env: options.env } : {}),
     });
     return this.sendRequest({
       requestId: resolvedRequestId,

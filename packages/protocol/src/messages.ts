@@ -2019,6 +2019,8 @@ export const RefreshAgentRequestMessageSchema = z.object({
   type: z.literal("refresh_agent_request"),
   agentId: z.string(),
   requestId: z.string(),
+  /** Replaces the agent's stored launch env before the session reopens; omitted keeps it. */
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 export const CancelAgentRequestMessageSchema = z.object({

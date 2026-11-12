@@ -3536,6 +3536,63 @@ test.each([
   },
 );
 
+test("reloadAgentSession with a launch env replaces the stored env for the reload and later resumes", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-env-"));
+  const storagePath = join(workdir, "agents");
+  const provider = "codex";
+  class LaunchEnvClient extends TestAgentClient {
+    lastLaunchContext: AgentLaunchContext | undefined;
+
+    override async createSession(
+      config: AgentSessionConfig,
+      context?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.lastLaunchContext = context;
+      const session = await super.createSession(config);
+      session.describePersistence = () => ({ provider, sessionId: session.id });
+      return session;
+    }
+
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+      context?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.lastLaunchContext = context;
+      const session = await super.resumeSession(handle, config, context);
+      session.describePersistence = () => ({ provider, sessionId: handle.sessionId });
+      return session;
+    }
+  }
+
+  const client = new LaunchEnvClient(provider);
+  let storage = new AgentStorage(storagePath, logger);
+  let manager = new AgentManager({ clients: { [provider]: client }, registry: storage, logger });
+  const agent = await manager.createAgent({ provider, cwd: workdir }, undefined, {
+    workspaceId: undefined,
+    env: { OLD: "1", BEADS_DIR: "~/beads" },
+  });
+  onTestFinished(async () => {
+    await manager.closeAgent(agent.id);
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  });
+  const fresh = { BEADS_DIR: "/home/x/beads", MS_ROOT: "/ms" };
+  const expected = { ...fresh, PASEO_AGENT_ID: agent.id, PASEO_AGENT_CWD: workdir };
+
+  await manager.reloadAgentSession(agent.id, undefined, { launchEnv: fresh });
+  expect(client.lastLaunchContext).toEqual({ agentId: agent.id, env: expected });
+  await manager.closeAgent(agent.id);
+  await manager.flush();
+
+  storage = new AgentStorage(storagePath, logger);
+  manager = new AgentManager({ clients: { [provider]: client }, registry: storage, logger });
+  await ensureAgentLoaded(agent.id, { agentManager: manager, agentStorage: storage, logger });
+  expect(client.lastLaunchContext).toEqual({ agentId: agent.id, env: expected });
+  await manager.reloadAgentSession(agent.id);
+  expect(client.lastLaunchContext).toEqual({ agentId: agent.id, env: expected });
+});
+
 test("createAgent and resume give the agent its workspace id", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-workspace-env-"));
   const storagePath = join(workdir, "agents");
