@@ -117,5 +117,6 @@ function openClientPanel(input: {
     location: options.location,
     ...(options.params === undefined ? {} : { params: options.params }),
     ...(options.newTab === true ? { newTab: true as const } : {}),
+    ...(options.split ? { split: options.split } : {}),
   });
 }
