@@ -354,3 +354,47 @@ test("checkout-branch hooks reject a branch-off baseRef", async () => {
     validateBeforeResult("worktree.create.before", request, { ...request, baseRef: "main" }),
   ).rejects.toThrow(/baseRef/);
 });
+
+test("terminal.create.before hooks run in order, each seeing the previous env", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  hooks.addHook("terminal.create.before", async ({ request }) => ({
+    ...request,
+    env: { ...request.env, FOO: "1", BAR: "first" },
+  }));
+  const seen: unknown[] = [];
+  hooks.addHook("terminal.create.before", async ({ request }) => {
+    seen.push(request.env);
+    return { ...request, env: { ...request.env, BAR: "second" } };
+  });
+  const result = await hooks.invoke(
+    "operation",
+    "terminal.create.before",
+    { cwd: "/project", workspaceId: "workspace-1", env: {} },
+    paseo,
+  );
+  expect(seen).toEqual([{ FOO: "1", BAR: "first" }]);
+  expect(result).toEqual({
+    cwd: "/project",
+    workspaceId: "workspace-1",
+    env: { FOO: "1", BAR: "second" },
+  });
+});
+
+test("terminal.create.before cannot move the terminal to another workspace or a missing cwd", async () => {
+  const input = { cwd: "/", workspaceId: "workspace-1", env: {} };
+  await expect(
+    validateBeforeResult("terminal.create.before", input, { ...input, workspaceId: "other" }),
+  ).rejects.toThrow("cannot change the workspace");
+  await expect(
+    validateBeforeResult("terminal.create.before", input, { ...input, cwd: "/no/such/dir/xyz" }),
+  ).rejects.toThrow("not a directory");
+  await expect(
+    validateBeforeResult("terminal.create.before", input, { ...input, cwd: "relative" }),
+  ).rejects.toThrow("not a directory");
+  await expect(
+    validateBeforeResult("terminal.create.before", input, { ...input, env: { FOO: 1 } }),
+  ).rejects.toThrow();
+  await expect(
+    validateBeforeResult("terminal.create.before", input, { ...input, cwd: "/tmp" }),
+  ).resolves.toMatchObject({ cwd: "/tmp" });
+});
