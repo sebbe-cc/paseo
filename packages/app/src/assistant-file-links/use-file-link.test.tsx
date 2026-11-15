@@ -332,3 +332,154 @@ describe("useFileLink", () => {
 });
 
 const WorkspaceSwitchContext = React.createContext<(workspaceRoot: string) => void>(() => {});
+
+describe("useFileLink batch resolution", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  function createBatchWrapper(input: {
+    client: {
+      getDirectorySuggestions: () => never;
+      resolveAssistantFiles: (args: {
+        cwd: string;
+        workspaceRoot?: string;
+        candidates: string[];
+      }) => Promise<{ results: BatchResult[]; error: string | null; requestId: string }>;
+    };
+    openedFiles: OpenedFile[];
+    toast?: ToastApi;
+  }) {
+    const queryClient = createQueryClient();
+    return function Wrapper({ children }: { children: ReactNode }) {
+      const openWorkspaceFile = useCallback(
+        (target: InlinePathTarget, disposition: OpenFileDisposition) => {
+          input.openedFiles.push({ target, disposition });
+        },
+        [],
+      );
+
+      return (
+        <QueryClientProvider client={queryClient}>
+          <AssistantFileLinkResolverProvider
+            client={input.client}
+            serverId="server-1"
+            workspaceRoot="/Users/test/project"
+            onOpenWorkspaceFile={openWorkspaceFile}
+            toast={input.toast}
+            batchResolve
+          >
+            {children}
+          </AssistantFileLinkResolverProvider>
+        </QueryClientProvider>
+      );
+    };
+  }
+
+  it("opens the daemon-resolved absolute path for a relative token in another worktree", async () => {
+    const resolveAssistantFiles = vi.fn(async () => ({
+      results: [
+        {
+          path: "dumm.md",
+          status: "found" as const,
+          absolutePath: "/Users/test/other/dumm.md",
+          searchedRoots: ["/Users/test/project", "/Users/test/other"],
+          modifiedAt: null,
+        },
+      ],
+      error: null,
+      requestId: "r1",
+    }));
+    const openedFiles: OpenedFile[] = [];
+    const { result } = renderHook(() => useFileLink(SOURCE), {
+      wrapper: createBatchWrapper({
+        client: {
+          getDirectorySuggestions: () => {
+            throw new Error("must not use legacy lookup when batch is supported");
+          },
+          resolveAssistantFiles,
+        },
+        openedFiles,
+      }),
+    });
+
+    await waitFor(() => {
+      expect(result.current.target?.path).toBe("/Users/test/other/dumm.md");
+    });
+    expect(result.current.missing).toBe(false);
+    expect(resolveAssistantFiles).toHaveBeenCalledTimes(1);
+    expect(resolveAssistantFiles).toHaveBeenCalledWith({
+      cwd: "/Users/test/project",
+      workspaceRoot: "/Users/test/project",
+      candidates: ["dumm.md"],
+    });
+
+    act(() => {
+      result.current.onPress();
+    });
+    await waitFor(() => {
+      expect(openedFiles).toEqual([
+        {
+          target: {
+            raw: "dumm.md",
+            path: "/Users/test/other/dumm.md",
+            lineStart: undefined,
+            lineEnd: undefined,
+          },
+          disposition: "preferred",
+        },
+      ]);
+    });
+  });
+
+  it("marks a missing file and stays silent on press", async () => {
+    const resolveAssistantFiles = vi.fn(async () => ({
+      results: [
+        {
+          path: "dumm.md",
+          status: "missing" as const,
+          absolutePath: null,
+          searchedRoots: ["/Users/test/project"],
+          modifiedAt: null,
+        },
+      ],
+      error: null,
+      requestId: "r1",
+    }));
+    const openedFiles: OpenedFile[] = [];
+    const toast = createToast();
+    const { result } = renderHook(() => useFileLink(SOURCE), {
+      wrapper: createBatchWrapper({
+        client: {
+          getDirectorySuggestions: () => {
+            throw new Error("must not use legacy lookup when batch is supported");
+          },
+          resolveAssistantFiles,
+        },
+        openedFiles,
+        toast,
+      }),
+    });
+
+    await waitFor(() => {
+      expect(result.current.missing).toBe(true);
+    });
+    expect(result.current.target).toBeNull();
+    expect(result.current.searchedRoots).toEqual(["/Users/test/project"]);
+
+    act(() => {
+      result.current.onPress();
+    });
+    await act(async () => {});
+    expect(openedFiles).toEqual([]);
+    expect(toast.show).not.toHaveBeenCalled();
+  });
+});
+
+interface BatchResult {
+  path: string;
+  status: "found" | "missing";
+  absolutePath: string | null;
+  searchedRoots: string[];
+  modifiedAt: string | null;
+}
