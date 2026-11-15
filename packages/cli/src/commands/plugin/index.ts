@@ -19,6 +19,7 @@ import {
   withPluginManagementClient,
   withPluginSourceClient,
 } from "./shared.js";
+import { createPluginRpcCommand } from "./rpc.js";
 
 interface PluginOptions extends CommandOptions {
   host?: string;
@@ -263,5 +264,6 @@ export function createPluginCommand(): Command {
   addJsonAndDaemonHostOptions(
     plugin.command("remove").description("Remove plugin configuration").argument("<id>"),
   ).action(withOutput(remove));
+  plugin.addCommand(createPluginRpcCommand());
   return plugin;
 }
