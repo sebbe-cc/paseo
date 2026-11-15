@@ -28,5 +28,9 @@ export function publishKeyboardPolicy(input: import("./contract").KeyboardPolicy
   const policy = input.enabled
     ? buildBrowserKeyboardPolicy({ ...input, usesDesktopBindings: usesDesktopBindings })
     : { menuPrefixes: [], prefixes: [] };
+  if (input.enabled && input.extraPrefixes) {
+    policy.prefixes.push(...input.extraPrefixes);
+    policy.menuPrefixes.push(...input.extraPrefixes);
+  }
   void getDesktopHost()?.browser?.setShortcutPolicy?.(policy);
 }
