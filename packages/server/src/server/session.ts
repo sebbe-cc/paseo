@@ -1235,6 +1235,8 @@ export class Session {
       subscribeTerminalMetadata: (listener) =>
         this.scriptRuntimeStore?.subscribe(listener) ?? (() => {}),
       getClientBufferedAmount: (source) => this.getTransportBufferedAmount(source),
+      prepareTerminal: async (request) =>
+        this.pluginRuntime ? this.pluginRuntime.before("terminal.create.before", request) : request,
     });
     this.agentDirectory = new AgentDirectory({
       manager: this.agentManager,

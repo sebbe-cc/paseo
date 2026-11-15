@@ -419,6 +419,14 @@ describe("lifecycle hook SDK types", () => {
           const { metadata, ...withoutMetadata } = request;
           return withoutMetadata;
         });
+        server.addHook("terminal.create.before", async ({ request }) => {
+          const cwd: string = request.cwd;
+          const workspaceId: string | null = request.workspaceId;
+          return { ...request, env: { ...request.env, FOO: "1" } };
+        });
+        server.addHook("terminal.create.before", async () => {});
+        // @ts-expect-error A terminal hook returns the whole request, env values are strings.
+        server.addHook("terminal.create.before", async ({ request }) => ({ ...request, env: { FOO: 1 } }));
         server.addHook("agent.turn.after", async ({ agent, outcome, timeline }, { paseo, signal }) => {
           const kind: "completed" | "failed" | "canceled" = outcome.kind;
           // @ts-expect-error Notification payloads have no creation request.

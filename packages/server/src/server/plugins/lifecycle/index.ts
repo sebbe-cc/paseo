@@ -4,6 +4,8 @@ import {
   pluginHookRegistry,
 } from "@getpaseo/plugin/internal/lifecycle";
 import { isDeepStrictEqual } from "node:util";
+import { stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   serializeAgentTool,
   agentToolMetadataSchema,
@@ -115,6 +117,13 @@ const beforeSchemas = {
     type: true,
     requestId: true,
   }).strict(),
+  "terminal.create.before": z
+    .object({
+      cwd: z.string().min(1),
+      workspaceId: z.string().nullable(),
+      env: z.record(z.string(), z.string()),
+    })
+    .strict(),
 };
 
 const sessionOpenLocalResultSchema = beforeSchemas["agent.open.before"].extend({
@@ -219,6 +228,33 @@ export function publishAgentStream(
   }
 }
 
+function validateWorktreeCreateResult(input: unknown, result: unknown): void {
+  const previous = beforeSchemas["worktree.create.before"].parse(input);
+  const next = beforeSchemas["worktree.create.before"].parse(result);
+  if (previous.repoRoot !== next.repoRoot || previous.sourceCheckout !== next.sourceCheckout) {
+    throw new Error("worktree.create.before hooks cannot change repoRoot or sourceCheckout");
+  }
+}
+
+async function validateTerminalCreateResult(input: unknown, result: unknown): Promise<void> {
+  const previous = beforeSchemas["terminal.create.before"].parse(input);
+  const next = beforeSchemas["terminal.create.before"].parse(result);
+  if (previous.workspaceId !== next.workspaceId) {
+    throw new Error("terminal.create.before hooks cannot change the workspace");
+  }
+  if (next.cwd === previous.cwd) return;
+  // The PTY needs an existing absolute directory; reject here so the terminal falls back.
+  const isDirectory =
+    isAbsolute(next.cwd) &&
+    (await stat(next.cwd).then(
+      (info) => info.isDirectory(),
+      () => false,
+    ));
+  if (!isDirectory) {
+    throw new Error(`terminal.create.before returned a cwd that is not a directory: ${next.cwd}`);
+  }
+}
+
 export async function validateBeforeResult<Name extends keyof PluginWireBeforeRequests>(
   name: Name,
   input: PluginWireBeforeRequests[Name],
@@ -258,12 +294,11 @@ export async function validateBeforeResult<Name extends keyof PluginWireBeforeRe
     // Omitted means unchanged; an explicit {} still replaces.
     return { ...result, metadata: next.metadata ?? previous.metadata };
   }
+  if (name === "terminal.create.before") {
+    await validateTerminalCreateResult(input, result);
+  }
   if (name === "worktree.create.before") {
-    const previous = beforeSchemas["worktree.create.before"].parse(input);
-    const next = beforeSchemas["worktree.create.before"].parse(result);
-    if (previous.repoRoot !== next.repoRoot || previous.sourceCheckout !== next.sourceCheckout) {
-      throw new Error("worktree.create.before hooks cannot change repoRoot or sourceCheckout");
-    }
+    validateWorktreeCreateResult(input, result);
   }
   return result;
 }
