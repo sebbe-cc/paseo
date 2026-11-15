@@ -65,6 +65,7 @@ Paseo only sees the returned promise, so detached work gets no error reporting a
 | `agent.turn.after`        | no    | `{ agent, turnId, outcome }`              |                                                |
 | `agent.permission.before` | no    | `{ agent, request }`                      |                                                |
 | `agent.permission.after`  | no    | `{ agent, requestId, resolution }`        |                                                |
+| `terminal.create.before`  | yes   | `{ request: { cwd, workspaceId, env } }`  | `cwd`; `env` entries                           |
 
 ## Shared payloads
 
@@ -640,6 +641,26 @@ server.addHook("agent.turn.after", async ({ agent }) => {
 ```
 
 `background` is fixed when the agent is created and a hook cannot change it. An agent created in a background workspace without `background: true` reads `false`. Hosts older than 0.16.0 omit the field, so it reads as `undefined`.
+
+## terminal.create.before
+
+A workspace terminal is about to start, from the terminal panel or `terminals.create`. Runs before
+the process spawns. `request.env` holds only the entries the terminal adds on top of the daemon's
+terminal environment and starts empty; `request.workspaceId` is the owning workspace.
+
+Return the request with `env` entries added or replaced, or a different existing absolute `cwd`.
+The workspace cannot change.
+
+```ts
+server.addHook("terminal.create.before", async ({ request }) => ({
+  ...request,
+  env: { ...request.env, AWS_PROFILE: "dev" },
+}));
+```
+
+Unlike other waiting hooks, a failure never fails the operation. If a callback throws, returns
+invalid data, or exceeds 30 seconds, Paseo logs it and starts the terminal with the original
+request. Workspace scripts and agent tools that open terminals do not run this hook.
 
 ## Ordering and returned values
 
