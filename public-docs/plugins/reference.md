@@ -1974,6 +1974,13 @@ instead of focusing an existing tab of the same panel. Type the component as
 `Record<string, JsonValue>`, and `PluginAgentPanelParams` is `agentId` plus your object params.
 `revision` increments whenever params are re-sent to the same tab, including an identical request.
 
+`openPanel(id, { split: { position, size } })` opens the panel in a new pane split off the
+workspace's main pane: `position` is `left`, `right`, `top` or `bottom`, `size` the new pane's
+share of the main pane (0.1 to 0.9, half when absent). A panel that already has a tab is revealed
+where it is, so the user's closed or moved pane is respected and a second call does not stack
+panes. Calls compose: each one divides the main pane again, so a plugin can lay out several panes
+side by side or stacked, each with its own tabs. Compact layouts and the explorer ignore `split`.
+
 `tab.setModified(boolean)` marks unsaved work and asks before closing. `tab.state` is opaque
 persisted JSON, initially `undefined`; `tab.setState(value)` replaces it. Each tab owns its state.
 Paseo stores it without interpreting it. Validate it with `useTabState(tab, schema, defaultState)`:
