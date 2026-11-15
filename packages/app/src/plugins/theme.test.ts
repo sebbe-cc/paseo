@@ -74,6 +74,8 @@ function installed(serverId: string, themes: PluginThemeContribution[]): Install
     themes,
     timelineTransformers: [],
     timelineRenderers: [],
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
