@@ -1177,6 +1177,7 @@ export const zhCN: TranslationResources = {
       description: "请检查网络连接后重试。",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     view: {
       failed: "无法加载侧边栏视图。",
@@ -2487,6 +2488,8 @@ export const zhCN: TranslationResources = {
     diagnostics: {
       title: "诊断",
       testAudio: "测试音频",
+      thinkingTone: "语音模式等待提示音",
+      thinkingToneHint: "代理准备语音回复时播放提示音",
       playTest: "播放测试",
       playing: "正在播放...",
       playbackFailed: "播放失败：{{message}}",
@@ -2672,6 +2675,7 @@ export const zhCN: TranslationResources = {
         cycleTheme: "循环切换主题",
         focusMessageInput: "聚焦消息输入框",
         cycleAgentMode: "循环切换代理模式",
+        toggleGlobalVoice: "切换全局语音",
         toggleVoiceMode: "切换语音模式",
         startStopDictation: "开始/停止听写",
         interruptAgent: "中断 Agent",
