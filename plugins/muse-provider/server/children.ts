@@ -1,5 +1,5 @@
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { MspConnection, type Notification } from "./connection.js";
+import type { MspHost, Notification } from "./connection.js";
 import { Timeline } from "./timeline.js";
 import {
   childSessionSchema,
@@ -16,11 +16,13 @@ interface Child {
 }
 export class Children {
   private readonly children = new Map<string, Child>();
+  private readonly unsupportedWarned = new Set<string>();
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly parentId: string,
     private readonly cwd: string,
     private readonly emit: (event: ProviderEvent) => void,
+    private readonly subsessionsSupported: boolean,
   ) {}
 
   async update(item: WireItem): Promise<void> {
@@ -35,6 +37,27 @@ export class Children {
     )
       return;
     const id = item.childSessionId;
+    if (!this.subsessionsSupported) {
+      // An older daemon never negotiated session.subsession: projecting the
+      // child would fail the whole provider connection, so the parent stays
+      // alive and gets a plain timeline error instead.
+      if (!this.unsupportedWarned.has(id)) {
+        this.unsupportedWarned.add(id);
+        this.emit({
+          type: "timeline.item",
+          sessionId: this.parentId,
+          item: {
+            type: "error",
+            id: `subsession-unsupported:${id}`,
+            message:
+              "Muse started a parallel subagent or workflow, but this Paseo daemon " +
+              "does not support child sessions (session.subsession was not negotiated). " +
+              "The child keeps running inside Muse; update Paseo to follow it as a subagent.",
+          },
+        });
+      }
+      return;
+    }
     if (!this.children.has(id)) {
       const { session } = await this.host.request(
         "session/read",

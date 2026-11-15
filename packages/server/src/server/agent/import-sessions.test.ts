@@ -379,7 +379,7 @@ test("listImportableProviderSessions requests a bounded deep scan for search res
   ]);
 });
 
-test("listImportableProviderSessions includes a provider session after its Paseo agent is archived", async () => {
+test("listImportableProviderSessions excludes a provider session after its Paseo agent is archived", async () => {
   const cwd = "/tmp/project";
   const archivedSession = makeImportableSession({
     provider: "claude",
@@ -387,7 +387,7 @@ test("listImportableProviderSessions includes a provider session after its Paseo
     cwd,
     title: "Archived import",
     lastActivityAt: "2026-04-30T12:00:00.000Z",
-    firstPrompt: "import me again",
+    firstPrompt: "do not import me again",
   });
 
   const result = await listImportableProviderSessions({
@@ -411,11 +411,11 @@ test("listImportableProviderSessions includes a provider session after its Paseo
     providerSnapshotManager: { getProviderLabel: () => "Claude" },
   });
 
-  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual(["archived-session"]);
-  expect(result.filteredAlreadyImportedCount).toBe(0);
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual([]);
+  expect(result.filteredAlreadyImportedCount).toBe(1);
 });
 
-test("listImportableProviderSessions includes an archived provider session still loaded in memory", async () => {
+test("listImportableProviderSessions excludes an archived provider session still loaded in memory", async () => {
   const cwd = "/tmp/project";
   const agentId = "00000000-0000-4000-8000-000000000633";
   const archivedSession = makeImportableSession({
@@ -424,7 +424,7 @@ test("listImportableProviderSessions includes an archived provider session still
     cwd,
     title: "Archived live import",
     lastActivityAt: "2026-04-30T12:00:00.000Z",
-    firstPrompt: "import the loaded session again",
+    firstPrompt: "do not import the loaded session again",
   });
 
   const result = await listImportableProviderSessions({
@@ -456,8 +456,47 @@ test("listImportableProviderSessions includes an archived provider session still
     providerSnapshotManager: { getProviderLabel: () => "Claude" },
   });
 
-  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual(["archived-live-session"]);
-  expect(result.filteredAlreadyImportedCount).toBe(0);
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual([]);
+  expect(result.filteredAlreadyImportedCount).toBe(1);
+});
+
+test("listImportableProviderSessions matches archived plugin sessions despite volatile persistence fields", async () => {
+  const cwd = "/tmp/project";
+  const listedHandle =
+    'plugin:{"version":1,"data":{"sessionId":"01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6","model":"meta/muse-spark-1.3"}}';
+  const storedHandle =
+    'plugin:{"version":1,"data":{"sessionId":"01a0ee4b-8364-7aa1-9ba3-c251d4cf0cb6","model":"meta/muse-spark-1.3","thinkingOption":"high"}}';
+  const archivedSession = makeImportableSession({
+    provider: "muse",
+    sessionId: listedHandle,
+    cwd,
+    title: "Archived muse import",
+    lastActivityAt: "2026-04-30T12:00:00.000Z",
+  });
+
+  const result = await listImportableProviderSessions({
+    request: makeRequest({ cwd, providers: ["muse"] }),
+    agentManager: {
+      listAgents: () => [],
+      listImportableSessions: async () => makeImportableSessionsResult([archivedSession]),
+    },
+    agentStorage: {
+      listAll: async () => [
+        {
+          provider: "muse",
+          archivedAt: "2026-04-30T12:01:00.000Z",
+          persistence: {
+            provider: "muse",
+            sessionId: storedHandle,
+          },
+        } as StoredAgentRecord,
+      ],
+    },
+    providerSnapshotManager: { getProviderLabel: () => "Muse" },
+  });
+
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual([]);
+  expect(result.filteredAlreadyImportedCount).toBe(1);
 });
 
 test("listImportableProviderSessions filters out metadata generation sessions", async () => {

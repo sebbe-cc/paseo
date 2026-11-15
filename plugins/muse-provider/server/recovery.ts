@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import { MspConnection, type Notification } from "./connection.js";
+import type { MspHost, Notification } from "./connection.js";
 import { pageSchema } from "./wire.js";
 
 // Two minutes accommodates slow model/tool work; polling repairs a lost live view without cancelling it.
@@ -10,7 +10,7 @@ export class Recovery {
   private closed = false;
   private cursor: string;
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly sessionId: string,
     cursor: string,
     private readonly apply: (event: Notification) => Promise<void>,

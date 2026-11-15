@@ -9,5 +9,6 @@ export default function contribute(
   const usage = new Usage();
   server.registerUsageSource(usage.registration());
   server.registerProvider(createMuseProvider(usage));
+  server.registerProvider(createMuseProvider(usage, "wrapped"));
   return () => {};
 }
