@@ -319,6 +319,54 @@ clear, and reset it there; the saved key also works inside browser tabs.
 shortcuts. Registration returns an idempotent remover and is also removed when
 the plugin stops. Operating system shortcuts take precedence if the OS intercepts
 a key before it reaches Paseo.
+### Trusted app actions
+
+`client.clientActions` exposes the app's own actions to trusted hardware controls:
+hold-to-talk voice input, focused-panel scroll, and panel navigation for joystick input.
+It is present only on clients whose app implements it (packaged desktop); on older apps,
+browser, and mobile it is `undefined`, and the plugin must report "unsupported" and stay
+a no-op — never fail, never fall back to another transport.
+
+```ts
+const actions = client.clientActions;
+if (!actions) {
+  // Show the unsupported state; do not attempt hardware actions.
+}
+const caps = actions?.getCapabilities(); // { voiceInput, panelScroll }
+```
+
+Probe each part separately with `getCapabilities()`: voice and panel scroll go live
+independently. Joystick navigation is gated under `panelScroll` — there is no separate
+joystick flag. Voice hold-to-talk starts the app's existing dictation pipeline for the
+exact `{serverId, agentId}` target; releasing stops the microphone first, flushes the
+final partial second of speech, and delivers the transcript to that agent. An empty
+transcript sends nothing. A release during pending microphone acquisition never
+enables recording. Starting a new session retires the previous one without delivery,
+and the app stops the microphone on dropped release, window change, and disconnect
+as the last guarantor. Scrolling resolves the real scroll viewport from the focused
+element (overflow and dimensions, never the focused input itself).
+
+```ts
+await actions?.startVoiceInput({ serverId, agentId });
+// ... while the control is held ...
+await actions?.stopVoiceInput(); // delivers the transcript to the agent
+actions?.scrollFocusedPanel("down", "page"); // works without a mounted plugin panel
+actions?.navigatePanel("back"); // back/forward ride the real session history
+```
+
+Navigation advertises only implemented operations: `back`/`forward` navigate for
+real, while `history`/`sidebar` throw an unsupported error naming the missing app
+wiring instead of silently succeeding — surface that reason, never a fallback.
+
+Agent interruption and provider mode controls are separate SDK calls on the agent
+handle (`cancel()`, `setMode()`, `setModel()`, `setFeature()`), not part of this
+capability — plugins probe them structurally and report "unsupported" where missing.
+
+| Platform | `client.clientActions`                          |
+| -------- | ----------------------------------------------- |
+| Electron | Present; per-part probing via `getCapabilities` |
+| Browser  | `undefined`; report "unsupported"               |
+| Mobile   | `undefined`; report "unsupported"               |
 
 ### External links and workspace browsers
 
@@ -344,6 +392,58 @@ export async function openDocumentation() {
 ```
 
 Call the function directly from a user interaction so the browser permits a new tab.
+
+### Device (HID) broker
+
+`client.hid` exposes the desktop's local device broker to trusted plugins. It is present
+only on clients with a local broker (Electron desktop); on browser web, iOS, and Android
+it is `undefined`, and the plugin must report "unsupported" and stay a no-op — never fail.
+
+```ts
+const capability = client.hid;
+if (!capability) {
+  // Show the unsupported state; do not attempt hardware access.
+}
+const broker = capability?.getBroker() ?? null;
+```
+
+The broker carries `getState`/`subscribe` plus optional `enumerate`, `onRawReport`, `write`,
+`claim`, and `release`. Claims are explicit per device and never automatic: check the
+device's vendor usage pair before claiming, so the broker never opens keyboards or mice
+just by existing. Input reaches only the owning window; every other instance only watches.
+Raw decoding is vendor-specific and lives in the plugin — the generic broker only carries
+bytes. The plugin owns its subscription lifetime: subscribe in `contribute()` and release
+every claim and subscription in the entry cleanup.
+
+| Platform | `client.hid`                                     |
+| -------- | ------------------------------------------------ |
+| Electron | Present; devices enumerate over the local broker |
+| Browser  | `undefined`; report "unsupported"                |
+| Mobile   | `undefined`; report "unsupported"                |
+
+### Global client context
+
+`client.clientContext` exposes the app's global client context — window, server, workspace,
+panel, agent, and focus — with app lifetime. It works without a mounted plugin panel, so
+navigation and focus keep working from background contributions. The snapshot is `null`
+until the app has resolved its installation and window identities; subscribe for readiness
+instead of guessing.
+
+```ts
+const snapshot = client.clientContext?.getSnapshot();
+if (snapshot?.agentId) {
+  await client.clientContext.focusTarget({
+    serverId: snapshot.serverId!,
+    agentId: snapshot.agentId,
+  });
+}
+```
+
+Routing always uses the exact `{serverId, agentId}` pair plus the workspace id for UI —
+never a title, working directory, alias, or a bare agent id. A `null` agent means no agent
+is visible; fall back to a slot list or an unavailable state, never to a global daemon
+status. `focusTarget` brings the app forward and navigates to the target's agent;
+`openWorkspace` navigates to a workspace without requiring a mounted panel.
 
 | Platform      | External links                     | `navigation.openBrowser`                         |
 | ------------- | ---------------------------------- | ------------------------------------------------ |
@@ -3382,3 +3482,21 @@ file paths are never interpreted by this component.
 ```
 
 The existing `Markdown` component also receives decorators in plugin timelines.
+
+### App-lifetime host and settings subscriptions (fork)
+
+Client entries can call `client.subscribeHosts(listener)` and
+`client.subscribeSettings(definition, listener)` without mounting a screen or sidebar item.
+Both emit current state immediately and return an idempotent remover. Paseo also removes
+subscriptions if entry setup fails or the plugin unloads. These optional methods are absent
+on older clients: check for them before enabling a feature that needs live app inputs.
+
+The host callback receives the same `readonly PluginHostSummary[]` as `useHosts()`;
+connection changes, additions, removals, and label changes all notify it. Continue to borrow
+APIs with `getPaseoClient(serverId)`; offline hosts are never redirected.
+
+The settings callback receives `PluginSettingsSnapshot<Schema>`: `loading`, `error`,
+`invalid`, or `ready` with validated `values` and `revision`. It observes the installation
+host's settings, shares the screen's replica cache, and follows saved settings and reconnect
+invalidations even when every plugin surface is unmounted. Editing still uses `useSettings`.
+Return the removers from entry cleanup when the subscriptions are no longer needed.
