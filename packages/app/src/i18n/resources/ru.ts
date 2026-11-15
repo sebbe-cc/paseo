@@ -1001,6 +1001,7 @@ export const ru: TranslationResources = {
         refresh: "Обновить",
         refreshState: "Обновить состояние Git и {{brand}}",
         failedRefresh: "Не удалось обновить состояние Git.",
+        missingBase: "База {{ref}} больше не существует. Сравнение с сохранённой точкой ветвления.",
         seeUncommittedChanges: "Показать незафиксированные изменения",
         seeCommittedChanges: "Показать зафиксированные изменения",
         checkingRepository: "Проверяем репозиторий...",

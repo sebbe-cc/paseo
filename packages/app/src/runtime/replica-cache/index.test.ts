@@ -362,6 +362,37 @@ describe("ReplicaCache", () => {
       ...workspacePayload(),
       createdAt: "2026-07-18T08:00:00.000Z",
       lastUserMessageAt: "2026-07-18T09:00:00.000Z",
+      base: { ref: "refs/remotes/upstream/epic", forkSha: "a".repeat(40), missing: true },
+      baseError: "Base ref not found: refs/remotes/upstream/epic",
+    });
+    baseline.workspaces.set(workspace.id, workspace);
+    commitDirectory(writer, SERVER_ID, baseline);
+    await writer.flush();
+    const reader = createCache(storage);
+    expect((await reader.readDirectory(SERVER_ID)).workspaces.get(workspace.id)).toEqual(workspace);
+    expect((await reader.readWorkspace(SERVER_ID, workspace.id))?.workspace).toEqual(workspace);
+  });
+
+  it.each([
+    {
+      name: "populated",
+      base: {
+        ref: "refs/remotes/origin/feature/work",
+        forkSha: "b".repeat(40),
+        missing: false,
+      },
+    },
+    { name: "null", base: null },
+  ])("round-trips gitRuntime.base when it is $name", async ({ base }) => {
+    const storage = new MemoryStorage();
+    const writer = createCache(storage);
+    const baseline = directory();
+    const workspace = normalizeWorkspaceDescriptor({
+      ...workspacePayload(),
+      gitRuntime: {
+        currentBranch: "feature/work",
+        base,
+      },
     });
     baseline.workspaces.set(workspace.id, workspace);
     commitDirectory(writer, SERVER_ID, baseline);
