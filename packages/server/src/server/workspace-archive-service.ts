@@ -151,6 +151,17 @@ export async function resolveWorkspaceIdAtPath(
   return dependencies.findWorkspaceIdForCwd(targetPath);
 }
 
+// A guard the daemon installs once (plugin hook workspace.archive.before): awaited with the
+// workspaces an archive is about to take down, before anything is torn down. A throw refuses
+// the archive on every path (app, CLI, MCP tool, auto-archive, plugins).
+let workspaceArchiveGuard: ((workspaceIds: string[]) => Promise<void>) | null = null;
+
+export function setWorkspaceArchiveGuard(
+  guard: ((workspaceIds: string[]) => Promise<void>) | null,
+): void {
+  workspaceArchiveGuard = guard;
+}
+
 // Resolves the in-scope record set, tears each down
 // (agents + terminals + record), then removes the backing directory iff it is
 // Paseo-owned AND no active workspace still references it.
@@ -178,6 +189,9 @@ async function archiveByScopeWithPriority(
   checkpoint();
   const target = await resolveArchiveTarget(dependencies, request.scope);
   const targetWorkspaceIds = target.workspaceIds;
+  if (workspaceArchiveGuard && targetWorkspaceIds.length > 0) {
+    await workspaceArchiveGuard(targetWorkspaceIds);
+  }
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
   checkpoint();
