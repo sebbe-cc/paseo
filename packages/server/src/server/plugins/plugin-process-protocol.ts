@@ -1,4 +1,12 @@
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
+import {
+  DictationProviderCommandSchema,
+  type DictationProviderCommand,
+  VoiceProviderCommandSchema,
+  VoiceProviderEventSchema,
+  type VoiceProviderCommand,
+  type VoiceProviderEvent,
+} from "@getpaseo/plugin/server";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { UsageScopeSchema, type UsageScope } from "@getpaseo/plugin/server/usage";
 import type {
@@ -33,6 +41,13 @@ export interface PluginUsageSourceMetadata {
 }
 
 export type PluginProcessRequest =
+  | { type: "voice.request"; requestId: string; sessionId: string; command: VoiceProviderCommand }
+  | {
+      type: "dictation.request";
+      requestId: string;
+      sessionId: string;
+      command: DictationProviderCommand;
+    }
   | { type: "tool.call"; requestId: string; agent: PluginHookAgent; name: string; input: unknown }
   | { type: "tool.cancel"; requestId: string }
   | { type: "tools.detach"; agentId: string }
@@ -88,6 +103,7 @@ export type PluginProcessRequest =
   | { type: "paseo_close" };
 
 export type PluginProcessMessage =
+  | { type: "voice.event"; sessionId: string; event: VoiceProviderEvent }
   | { type: "settings.changed"; settingsId: string }
   | { type: "hooks.changed"; hooks: string[] }
   | {
@@ -95,6 +111,8 @@ export type PluginProcessMessage =
       methods: string[];
       subscriptions?: string[];
       providers: PluginProviderMetadata[];
+      voiceProviders?: Array<{ id: string; label: string }>;
+      dictationProviders?: Array<{ id: string; label: string }>;
       usageSources?: PluginUsageSourceMetadata[];
       hooks?: string[];
     }
@@ -158,6 +176,22 @@ const frameFields = {
 export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.discriminatedUnion(
   "type",
   [
+    z
+      .object({
+        type: z.literal("voice.request"),
+        requestId: z.string(),
+        sessionId: z.string(),
+        command: VoiceProviderCommandSchema,
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("dictation.request"),
+        requestId: z.string(),
+        sessionId: z.string(),
+        command: DictationProviderCommandSchema,
+      })
+      .strict(),
     z
       .object({
         type: z.literal("tool.call"),
@@ -291,6 +325,13 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
 export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.discriminatedUnion(
   "type",
   [
+    z
+      .object({
+        type: z.literal("voice.event"),
+        sessionId: z.string(),
+        event: VoiceProviderEventSchema,
+      })
+      .strict(),
     z.object({ type: z.literal("settings.changed"), settingsId: z.string() }).strict(),
     z.object({ type: z.literal("hooks.changed"), hooks: hooksSchema }).strict(),
     z
@@ -299,6 +340,12 @@ export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.dis
         methods: z.array(z.string()),
         subscriptions: z.array(z.string()).optional(),
         providers: z.array(providerMetadataSchema),
+        voiceProviders: z
+          .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
+          .optional(),
+        dictationProviders: z
+          .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
+          .optional(),
         usageSources: z.array(usageSourceMetadataSchema).optional(),
         hooks: hooksSchema.optional(),
       })

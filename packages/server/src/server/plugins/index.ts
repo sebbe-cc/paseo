@@ -52,6 +52,10 @@ interface PluginRuntimePort {
   startSubscription: PluginRuntime["startSubscription"];
   getLogs(pluginId: string): PluginLogEntry[];
   clearLogs(pluginId: string): void;
+  hasVoiceProvider?: PluginRuntime["hasVoiceProvider"];
+  startVoiceProvider?: PluginRuntime["startVoiceProvider"];
+  hasDictationProvider?: PluginRuntime["hasDictationProvider"];
+  startDictationProvider?: PluginRuntime["startDictationProvider"];
   getProviderRegistrations?(pluginId: string): readonly PluginProviderMetadata[];
   getUsageSourceRegistrations(pluginId: string): readonly PluginUsageSourceMetadata[];
   fetchUsage: PluginRuntime["fetchUsage"];
@@ -640,6 +644,28 @@ export class PluginService {
     );
     await Promise.all(stopping);
   }
+
+  hasVoiceProvider: import("@getpaseo/plugin/server").PluginVoiceHost["hasVoiceProvider"] = (
+    selection,
+  ) => this.runtime.hasVoiceProvider?.(selection) === true;
+
+  startVoiceProvider: import("@getpaseo/plugin/server").PluginVoiceHost["startVoiceProvider"] = (
+    selection,
+    context,
+  ) => {
+    if (!this.runtime.startVoiceProvider) throw new Error("Plugin voice providers are unavailable");
+    return this.runtime.startVoiceProvider(selection, context);
+  };
+
+  hasDictationProvider: import("@getpaseo/plugin/server").PluginDictationHost["hasDictationProvider"] =
+    (selection) => this.runtime.hasDictationProvider?.(selection) === true;
+
+  startDictationProvider: import("@getpaseo/plugin/server").PluginDictationHost["startDictationProvider"] =
+    (selection, context) => {
+      if (!this.runtime.startDictationProvider)
+        throw new Error("Plugin dictation providers are unavailable");
+      return this.runtime.startDictationProvider(selection, context);
+    };
 
   private async stopAll(): Promise<void> {
     for (const pluginId of this.providerIdsByPlugin.keys()) {

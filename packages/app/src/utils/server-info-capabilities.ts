@@ -32,6 +32,13 @@ export function resolveVoiceUnavailableMessage(params: {
   serverInfo: DaemonServerInfo | null | undefined;
   mode: VoiceReadinessMode;
 }): string | null {
+  if (
+    params.mode === "voice" &&
+    params.serverInfo?.capabilities?.voice?.provider &&
+    params.serverInfo.features?.pluginVoiceProviders !== true
+  ) {
+    return "Update the host to use plugin voice providers.";
+  }
   const readiness = getVoiceReadinessState({
     serverInfo: params.serverInfo,
     mode: params.mode,
