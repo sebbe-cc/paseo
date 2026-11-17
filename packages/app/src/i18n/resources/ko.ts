@@ -991,6 +991,7 @@ export const ko: TranslationResources = {
         refresh: "새로고침",
         refreshState: "Git 및 {{brand}} 상태 새로고침",
         failedRefresh: "Git 상태를 새로고침하지 못했습니다.",
+        missingBase: "기준 {{ref}}이(가) 더 이상 존재하지 않습니다. 저장된 분기점과 비교합니다.",
         seeUncommittedChanges: "커밋되지 않은 변경 사항 보기",
         seeCommittedChanges: "커밋된 변경 사항 보기",
         checkingRepository: "저장소 확인 중...",

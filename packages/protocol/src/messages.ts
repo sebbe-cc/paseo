@@ -4385,6 +4385,16 @@ export const WorkspaceScriptPayloadSchema = z.object({
   terminalId: z.string().nullable().optional().default(null),
 });
 
+// pa-9av7: a workspace's comparison base. `missing` means the branch ref is gone and
+// comparisons use the fork point saved when the base was set.
+export const WorkspaceBaseSchema = z.object({
+  ref: z.string(),
+  forkSha: z.string().nullable(),
+  missing: z.boolean(),
+});
+
+export type WorkspaceBase = z.infer<typeof WorkspaceBaseSchema>;
+
 const WorkspaceGitRuntimePayloadSchema = z
   .object({
     currentBranch: z.string().nullable().optional(),
@@ -4400,6 +4410,10 @@ const WorkspaceGitRuntimePayloadSchema = z
       .optional(),
     aheadOfOrigin: z.number().nullable().optional(),
     behindOfOrigin: z.number().nullable().optional(),
+    // The workspace's resolved comparison base (pa-9av7): the same value as
+    // the descriptor's top-level base, so plugin-API readers see it on the
+    // entry they already hold. Null until the daemon resolves it.
+    base: WorkspaceBaseSchema.nullable().optional(),
   })
   .optional()
   .nullable();
@@ -4452,6 +4466,8 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
 
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
+    base: WorkspaceBaseSchema.nullable().optional(),
+    baseError: z.string().optional(),
     // Informational creation ancestry; independent of placement and lifecycle.
     parentWorkspaceId: z.string().optional(),
     id: z.string(),
@@ -5747,6 +5763,7 @@ const CheckoutStatusCommonSchema = z.object({
   requestId: z.string(),
   baseRefExact: z.string().nullable().optional(),
   comparisonBaseRef: z.string().nullable().optional(),
+  base: WorkspaceBaseSchema.nullable().optional(),
   // The full ref currentBranch tracks, as git resolves `<branch>@{upstream}`:
   // "refs/remotes/origin/main", "refs/remotes/upstream/main" on a fork, or a
   // "refs/heads/..." ref for a branch tracking a local branch. Null when there is no

@@ -1310,3 +1310,45 @@ describe("workspace message schemas", () => {
     expect(newDirectory.source.kind).toBe("directory");
   });
 });
+
+test("workspace bases are optional and retain qualified refs and missing-base state", () => {
+  const workspace = {
+    id: "owned-worktree",
+    projectId: "project",
+    projectDisplayName: "repo",
+    projectRootPath: "/repo",
+    workspaceDirectory: "/repo/feature",
+    projectKind: "git",
+    workspaceKind: "worktree",
+    name: "feature",
+    status: "done",
+    activityAt: null,
+    scripts: [],
+  };
+  expect(WorkspaceDescriptorPayloadSchema.parse(workspace).base).toBeUndefined();
+  const base = { ref: "refs/remotes/upstream/release", forkSha: "a".repeat(40), missing: true };
+  expect(WorkspaceDescriptorPayloadSchema.parse({ ...workspace, base }).base).toEqual(base);
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({
+      ...workspace,
+      base: null,
+      baseError: "Base ref not found",
+    }),
+  ).toMatchObject({ base: null, baseError: "Base ref not found" });
+  // The same base is projected onto gitRuntime so plugin-API readers see it
+  // on the entry they already hold; older payloads without it still parse.
+  const gitRuntime = { currentBranch: "feature/work" };
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({ ...workspace, gitRuntime }).gitRuntime,
+  ).toMatchObject({ currentBranch: "feature/work" });
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({ ...workspace, gitRuntime: { ...gitRuntime, base } })
+      .gitRuntime,
+  ).toMatchObject({ base });
+  expect(
+    WorkspaceDescriptorPayloadSchema.parse({
+      ...workspace,
+      gitRuntime: { ...gitRuntime, base: null },
+    }).gitRuntime,
+  ).toMatchObject({ base: null });
+});

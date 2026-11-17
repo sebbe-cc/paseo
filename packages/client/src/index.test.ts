@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, expect, test, vi } from "vitest";
-import { createPaseoApi, createPaseoClient } from "./index.js";
+import { createPaseoApi, createPaseoClient, workspaceBaseOf } from "./index.js";
 import { DaemonClient } from "./daemon-client.js";
 import type { PaseoAgent, PaseoClient, PaseoWorkspace } from "./index.js";
 
@@ -252,6 +252,169 @@ test("createPaseoClient exposes workspace list through the daemon client", async
   expect(client.getConnectionState()).toEqual({ status: "connected" });
 
   await client.close();
+});
+
+function fetchWorkspacesResponse(
+  ws: FakeWebSocket,
+  entries: PaseoWorkspace[],
+  pageInfo: { nextCursor: string | null; prevCursor: string | null; hasMore: boolean } = {
+    nextCursor: null,
+    prevCursor: null,
+    hasMore: false,
+  },
+): void {
+  const request = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "fetch_workspaces_response",
+      payload: {
+        requestId: request.requestId,
+        entries,
+        pageInfo,
+      },
+    }),
+  );
+}
+
+test("workspaces.get returns the entry with the requested id", async () => {
+  const { client, ws } = await connectClient();
+
+  const getPromise = client.workspaces.get("workspace_sdk");
+  expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
+    type: "fetch_workspaces_request",
+    page: { limit: 200 },
+  });
+  fetchWorkspacesResponse(ws, [createWorkspace({ id: "other" }), createWorkspace()]);
+
+  await expect(getPromise).resolves.toMatchObject({ id: "workspace_sdk" });
+  await client.close();
+});
+
+test("workspaces.get follows pages until the entry is found", async () => {
+  const { client, ws } = await connectClient();
+
+  const getPromise = client.workspaces.get("workspace_sdk");
+  fetchWorkspacesResponse(ws, [createWorkspace({ id: "other" })], {
+    nextCursor: "cursor-1",
+    prevCursor: null,
+    hasMore: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
+    type: "fetch_workspaces_request",
+    page: { limit: 200, cursor: "cursor-1" },
+  });
+  fetchWorkspacesResponse(ws, [createWorkspace()]);
+
+  await expect(getPromise).resolves.toMatchObject({ id: "workspace_sdk" });
+  await client.close();
+});
+
+test("workspaces.get returns null when no entry matches", async () => {
+  const { client, ws } = await connectClient();
+
+  const getPromise = client.workspaces.get("missing");
+  fetchWorkspacesResponse(ws, [createWorkspace()]);
+
+  await expect(getPromise).resolves.toBeNull();
+  await client.close();
+});
+
+test("workspaces.get includes background workspaces where the host supports them", async () => {
+  const { client, ws } = await connectClient({
+    providerUsageList: true,
+    providersSnapshotCwd: true,
+    ownedSubscriptions: true,
+    backgroundWorkspaces: true,
+  });
+
+  const getPromise = client.workspaces.get("workspace_sdk");
+  expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
+    type: "fetch_workspaces_request",
+    filter: { includeBackground: true },
+  });
+  fetchWorkspacesResponse(ws, [createWorkspace()]);
+
+  await expect(getPromise).resolves.toMatchObject({ id: "workspace_sdk" });
+  await client.close();
+});
+
+test("workspaceBaseOf reads the daemon-reported base", () => {
+  const base = {
+    ref: "refs/remotes/origin/main",
+    forkSha: "abc1234def5678abc1234def5678abc1234def56",
+    missing: false,
+  } as const;
+  expect(
+    workspaceBaseOf(
+      createWorkspace({
+        gitRuntime: {
+          currentBranch: "feature/work",
+          remoteUrl: null,
+          isPaseoOwnedWorktree: true,
+          base: { ...base },
+        } as PaseoWorkspace["gitRuntime"],
+      }),
+    ),
+  ).toEqual({ ...base });
+});
+
+test("workspaceBaseOf reports a missing stored ref instead of guessing", () => {
+  expect(
+    workspaceBaseOf(
+      createWorkspace({
+        gitRuntime: {
+          currentBranch: "feature/heads-6460",
+          base: {
+            ref: "refs/remotes/origin/feature/heads-6460-hid-pos-scanner-26.2.2",
+            forkSha: "abc1234def5678abc1234def5678abc1234def56",
+            missing: true,
+          },
+        } as PaseoWorkspace["gitRuntime"],
+      }),
+    ),
+  ).toMatchObject({ missing: true });
+});
+
+test("workspaceBaseOf prefers the descriptor's top-level base", () => {
+  const base = { ref: "refs/heads/epic", forkSha: null, missing: false };
+  expect(
+    workspaceBaseOf(
+      createWorkspace({
+        base,
+        gitRuntime: {
+          base: { ref: "refs/heads/other", forkSha: null, missing: false },
+        } as PaseoWorkspace["gitRuntime"],
+      }),
+    ),
+  ).toEqual(base);
+  expect(workspaceBaseOf(createWorkspace({ base: null }))).toBeNull();
+});
+
+test("workspaceBaseOf returns null when the daemon reports no base", () => {
+  expect(workspaceBaseOf(createWorkspace())).toBeNull();
+  expect(workspaceBaseOf(createWorkspace({ gitRuntime: null }))).toBeNull();
+  expect(workspaceBaseOf(null)).toBeNull();
+  expect(workspaceBaseOf(undefined)).toBeNull();
+});
+
+test("workspaceBaseOf returns null for a malformed base", () => {
+  expect(
+    workspaceBaseOf(
+      createWorkspace({
+        gitRuntime: {
+          base: { ref: 42, forkSha: null, missing: false },
+        } as unknown as PaseoWorkspace["gitRuntime"],
+      }),
+    ),
+  ).toBeNull();
+  expect(
+    workspaceBaseOf(
+      createWorkspace({
+        gitRuntime: { base: "refs/heads/main" } as unknown as PaseoWorkspace["gitRuntime"],
+      }),
+    ),
+  ).toBeNull();
 });
 
 test("createPaseoApi borrows daemon capabilities without exposing connection ownership", () => {
@@ -521,7 +684,10 @@ test("workspace handles keep identity and refresh snapshots through existing dri
   expect(workspace.directory).toBe("/repo/sdk");
   expect(workspace.current()).toEqual(openedWorkspace);
 
-  const refreshedWorkspace = createWorkspace({ name: "sdk refreshed" });
+  const refreshedWorkspace = createWorkspace({
+    name: "sdk refreshed",
+    base: { ref: "refs/heads/epic/sprint", forkSha: "a".repeat(40), missing: true },
+  });
   const refetchPromise = workspace.refresh({ requestId: "workspace-refetch-request" });
   expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
     type: "fetch_workspaces_request",
@@ -2369,6 +2535,25 @@ test("agent handles delegate setFeature to setAgentFeature and return its result
     }),
   );
   await expect(failingPromise).rejects.toThrow("feature feature-id is not supported by provider");
+  await client.close();
+});
 
+test("workspaces.get exposes the comparison base", async () => {
+  const { client, ws } = await connectClient();
+  const workspace = createWorkspace({
+    base: { ref: "refs/remotes/upstream/epic", forkSha: "a".repeat(40), missing: true },
+  });
+  const result = client.workspaces.get(workspace.id, "workspace-base-get");
+  ws.message(
+    sessionMessage({
+      type: "fetch_workspaces_response",
+      payload: {
+        requestId: "workspace-base-get",
+        entries: [workspace],
+        pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
+      },
+    }),
+  );
+  await expect(result).resolves.toEqual(workspace);
   await client.close();
 });

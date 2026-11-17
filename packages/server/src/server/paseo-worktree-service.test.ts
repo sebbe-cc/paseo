@@ -549,7 +549,7 @@ test("renames an eligible unnamed branch-off worktree once on first agent contex
 
   expect(created.worktree.branchName).toBe("dazzling-yak");
   expect(await readPaseoWorktreeMetadata(created.worktree.worktreePath)).toMatchObject({
-    version: 2,
+    version: 3,
     firstAgentBranchAutoName: {
       status: "pending",
       placeholderBranchName: "dazzling-yak",
@@ -576,7 +576,7 @@ test("renames an eligible unnamed branch-off worktree once on first agent contex
   });
   expect(branchAfterFirst).toBe("renamed-from-agent-context");
   expect(await readPaseoWorktreeMetadata(created.worktree.worktreePath)).toMatchObject({
-    version: 2,
+    version: 3,
     firstAgentBranchAutoName: {
       status: "attempted",
       placeholderBranchName: "dazzling-yak",
@@ -797,7 +797,7 @@ test("leaves the branch alone when generated branch text is invalid", async () =
       .trim(),
   ).toBe("dazzling-yak");
   expect(await readPaseoWorktreeMetadata(created.worktree.worktreePath)).toMatchObject({
-    version: 2,
+    version: 3,
     firstAgentBranchAutoName: {
       status: "attempted",
       placeholderBranchName: "dazzling-yak",

@@ -997,6 +997,7 @@ export const ja: TranslationResources = {
         refresh: "更新",
         refreshState: "gitと{{brand}}の状態を更新",
         failedRefresh: "gitの状態の更新に失敗しました。",
+        missingBase: "ベース {{ref}} は存在しません。保存された分岐点と比較しています。",
         seeUncommittedChanges: "未コミットの変更を表示",
         seeCommittedChanges: "コミット済みの変更を表示",
         checkingRepository: "リポジトリを確認中...",
