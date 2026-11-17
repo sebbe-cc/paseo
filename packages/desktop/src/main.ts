@@ -110,6 +110,8 @@ import {
   type AgentDeepLinkTarget,
 } from "@getpaseo/protocol/agent-deep-link";
 import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
+import { HidDeviceBroker } from "./features/hid/broker.js";
+import { registerHidIpc } from "./features/hid/ipc.js";
 
 const DEV_SERVER_URL = process.env.EXPO_DEV_URL ?? "http://localhost:8081";
 const APP_SCHEME = "paseo";
@@ -974,8 +976,39 @@ async function bootstrap(): Promise<void> {
   registerEditorTargetHandlers();
   registerBrowserAutomationIpc();
 
+  // Generic device (HID) broker for trusted plugins (pa-yi0bsm): one
+  // native handle per device, ownership per installation + window.
+  // The native module loads lazily on first enumerate; without it the
+  // broker reports "unavailable" instead of crashing startup.
+  const hidBroker = new HidDeviceBroker();
+  hidBroker.start();
+  registerHidIpc(
+    {
+      handle: (channel, listener) => {
+        ipcMain.handle(channel, (event, payload) => listener(event.sender.id, payload));
+      },
+      broadcast: (channel, payload) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send(channel, payload);
+        }
+      },
+    },
+    hidBroker,
+  );
+  app.on("browser-window-created", (_event, win) => {
+    win.on("closed", () => hidBroker.removeWindow(win.webContents.id));
+  });
+
   // In-app "Open in new window": opens a window that lands on the given project
   // via the same open-project flow as a CLI launch (no move, no ownership).
+  ipcMain.handle("paseo:window:focusSelf", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    }
+  });
   ipcMain.handle("paseo:window:openNew", async (_event, options?: unknown) => {
     const pendingPath =
       options && typeof options === "object" && "pendingOpenProjectPath" in options
