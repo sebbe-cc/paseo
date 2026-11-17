@@ -81,6 +81,22 @@ export function requirePlannedWorkspaceServicePort(
   return port;
 }
 
+/** Seed adopted services before any client can allocate another script's port. */
+export function restoreWorkspaceServicePort(
+  workspaceId: string,
+  scriptName: string,
+  port: number,
+): void {
+  const owner = dynamicPortOwners.get(port);
+  const key = toServiceOwner(workspaceId, scriptName);
+  if (owner !== undefined && owner !== key)
+    throw new Error(`Adopted service port ${port} is already reserved`);
+  const plan = workspaceServicePortPlans.get(workspaceId) ?? new Map<string, number>();
+  plan.set(scriptName, port);
+  workspaceServicePortPlans.set(workspaceId, plan);
+  reserveDynamicPort({ workspaceId, scriptName, port });
+}
+
 export function releaseWorkspaceServicePortPlan(workspaceId: string): void {
   const pendingToken = pendingWorkspaceServicePortPlanTokens.get(workspaceId);
   if (pendingToken) pendingToken.isReleased = true;
