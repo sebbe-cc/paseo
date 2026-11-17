@@ -19,6 +19,7 @@ import {
   type ArchiveDependencies,
   type ArchiveResult,
   resolveWorkspaceIdAtPath,
+  setWorkspaceArchiveGuard,
   WorkspaceArchiveCanceledError,
 } from "./workspace-archive-service.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
@@ -1238,6 +1239,55 @@ describe("archiveByScope cancellation", () => {
     });
 
     expect(result.newlyArchivedAgentIds).toEqual(["agent-active"]);
+  });
+});
+
+describe("archiveByScope guard (workspace.archive.before)", () => {
+  afterEach(() => setWorkspaceArchiveGuard(null));
+
+  test("a refusing guard stops the archive before anything is torn down", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "guarded");
+    const workspaceId = "ws-guarded";
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [{ workspaceId, cwd: worktree.worktreePath, kind: "worktree" }],
+    });
+    const seen: string[][] = [];
+    setWorkspaceArchiveGuard(async (ids) => {
+      seen.push(ids);
+      throw new Error("a run works here, cancel it first");
+    });
+
+    await expect(
+      archiveByScope(deps, { scope: { kind: "workspace", workspaceId }, requestId: "req-guarded" }),
+    ).rejects.toThrow("a run works here, cancel it first");
+
+    expect(seen).toEqual([[workspaceId]]);
+    expect((await deps.listActiveWorkspaces()).map((w) => w.workspaceId)).toEqual([workspaceId]);
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+    expect(deps.markWorkspaceArchiving).not.toHaveBeenCalled();
+  });
+
+  test("an allowing guard lets the archive run", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "allowed");
+    const workspaceId = "ws-allowed";
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [{ workspaceId, cwd: worktree.worktreePath, kind: "worktree" }],
+    });
+    setWorkspaceArchiveGuard(async () => undefined);
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId },
+      requestId: "req-allowed",
+    });
+
+    expect(result.archivedWorkspaceIds).toEqual([workspaceId]);
+    expect(existsSync(worktree.worktreePath)).toBe(false);
   });
 });
 

@@ -146,6 +146,8 @@ export type PluginHooks = {
   };
 } & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } } & {
   "worktree.create.after": { payload: { worktree: PluginHookWorktree } };
+  /** Awaited before a workspace is archived, on every path; a throw refuses the archive with its message. */
+  "workspace.archive.before": { payload: { workspace: PluginHookWorkspace } };
 };
 
 export type PluginHookPayload<Name extends keyof PluginHooks> = {
@@ -193,6 +195,7 @@ export const pluginHookRegistry = {
   "workspace.create.before": { waits: true },
   "workspace.create.after": { waits: false },
   "workspace.archive.after": { waits: false },
+  "workspace.archive.before": { waits: true },
   "worktree.create.before": { waits: true },
   "worktree.create.after": { waits: true },
   "agent.create.before": { waits: true },
