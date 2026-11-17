@@ -27,21 +27,29 @@ export class Usage {
   private readonly launches = new Map<string, ProviderLaunch>();
   private readonly sessions = new Map<
     string,
-    { account: string; read: () => Promise<Observation> }
+    { account: string; read: () => Promise<Observation>; awake: () => boolean }
   >();
   remember(launch: ProviderLaunch): { account: string } {
     const key = accountKey(launch.env);
     this.launches.set(key, launch);
     return { account: key };
   }
-  attach(id: string, launch: ProviderLaunch, read: () => Promise<Observation>): void {
-    this.sessions.set(id, { ...this.remember(launch), read });
+  attach(
+    id: string,
+    launch: ProviderLaunch,
+    read: () => Promise<Observation>,
+    awake: () => boolean = () => true,
+  ): void {
+    this.sessions.set(id, { ...this.remember(launch), read, awake });
   }
   detach(id: string): void {
     this.sessions.delete(id);
   }
   private async read(account: string, launch: ProviderLaunch): Promise<Observation> {
-    const readers = [...this.sessions.values()].filter((session) => session.account === account);
+    // Reading through a dormant session would respawn its host just for a usage poll.
+    const readers = [...this.sessions.values()].filter(
+      (session) => session.account === account && session.awake(),
+    );
     if (readers.length > 0) {
       const observations = await Promise.all(readers.map((session) => session.read()));
       const usages = observations.flatMap((observation) =>
