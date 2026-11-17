@@ -300,6 +300,26 @@ Browsers require user interaction before allowing sound; handle rejection and of
 play button. The function plays on the device running the plugin client, not on the daemon,
 and does not promise delivery while the app is suspended or closed.
 
+### Recent navigation and keyboard shortcuts
+
+Client plugins can observe and activate app navigation through `client.navigation`.
+`getActive()` returns `{ serverId, workspaceId, tabId }` or `null`; `tabId` is `null`
+when the active workspace has no focused tab. `subscribe(listener)` reports changes
+and returns an unsubscribe function. `activateWorkspace({ serverId, workspaceId })`
+and `activateTab({ serverId, workspaceId, tabId })` return `false` when the target no
+longer exists. They preserve the selected tab and never create a new one.
+
+`client.addKeyboardShortcut({ combo, id?, label?, onPress, onRelease? })` registers
+one modified key such as `Alt+Tab` or `Ctrl+Tab`, including inside an Electron
+browser tab. Provide a stable kebab-case `id` and a `label` together to list the
+binding under **Settings → Keyboard Shortcuts → Plugins**. Users can rebind,
+clear, and reset it there; the saved key also works inside browser tabs.
+`onRelease` runs when the shortcut's modifier is released or the app loses focus.
+`onPress` can return `false` to leave the key available to Paseo's built-in
+shortcuts. Registration returns an idempotent remover and is also removed when
+the plugin stops. Operating system shortcuts take precedence if the OS intercepts
+a key before it reaches Paseo.
+
 ### External links and workspace browsers
 
 Use `ExternalLink` to open documentation outside Paseo:
@@ -1656,8 +1676,12 @@ export default function contribute(client: PluginClientContext) {
 | `Component` | Yes      | React Native component matching the selected context's props. |
 
 Every panel receives `PluginPanelProps<Params>` with `theme`, `host`, `layout`, `navigation`,
-`workspaceId`, read-only `params`, `revision`, and `tab`. Workspace panels have empty
-`PluginWorkspacePanelParams`; agent panels have `PluginAgentPanelParams` containing `agentId`.
+`workspaceId`, read-only `params`, `revision`, and `tab`. Open a panel with
+`openPanel(id, { params, newTab })`: `params` is delivered as the panel's `params` and persisted
+with the tab, so a restored tab shows the same thing; `newTab: true` always opens a new tab
+instead of focusing an existing tab of the same panel. Type the component as
+`PluginPanelProps<YourParams>` for typed params; `PluginWorkspacePanelParams` is
+`Record<string, JsonValue>`, and `PluginAgentPanelParams` is `agentId` plus your object params.
 `revision` increments whenever params are re-sent to the same tab, including an identical request.
 
 `tab.setModified(boolean)` marks unsaved work and asks before closing. `tab.state` is opaque
@@ -1958,15 +1982,15 @@ Global items appear on the installation's selected host. Workspace items appear 
 
 Every callback receives:
 
-| Field                     | Context             | Meaning                                                                                                         |
-| ------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `context`                 | All                 | Matching discriminator.                                                                                         |
-| `paseo`                   | All                 | Selected host's existing `PaseoApi`.                                                                            |
-| `rpc(contract, input)`    | All                 | Typed call to this installation's daemon-side plugin handler.                                                   |
-| `openScreen(input)`       | All                 | Opens one of this plugin's registered screens: `{ screenId, params? }`.                                         |
-| `workspace`               | Workspace and agent | Synchronous workspace snapshot.                                                                                 |
-| `agent`                   | Agent               | Synchronous matching agent snapshot.                                                                            |
-| `openPanel(id, options?)` | Workspace and agent | Opens a registered panel in the callback's current context. Pass `{ location: "explorer" }` to target Explorer. |
+| Field                     | Context             | Meaning                                                                                                                                                                                                              |
+| ------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `context`                 | All                 | Matching discriminator.                                                                                                                                                                                              |
+| `paseo`                   | All                 | Selected host's existing `PaseoApi`.                                                                                                                                                                                 |
+| `rpc(contract, input)`    | All                 | Typed call to this installation's daemon-side plugin handler.                                                                                                                                                        |
+| `openScreen(input)`       | All                 | Opens one of this plugin's registered screens: `{ screenId, params? }`.                                                                                                                                              |
+| `workspace`               | Workspace and agent | Synchronous workspace snapshot.                                                                                                                                                                                      |
+| `agent`                   | Agent               | Synchronous matching agent snapshot.                                                                                                                                                                                 |
+| `openPanel(id, options?)` | Workspace and agent | Opens a registered panel in the callback's current context. `{ location: "explorer" }` targets Explorer; `{ params }` sets the panel's `params` (persisted with the tab); `{ newTab: true }` always opens a new tab. |
 
 An agent callback may open either an agent panel or a workspace panel. A workspace callback may open only a workspace panel. Unknown screen and panel IDs fail visibly. Use `paseo` for normal workspace, agent, provider, and daemon-config operations. Use `rpc` for plugin-specific filesystem, credential, vendor, or daemon-local work.
 
