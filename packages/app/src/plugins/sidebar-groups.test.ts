@@ -49,6 +49,7 @@ function installed(
     timelineRenderers: [],
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 

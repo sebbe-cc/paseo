@@ -148,6 +148,7 @@ export function runPluginClientBundle(
     timelineRenderers: [],
     timelineSelectionActions: [],
     inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
   const surfaceIds = new Set<string>();
   const sidebarViewIds = new Set<string>();
@@ -168,6 +169,7 @@ export function runPluginClientBundle(
   const timelineRendererIds = new Set<string>();
   const timelineSelectionActionIds = new Set<string>();
   const inlineDecoratorIds = new Set<string>();
+  const workspaceLabelPresenterIds = new Set<string>();
   const removals = new Set<PluginCleanup>();
   let setupComplete = false;
   let stopped = false;
@@ -613,6 +615,22 @@ export function runPluginClientBundle(
         remove,
       };
     },
+    addWorkspaceLabelPresenter(contribution) {
+      const normalizedId = requireId(contribution.id, "workspace label presenter id");
+      if (workspaceLabelPresenterIds.has(normalizedId)) {
+        throw new Error(`Duplicate workspace label presenter: ${normalizedId}`);
+      }
+      if (typeof contribution.present !== "function") {
+        throw new Error(`Workspace label presenter ${normalizedId} has no present`);
+      }
+      if (contribution.id !== normalizedId) {
+        throw new Error(`Invalid workspace label presenter id: ${contribution.id}`);
+      }
+      workspaceLabelPresenterIds.add(normalizedId);
+      return register(collector.workspaceLabelPresenters, contribution, () =>
+        workspaceLabelPresenterIds.delete(normalizedId),
+      );
+    },
     addComposerPill(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
       return trackButton(runtime.addComposerPill(contribution));
@@ -714,5 +732,6 @@ export function runPluginClientBundle(
     timelineRenderers: collector.timelineRenderers,
     timelineSelectionActions: collector.timelineSelectionActions,
     inlineDecorators: collector.inlineDecorators,
+    workspaceLabelPresenters: collector.workspaceLabelPresenters,
   };
 }
