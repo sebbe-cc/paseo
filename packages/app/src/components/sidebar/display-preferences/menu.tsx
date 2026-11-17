@@ -58,6 +58,8 @@ import { SIDEBAR_ROW_ITEMS, type SidebarRowItem } from "./row-items";
 import { useWorkspaceLabelProjection } from "@/workspace-labels";
 import { WorkspaceLabelDot } from "@/workspace-labels/swatch";
 import { WorkspaceLabelManagerModal } from "@/workspace-labels/manager-modal";
+import { useProjectContainers } from "@/project-containers";
+import { ProjectContainerManagerModal } from "@/project-containers/manager-modal";
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -89,6 +91,7 @@ type OptionIcon = ComponentType<{
 const GROUPING_ICONS: Record<SidebarGroupMode, OptionIcon> = {
   project: withUnistyles(Folder),
   status: withUnistyles(CircleDashed),
+  label: withUnistyles(Tag),
 };
 
 const TITLE_SOURCE_ICONS: Record<WorkspaceTitleSource, OptionIcon> = {
@@ -120,13 +123,14 @@ const TRAILING_ICONS: Record<SidebarTrailingChoice, OptionIcon> = {
   timestamp: withUnistyles(Clock),
 };
 
-const GROUPING_MODES: readonly SidebarGroupMode[] = ["project", "status"];
+const GROUPING_MODES: readonly SidebarGroupMode[] = ["project", "status", "label"];
 const TITLE_SOURCES: readonly WorkspaceTitleSource[] = ["title", "branch"];
 const TRAILING_CHOICES: readonly SidebarTrailingChoice[] = ["diff", "timestamp"];
 
 const GROUPING_LABEL_KEYS: Record<SidebarGroupMode, string> = {
   project: "sidebar.display.grouping.project",
   status: "sidebar.display.grouping.status",
+  label: "sidebar.display.grouping.labels",
 };
 
 const TITLE_SOURCE_LABEL_KEYS: Record<WorkspaceTitleSource, string> = {
@@ -172,6 +176,12 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
   const [managerOpen, setManagerOpen] = useState(false);
   const openManager = useCallback(() => setManagerOpen(true), []);
   const closeManager = useCallback(() => setManagerOpen(false), []);
+  const [projectManagerOpen, setProjectManagerOpen] = useState(false);
+  const openProjectManager = useCallback(() => setProjectManagerOpen(true), []);
+  const closeProjectManager = useCallback(() => setProjectManagerOpen(false), []);
+  const showProjectManager = useProjectContainers((state) =>
+    Object.values(state.hosts).some((host) => host.status === "online"),
+  );
 
   const triggerStyle = useCallback(
     ({ hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
@@ -390,9 +400,18 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
           >
             {t("sidebar.display.showBackground")}
           </MenuItem>
+          {showProjectManager ? (
+            <>
+              <MenuSeparator />
+              <MenuItem onSelect={openProjectManager} testID="sidebar-project-container-manage">
+                {t("projectContainers.manage.open")}
+              </MenuItem>
+            </>
+          ) : null}
         </MenuSurface>
       </MenuRoot>
       <WorkspaceLabelManagerModal visible={managerOpen} onClose={closeManager} />
+      <ProjectContainerManagerModal visible={projectManagerOpen} onClose={closeProjectManager} />
     </>
   );
 }

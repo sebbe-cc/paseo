@@ -22,6 +22,7 @@ describe("migrateSidebarOrderState", () => {
       projectOrder: ["project-a"],
       pinnedWorkspaceOrder: [],
       workspaceOrderByProject: { "project-a": ["host-a:main", "host-a:feature", "host-b:main"] },
+      labelGroupOrder: [],
     });
   });
 
@@ -31,6 +32,35 @@ describe("migrateSidebarOrderState", () => {
     });
 
     expect(migrated.pinnedWorkspaceOrder).toEqual(["host-a:one", "host-b:two"]);
+  });
+
+  it("keeps a stored label group order, deduplicated", () => {
+    const migrated = migrateSidebarOrderState({
+      labelGroupOrder: ["label:urgent", "label:backend", "label:urgent", ""],
+    });
+
+    expect(migrated.labelGroupOrder).toEqual(["label:urgent", "label:backend"]);
+  });
+});
+
+describe("sidebar label group order", () => {
+  beforeEach(() => {
+    useSidebarOrderStore.setState({ labelGroupOrder: [] });
+  });
+
+  it("stores the dragged label section order exactly as given", () => {
+    useSidebarOrderStore.getState().setLabelGroupOrder(["label:backend", "label:urgent"]);
+
+    expect(useSidebarOrderStore.getState().labelGroupOrder).toEqual([
+      "label:backend",
+      "label:urgent",
+    ]);
+  });
+
+  it("deduplicates the stored label group order without rewriting keys", () => {
+    useSidebarOrderStore.getState().setLabelGroupOrder(["label:backend", "label:backend"]);
+
+    expect(useSidebarOrderStore.getState().labelGroupOrder).toEqual(["label:backend"]);
   });
 });
 
@@ -100,6 +130,7 @@ it("preserves project, pinned and ordinary workspace order", () => {
     projectOrder: ["b", "a"],
     pinnedWorkspaceOrder: ["h:y", "h:x"],
     workspaceOrderByProject: { a: ["h:old", "h:new"] },
+    labelGroupOrder: [],
   });
 });
 
@@ -114,6 +145,7 @@ it("preserves whitespace in current project and pin identities during upgrade", 
     projectOrder: ["project "],
     pinnedWorkspaceOrder: ["host:workspace "],
     workspaceOrderByProject: {},
+    labelGroupOrder: [],
   });
 });
 
@@ -128,6 +160,7 @@ it("retains a pre-beta manual order when upgrading", () => {
     projectOrder: ["project"],
     pinnedWorkspaceOrder: [],
     workspaceOrderByProject: { project: ["host:b", "host:a"] },
+    labelGroupOrder: [],
   });
 });
 
@@ -136,6 +169,7 @@ it("starts with an empty manual order for beta users whose order was discarded",
     projectOrder: ["p"],
     pinnedWorkspaceOrder: ["h:a"],
     workspaceOrderByProject: {},
+    labelGroupOrder: [],
   });
 });
 it("preserves spaces in saved workspace scopes and identities", () => {
