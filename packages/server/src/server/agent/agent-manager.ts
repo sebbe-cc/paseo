@@ -1049,6 +1049,7 @@ export class AgentManager {
         title: agent.config.title ?? null,
         labels: { ...agent.labels },
         metadata: agent.metadata,
+        background: agent.background === true,
         tools: [],
         mcpServers: {},
         env: { ...agent.launchEnv },
