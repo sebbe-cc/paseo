@@ -2529,6 +2529,69 @@ describe("workspace-layout-store actions", () => {
     expect(findPaneById(layout.root, newPaneId)?.focusedTabId).toBe(draftTabId);
   });
 
+  it("splitPaneForTarget opens a narrow pane left of main for a plugin panel, once", () => {
+    useWorkspaceLayoutIds("99999999-9999-9999-9999-999999999999");
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    const target = {
+      kind: "plugin" as const,
+      pluginId: "orbit",
+      panelId: "overview",
+      context: "workspace" as const,
+    };
+
+    store.openTab({ workspaceKey, target: { kind: "draft", draftId: "agent" }, intent: "reveal" });
+    const paneId = store.splitPaneForTarget(workspaceKey, target, { position: "left", size: 0.25 });
+    const tabId = store.openTab({
+      workspaceKey,
+      target,
+      intent: "reveal",
+      placement: { mode: "pane", paneId: paneId! },
+    });
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const isNewPane = (c: SplitNode) => c.kind === "pane" && c.pane.id === paneId;
+    const findGroup = (node: SplitNode): SplitNode | null => {
+      if (node.kind === "pane") return null;
+      if (node.group.children.some(isNewPane)) return node;
+      for (const child of node.group.children) {
+        const hit = findGroup(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const group = findGroup(layout.root);
+    expect(paneId).toBe("pane_99999999-9999-9999-9999-999999999999");
+    expect(findPaneById(layout.root, paneId)?.tabIds).toEqual([tabId!]);
+    expect(findPaneById(layout.root, "main")?.tabIds).toEqual(["agent"]);
+    expect(group?.kind === "group" ? group.group.direction : null).toBe("horizontal");
+    // The explorer shares main's group; the new pane takes a quarter of main's own share.
+    const sizes = group?.kind === "group" ? group.group.sizes : [];
+    const isMainPane = (c: SplitNode) => c.kind === "pane" && c.pane.id === "main";
+    const newIndex = group?.kind === "group" ? group.group.children.findIndex(isNewPane) : -1;
+    const mainIndex = group?.kind === "group" ? group.group.children.findIndex(isMainPane) : -1;
+    expect(newIndex).toBeLessThan(mainIndex);
+    expect(sizes[newIndex]! / (sizes[newIndex]! + sizes[mainIndex]!)).toBeCloseTo(0.25);
+    // Open already: no second pane, the tab is revealed where it is.
+    expect(store.splitPaneForTarget(workspaceKey, target, { position: "left" })).toBeNull();
+  });
+
+  it("splitPaneForTarget does nothing on a compact layout", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    store.setLayoutMode("compact");
+    try {
+      expect(
+        store.splitPaneForTarget(
+          workspaceKey,
+          { kind: "plugin", pluginId: "orbit", panelId: "overview", context: "workspace" },
+          { position: "left", size: 0.25 },
+        ),
+      ).toBeNull();
+    } finally {
+      store.setLayoutMode("split-panes");
+    }
+  });
+
   it("hides and shows Explorer without changing its default tabs or split sizes", () => {
     useWorkspaceLayoutIds("88888888-8888-8888-8888-888888888888");
     const workspaceKey = createWorkspaceKey();
