@@ -97,6 +97,14 @@ export interface TerminalSessionControllerOptions {
   // Bytes queued on the client transport but not yet sent, or null when the
   // transport exposes no backpressure signal (e.g. the multiplexed relay socket).
   getClientBufferedAmount?: (source: object) => number | null;
+  // Plugin terminal.create.before hooks. A failure is logged and the terminal starts unchanged.
+  prepareTerminal?: (request: TerminalPrepareRequest) => Promise<TerminalPrepareRequest>;
+}
+
+export interface TerminalPrepareRequest {
+  cwd: string;
+  workspaceId: string | null;
+  env: Record<string, string>;
 }
 
 interface TerminalWorkspaceRef {
@@ -613,10 +621,12 @@ export class TerminalSessionController {
         throw new Error(`Workspace ${workspaceId} is not active or does not exist`);
       }
 
+      const prepared = await this.prepareTerminal({ cwd: msg.cwd, workspaceId, env: {} });
       const session = await this.terminalManager.createTerminal({
-        cwd: msg.cwd,
+        cwd: prepared.cwd,
         workspaceId,
         name: msg.name,
+        ...(Object.keys(prepared.env).length > 0 ? { env: prepared.env } : {}),
         command: msg.command,
         args: msg.args,
         rows: msg.size?.rows,
@@ -651,6 +661,19 @@ export class TerminalSessionController {
           requestId: msg.requestId,
         },
       });
+    }
+  }
+
+  private async prepareTerminal(request: TerminalPrepareRequest): Promise<TerminalPrepareRequest> {
+    if (!this.options.prepareTerminal) return request;
+    try {
+      return await this.options.prepareTerminal(structuredClone(request));
+    } catch (error) {
+      this.sessionLogger.warn(
+        { err: error, cwd: request.cwd, workspaceId: request.workspaceId },
+        "terminal.create.before failed; starting the terminal unchanged",
+      );
+      return request;
     }
   }
 

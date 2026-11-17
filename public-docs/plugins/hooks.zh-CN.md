@@ -63,6 +63,7 @@ Paseo 只观察返回的 Promise，因此独立任务没有错误报告，也没
 | `agent.turn.after`        | 否   | `{ agent, turnId, outcome, timeline }`    |                                            |
 | `agent.permission.before` | 否   | `{ agent, request }`                      |                                            |
 | `agent.permission.after`  | 否   | `{ agent, requestId, resolution }`        |                                            |
+| `terminal.create.before`  | 是   | `{ request: { cwd, workspaceId, env } }`  | `cwd`；`env` 条目                          |
 
 ## 共享载荷 {#shared-payloads}
 
@@ -607,6 +608,23 @@ server.addHook("agent.permission.after", async ({ agent, requestId, resolution }
 ```
 
 Agent 钩子不包括 daemon 的私有临时辅助 Agent。后台 Agent 和后台工作区中的 Agent 使用相同钩子。
+
+## terminal.create.before {#terminalcreatebefore}
+
+工作区终端即将启动时触发，来源可以是终端面板或 `terminals.create`。它在进程启动前运行。`request.env`
+只包含终端在守护进程终端环境之上额外添加的条目，初始为空；`request.workspaceId` 是所属工作区。
+
+返回添加或替换了 `env` 条目的请求，或者换成另一个已存在的绝对路径 `cwd`。工作区不能修改。
+
+```ts
+server.addHook("terminal.create.before", async ({ request }) => ({
+  ...request,
+  env: { ...request.env, AWS_PROFILE: "dev" },
+}));
+```
+
+与其他等待型钩子不同，失败不会让操作失败。回调抛出错误、返回无效数据或超过 30 秒时，Paseo
+会记录日志，并用原始请求启动终端。工作区脚本和打开终端的 Agent 工具不会运行此钩子。
 
 ## 顺序与返回值 {#ordering-and-returned-values}
 
