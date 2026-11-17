@@ -797,6 +797,77 @@ test("uses an injected timeline store without making it a production requirement
   }
 });
 
+test("resuming an agent with an empty retained timeline hydrates provider history", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-empty-retained-"));
+  class HistorySession extends TestAgentSession {
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: "codex",
+        item: { type: "user_message", text: "Earlier" },
+      };
+      yield {
+        type: "timeline",
+        provider: "codex",
+        item: { type: "assistant_message", text: "Reply" },
+      };
+    }
+  }
+  class HistoryClient extends TestAgentClient {
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new HistorySession({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  }
+  const manager = new AgentManager({ clients: { codex: new HistoryClient() }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+  try {
+    await manager.closeAgent(agent.id);
+    await manager.resumeAgentFromPersistence(
+      { provider: "codex", sessionId: "existing", metadata: { cwd: workdir } },
+      { cwd: workdir },
+      agent.id,
+    );
+    await manager.hydrateTimelineFromProvider(agent.id);
+    expect((await manager.getTimelineRows(agent.id)).map((row) => row.item)).toEqual([
+      { type: "user_message", text: "Earlier" },
+      { type: "assistant_message", text: "Reply" },
+    ]);
+  } finally {
+    await manager.closeAgent(agent.id).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("an empty retained timeline does not replace existing durable history", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-durable-retained-"));
+  const store = new RecordingTimelineStore();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    durableTimelineStore: store,
+    logger,
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+  try {
+    await manager.closeAgent(agent.id);
+    await store.appendCommitted(agent.id, { type: "assistant_message", text: "Stored" });
+    await manager.resumeAgentFromPersistence(
+      { provider: "codex", sessionId: "existing", metadata: { cwd: workdir } },
+      { cwd: workdir },
+      agent.id,
+    );
+    await manager.hydrateTimelineFromProvider(agent.id);
+    expect((await store.getCommittedRows(agent.id)).map((row) => row.item)).toEqual([
+      { type: "assistant_message", text: "Stored" },
+    ]);
+  } finally {
+    await manager.closeAgent(agent.id).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("refreshing an agent replaces the injected timeline store instead of appending a second copy", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-timeline-rehydrate-"));
   const store = new RecordingTimelineStore();

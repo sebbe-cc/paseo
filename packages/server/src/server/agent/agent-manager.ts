@@ -4569,10 +4569,11 @@ export class AgentManager {
       | undefined;
   }): Promise<{ durableTimelineHasRows: boolean }> {
     const { agentId, now, options } = params;
-    const timelineAlreadyPrimed = this.timelineStore.has(agentId);
+    const timelineAlreadyPrimed =
+      this.timelineStore.has(agentId) && this.timelineStore.getRows(agentId).length > 0;
     const explicitTimelineSeed = buildExplicitTimelineSeedForRegister(now, options);
     const shouldSeedFromDurable =
-      !explicitTimelineSeed && !this.timelineStore.has(agentId) && this.durableTimelineStore;
+      !explicitTimelineSeed && !timelineAlreadyPrimed && this.durableTimelineStore;
     const durableTimelineSeed = shouldSeedFromDurable
       ? await this.loadCommittedTimelineSeed(agentId, now)
       : null;
