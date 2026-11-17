@@ -24,6 +24,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
 import { ResizeHandle } from "@/components/resize-handle";
+import { PaneFocusRing, resolvePaneFocusRingVisible } from "@/components/pane-focus-ring";
 import { RetainedPanel } from "@/components/retained-panel";
 import {
   hasMultipleVisiblePanes,
@@ -632,6 +633,9 @@ function SplitNodeView({
   );
 }
 
+const PANE_DATASET = { focusRegion: "pane" };
+const FOCUSED_PANE_DATASET = { focusRegion: "pane", focusedPane: "true" };
+
 const SplitPaneView = memo(function SplitPaneView({
   pane,
   uiTabs,
@@ -827,6 +831,8 @@ const SplitPaneView = memo(function SplitPaneView({
         collapsable={false}
         style={styles.pane}
         testID={`workspace-pane-${pane.id}`}
+        tabIndex={isNative ? undefined : -1}
+        dataSet={isFocused ? FOCUSED_PANE_DATASET : PANE_DATASET}
       >
         <AdaptiveWorkspaceChrome compactHeader={compactHeader}>
           {ownsWorkspaceHeader ? renderMainHeader?.() : null}
@@ -886,6 +892,13 @@ const SplitPaneView = memo(function SplitPaneView({
           />
           <SplitDropZone paneId={pane.id} active={showDropZones} preview={dropPreview} />
         </View>
+        <PaneFocusRing
+          visible={resolvePaneFocusRingVisible({
+            isWorkspaceFocused,
+            isPaneFocused: isFocused,
+          })}
+          testID={`pane-focus-ring-${pane.id}`}
+        />
       </View>
     </RenderProfile>
   );
@@ -978,6 +991,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 0,
     backgroundColor: theme.colors.surface0,
     overflow: "hidden",
+    outlineWidth: 0,
   },
   paneTabs: {
     position: "relative",
