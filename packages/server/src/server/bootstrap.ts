@@ -163,7 +163,10 @@ import {
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { ScheduleService } from "./schedule/service.js";
 import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
-import { createOrchestrationSkills } from "./orchestration-skills/index.js";
+import {
+  createOrchestrationSkills,
+  reportSkillsMaintenanceFailure,
+} from "./orchestration-skills/index.js";
 import {
   resolveReloadableConfig,
   type ResolvedDaemonSettings,
@@ -715,7 +718,7 @@ export async function createPaseoDaemon(
   });
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
   void orchestrationSkills.autoUpdate().catch((error) => {
-    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+    reportSkillsMaintenanceFailure(logger, error);
   });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
@@ -974,12 +977,6 @@ export async function createPaseoDaemon(
   });
 
   const httpServer = createHTTPServer(app);
-
-  // Script proxy WebSocket upgrade handler — must be registered before the
-  // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
-  // script-bound upgrades are forwarded first. The handler is a no-op for
-  // requests that don't match a registered script route.
-  httpServer.on("upgrade", serviceProxy.upgradeHandler({ passthroughUnknown: true }));
 
   if (config.serviceProxy?.standaloneListen) {
     serviceProxyListenTarget = parseListenString(config.serviceProxy.standaloneListen);
@@ -1508,8 +1505,6 @@ export async function createPaseoDaemon(
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
-  await scheduleService.start();
-
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1944,6 +1939,9 @@ export async function createPaseoDaemon(
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             providerSnapshotManager.settlePluginProviders();
+            // A due schedule can reopen a persisted provider. Its session-open
+            // hooks must be registered before the scheduler starts ticking.
+            await scheduleService.start();
             restartRecovery.resumePending();
             await finishSubscriptions.start();
             wsServer.beginAcceptingConnections();
@@ -2005,6 +2003,7 @@ export async function createPaseoDaemon(
     } catch (error) {
       localCredential = null;
       await deleteLocalCredential(config.paseoHome);
+      await scheduleService.stop().catch(() => undefined);
       unsubscribePluginProviders();
       unsubscribePluginSessionChanges();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
