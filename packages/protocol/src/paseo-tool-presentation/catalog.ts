@@ -229,6 +229,12 @@ export const PASEO_TOOL_CATALOG = {
     context: field("title"),
     detail: { inputOrder: ["title", "workspaceId"] },
   },
+  set_workspace_background: {
+    label: "Set workspace background",
+    completedLabel: "Set workspace background",
+    context: field("workspaceId"),
+    detail: { inputOrder: ["workspaceId", "background"] },
+  },
   archive_workspace: {
     label: "Archive workspace",
     completedLabel: "Archived workspace",

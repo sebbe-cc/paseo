@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
 import { runArchiveCommand } from "./archive.js";
+import { runBackgroundCommand } from "./background.js";
 import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
 import { runRenameCommand } from "./rename.js";
@@ -57,6 +58,15 @@ export function createWorkspaceCommand(): Command {
       // the first word of an unquoted multi-word title and silently drop the rest.
       .allowExcessArguments(false),
   ).action(withOutput(runRenameCommand));
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("background")
+      .description("Hide a workspace from default lists and the sidebar (on), or show it (off)")
+      .argument("<workspace-id>", "Workspace id")
+      .argument("<state>", "on or off")
+      .allowExcessArguments(false),
+  ).action(withOutput(runBackgroundCommand));
 
   addJsonAndDaemonHostOptions(
     workspace

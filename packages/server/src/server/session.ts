@@ -3390,6 +3390,12 @@ export class Session {
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
       case "workspace.pin.set.request":
         return this.handleWorkspacePinSetRequest(msg.workspaceId, msg.pinned, msg.requestId);
+      case "workspace.background.set.request":
+        return this.handleWorkspaceBackgroundSetRequest(
+          msg.workspaceId,
+          msg.background,
+          msg.requestId,
+        );
       case "workspace.base_branch.set.request":
         return this.handleWorkspaceBaseBranchSetRequest(msg);
       default:
@@ -4368,6 +4374,45 @@ export class Session {
           error: getErrorMessage(error),
         },
       });
+    }
+  }
+
+  /** The flag that hides a workspace from default lists and the sidebar; settable after creation. */
+  private async handleWorkspaceBackgroundSetRequest(
+    workspaceId: string,
+    background: boolean,
+    requestId: string,
+  ): Promise<void> {
+    const logContext = { workspaceId, background, requestId };
+    this.sessionLogger.info(logContext, "session: workspace.background.set.request");
+    const emitResponse = (accepted: boolean, applied: boolean, error: string | null) => {
+      this.emit({
+        type: "workspace.background.set.response",
+        payload: { requestId, workspaceId, accepted, background: applied, error },
+      });
+    };
+
+    try {
+      // An archived workspace is left as it was and answered as missing.
+      const updated = await this.workspaceRegistry.update(workspaceId, (existing) =>
+        existing.archivedAt
+          ? existing
+          : { ...existing, background, updatedAt: new Date().toISOString() },
+      );
+      if (!updated || updated.archivedAt) {
+        emitResponse(false, updated?.background ?? false, "Workspace not found");
+        return;
+      }
+      emitResponse(true, updated.background, null);
+      // Subscriptions filter by background visibility: a shown workspace arrives as an upsert,
+      // a hidden one as a remove.
+      await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
+    } catch (error) {
+      this.sessionLogger.error(
+        { ...logContext, err: error },
+        "session: workspace.background.set.request error",
+      );
+      emitResponse(false, false, getErrorMessage(error));
     }
   }
 

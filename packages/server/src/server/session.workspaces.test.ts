@@ -8562,6 +8562,129 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
   });
 });
 
+test("workspace.background.set.request shows and hides a workspace in a default subscription", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
+  );
+  const project = createPersistedProjectRecord({
+    projectId: "proj-1",
+    rootPath: REPO_CWD,
+    kind: "git",
+    displayName: "acme/repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-1",
+    projectId: project.projectId,
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    background: true,
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = new Map([[workspace.workspaceId, workspace]]);
+  session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
+  session.projectRegistry.list = async () => [project];
+  session.workspaceRegistry.get = async (id: string) => workspaces.get(id) ?? null;
+  session.workspaceRegistry.listAll = session.workspaceRegistry.listActive = async () =>
+    Array.from(workspaces.values());
+  session.workspaceRegistry.update = async (id, updater) => {
+    const existing = workspaces.get(id);
+    if (!existing) return null;
+    const updated = updater(existing);
+    workspaces.set(id, updated);
+    return updated;
+  };
+  // The sidebar's subscription leaves background workspaces out.
+  await session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "sub-workspaces",
+    subscribe: { subscriptionId: "sub-workspaces" },
+  });
+  emitted.length = 0;
+
+  await session.handleMessage({
+    type: "workspace.background.set.request",
+    workspaceId: "ws-1",
+    background: false,
+    requestId: "req-show",
+  });
+
+  expect(findByType(emitted, "workspace.background.set.response")?.payload).toEqual({
+    requestId: "req-show",
+    workspaceId: "ws-1",
+    accepted: true,
+    background: false,
+    error: null,
+  });
+  expect(workspaces.get("ws-1")?.background).toBe(false);
+  expect(findByType(emitted, "workspace_update")?.payload).toMatchObject({
+    kind: "upsert",
+    workspace: { id: "ws-1" },
+  });
+
+  emitted.length = 0;
+  await session.handleMessage({
+    type: "workspace.background.set.request",
+    workspaceId: "ws-1",
+    background: true,
+    requestId: "req-hide",
+  });
+
+  expect(workspaces.get("ws-1")?.background).toBe(true);
+  expect(findByType(emitted, "workspace_update")?.payload).toMatchObject({
+    kind: "remove",
+    id: "ws-1",
+  });
+});
+
+test("workspace.background.set.request leaves an archived or unknown workspace alone", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
+  );
+  const archived = createPersistedWorkspaceRecord({
+    workspaceId: "ws-archived",
+    projectId: "proj-1",
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    background: true,
+    archivedAt: "2026-03-02T12:00:00.000Z",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = new Map([[archived.workspaceId, archived]]);
+  session.workspaceRegistry.update = async (id, updater) => {
+    const existing = workspaces.get(id);
+    if (!existing) return null;
+    const updated = updater(existing);
+    workspaces.set(id, updated);
+    return updated;
+  };
+
+  for (const workspaceId of ["ws-archived", "ws-missing"]) {
+    await session.handleMessage({
+      type: "workspace.background.set.request",
+      workspaceId,
+      background: false,
+      requestId: `req-${workspaceId}`,
+    });
+  }
+
+  const responses = emitted.filter(
+    (message) => message.type === "workspace.background.set.response",
+  );
+  expect(responses.map((message) => message.payload)).toMatchObject([
+    { workspaceId: "ws-archived", accepted: false, error: "Workspace not found" },
+    { workspaceId: "ws-missing", accepted: false, error: "Workspace not found" },
+  ]);
+  expect(workspaces.get("ws-archived")).toBe(archived);
+});
+
 test("workspace.title.set.request with whitespace-only title clears the title", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(

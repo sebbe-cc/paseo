@@ -3792,6 +3792,27 @@ export class DaemonClient {
     return { pinnedAt: payload.pinnedAt };
   }
 
+  /** Hide a workspace from default lists and the sidebar, or show it again. */
+  async setWorkspaceBackground(
+    workspaceId: string,
+    background: boolean,
+    requestId?: string,
+  ): Promise<{ background: boolean }> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "workspace.background.set.request",
+        workspaceId,
+        background,
+      },
+      responseType: "workspace.background.set.response",
+    });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "setWorkspaceBackground rejected");
+    }
+    return { background: payload.background };
+  }
+
   async setWorkspaceBaseBranch(options: {
     workspaceId: string;
     baseRef: string;
