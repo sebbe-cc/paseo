@@ -1,4 +1,7 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { subscribePluginSettings } from "./settings/subscribe";
 import { createPlayAudio, type AudioEngine } from "@/audio";
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { getPluginClientApi } from "./client-state/api";
 import type { PluginClientOpenPanelOptions } from "@getpaseo/plugin/client";
 import { subscribePluginRpc } from "@getpaseo/plugin/client/host";
@@ -7,10 +10,18 @@ import {
   createPluginCapabilities,
   createPluginWorkspaceActionContext,
 } from "./actions";
+import {
+  createAppClientActionsCapability,
+  createDomPanelResolver,
+  createWebPanelNavigator,
+} from "./client-actions";
+import { createVoiceAudioSource, isVoiceCaptureAvailable } from "./voice-capture";
+import { createPluginVoiceInput, isPackagedDesktopVoiceHost } from "./voice-pipeline";
 import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
+import { getAppClientContextCapability, getAppHidCapability } from "./devices/app-context";
 import type { InstalledPlugin } from "./types";
 import { pluginKeyboardShortcuts } from "./keyboard-shortcuts";
 import { pluginRecentNavigation } from "./recent-navigation";
@@ -26,11 +37,39 @@ export function createPluginClientRuntime(
   );
   return {
     ...capabilities,
+    hid: getAppHidCapability(),
+    clientContext: getAppClientContextCapability(),
     i18n: installation.i18n,
+    subscribeSettings: (definition, listener) =>
+      subscribePluginSettings(
+        {
+          definition,
+          queryClient: installation.queryClient,
+          read: () => capabilities.rpc(settingsRpc(definition.id).read, {}),
+          signal: installation.lifetime.signal,
+        },
+        listener,
+      ),
     playAudio: createPlayAudio(audio, installation.lifetime.signal),
     navigation: pluginRecentNavigation,
     addKeyboardShortcut: (contribution) =>
       pluginKeyboardShortcuts.add(installation.serverId, installation.id, contribution),
+    // Panel scroll/navigation live on DOM hosts. Voice hold-to-talk is
+    // glued to the production dictation pipeline (mic capture +
+    // DictationStreamSender + daemon stream client, transcript delivered
+    // to the routed agent on release) where those pieces exist — packaged
+    // desktop only. Everywhere else voiceInput probes false and the plugin
+    // reports unsupported instead of crashing or faking a transcript.
+    clientActions: createAppClientActionsCapability({
+      voice: createPluginVoiceInput({
+        isDesktopHost: isPackagedDesktopVoiceHost,
+        isCaptureAvailable: () => isVoiceCaptureAvailable(),
+        resolveClient: (serverId) => getHostRuntimeStore().getClient(serverId),
+        createAudioSource: (config) => createVoiceAudioSource(config),
+      }),
+      panels: createDomPanelResolver(),
+      navigator: createWebPanelNavigator(),
+    }),
     hosts: getPluginClientApi(installation).hosts,
     addComposerPill(contribution) {
       return pluginButtonStore.addComposerPill(installation, contribution);
