@@ -165,6 +165,101 @@ describe("plugin manifest", () => {
     },
   );
 
+  it("reads an optional cli section for plugin CLI commands", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
+    directories.push(directory);
+    const manifest = path.join(directory, "paseo-plugin.json");
+    const cli = {
+      name: "wf",
+      description: "Run workflows",
+      commands: [
+        {
+          name: "start",
+          rpc: "runs.start",
+          description: "Start a workflow run",
+          args: [{ name: "workflow" }, { name: "bead" }],
+          options: [{ name: "provider", description: "Provider override" }],
+        },
+      ],
+    };
+    await writeFile(manifest, JSON.stringify({ id: "example", cli }));
+    await expect(readPluginManifest(directory)).resolves.toMatchObject({ cli });
+  });
+
+  it.each([
+    { cli: { name: "wf", commands: [] } },
+    { cli: { name: "WF", commands: [{ name: "start", rpc: "runs.start" }] } },
+    { cli: { name: "wf!", commands: [{ name: "start", rpc: "runs.start" }] } },
+    { cli: { name: "wf" } },
+    {
+      cli: {
+        name: "wf",
+        commands: [{ name: "Start", rpc: "runs.start" }],
+      },
+    },
+    {
+      cli: { name: "wf", commands: [{ name: "start", rpc: "" }] },
+    },
+    {
+      cli: { name: "wf", commands: [{ name: "start", rpc: "Runs.Start" }] },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [
+          { name: "start", rpc: "runs.start" },
+          { name: "start", rpc: "runs.stop" },
+        ],
+      },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [{ name: "start", rpc: "runs.start", args: [{ name: "a" }, { name: "a" }] }],
+      },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [
+          {
+            name: "start",
+            rpc: "runs.start",
+            args: [{ name: "target" }],
+            options: [{ name: "target" }],
+          },
+        ],
+      },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [{ name: "start", rpc: "runs.start", options: [{ name: "json" }] }],
+      },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [{ name: "start", rpc: "runs.start", options: [{ name: "host" }] }],
+      },
+    },
+    {
+      cli: {
+        name: "wf",
+        commands: [{ name: "start", rpc: "runs.start" }],
+        extra: true,
+      },
+    },
+  ])("rejects invalid cli sections: %j", async (fields) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
+    directories.push(directory);
+    await writeFile(
+      path.join(directory, "paseo-plugin.json"),
+      JSON.stringify({ id: "example", ...fields }),
+    );
+    await expect(readPluginManifest(directory)).rejects.toThrow();
+  });
+
   it("accepts only non-empty argv arrays for build commands", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
     directories.push(directory);
