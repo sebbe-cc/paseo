@@ -43,6 +43,7 @@ import {
   type ProviderRefreshContext,
 } from "../../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
+import { PendingTurnQueue } from "../../pending-turn-queue.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
 import { runProviderTurn } from "../provider-runner.js";
 import {
@@ -1171,6 +1172,11 @@ export class PiRpcAgentSession implements AgentSession {
   private readonly pendingExtensionUiRequests = new Map<string, AgentPermissionRequest>();
   private readonly extensionHost: ReturnType<typeof createPiExtensionHost>;
   private activeTurnId: string | null = null;
+  /**
+   * Messages sent while a turn is active wait here instead of being rejected,
+   * then start in order when the active turn ends.
+   */
+  private readonly pendingTurns = new PendingTurnQueue(() => randomUUID());
   private activeClientMessageId: string | null = null;
   private activeAssistantMessageId: string | null = null;
   private activeTurnStarted = false;
@@ -1277,14 +1283,29 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<StartTurnResult> {
+    if (this.closed) {
+      throw new Error("Pi session is closed");
+    }
     if (this.runtimeDead) {
       throw new Error("Pi process exited. Reload agent before sending another message.");
     }
     if (this.activeTurnId) {
-      throw new Error("A Pi turn is already active");
+      // Never reject a message sent to a busy agent: it waits for turn end
+      // instead. Process death already fails the active turn through
+      // handleProcessExit, and a failed start clears the slot in its catch,
+      // so the queue cannot wedge behind a dead runtime.
+      const queuedTurnId = this.pendingTurns.enqueue(prompt, options);
+      this.logger.debug({ queuedTurnId, queued: this.pendingTurns.size }, "provider.pi.turn_queued");
+      return { turnId: queuedTurnId };
     }
+    return this.startTurnInternal(prompt, options);
+  }
 
-    const turnId = randomUUID();
+  private async startTurnInternal(
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    turnId: string = randomUUID(),
+  ): Promise<StartTurnResult> {
     this.activeTurnId = turnId;
     this.usagePoller.startTurn();
     this.activeClientMessageId = options?.clientMessageId ?? null;
@@ -1296,7 +1317,10 @@ export class PiRpcAgentSession implements AgentSession {
     this.pendingSteerSubmissions.length = 0;
     this.clearNoTurnBuffers();
     const payload = await convertPromptInput(prompt, { model: this.state.model });
-    if (this.closed) throw new Error("Pi session is closed");
+    if (this.closed) {
+      this.resetTurnState();
+      throw new Error("Pi session is closed");
+    }
     if (this.activeTurnId !== turnId) return { turnId };
     this.activeNoTurnPromptText = payload.text;
     const shouldProbeForNoTurnPrompt = this.parseSlashCommandInput(payload.text) !== null;
@@ -1348,6 +1372,7 @@ export class PiRpcAgentSession implements AgentSession {
             turnId,
             reason: toDiagnosticErrorMessage(error),
           });
+          this.drainPendingTurns();
           return;
         }
         this.emit({
@@ -1356,10 +1381,49 @@ export class PiRpcAgentSession implements AgentSession {
           turnId,
           error: toDiagnosticErrorMessage(error),
         });
+        this.drainPendingTurns();
       }
     })();
 
     return { turnId };
+  }
+
+  private resetTurnState(): void {
+    this.usagePoller.stopTurn();
+    this.activeTurnId = null;
+    this.activeClientMessageId = null;
+    this.activeAssistantMessageId = null;
+    this.activeTurnStarted = false;
+    this.activeTurnStartedEmitted = false;
+    this.pendingSettledMessages = null;
+    this.activePromptRequestId = null;
+    this.pendingSteerSubmissions.length = 0;
+    this.clearNoTurnBuffers();
+  }
+
+  /**
+   * Start the next queued message, if any, now that no turn is active.
+   * Queued failures carry their reserved turn id so the daemon can settle
+   * the bound run.
+   */
+  private drainPendingTurns(): void {
+    if (this.closed || this.activeTurnId) {
+      return;
+    }
+    const next = this.pendingTurns.dequeue();
+    if (!next) {
+      return;
+    }
+    void this.startTurnInternal(next.prompt, next.options, next.turnId).catch((error) => {
+      this.resetTurnState();
+      this.emit({
+        type: "turn_failed",
+        provider: this.provider,
+        turnId: next.turnId,
+        error: error instanceof Error ? error.message : "Queued Pi turn failed to start",
+      });
+      this.drainPendingTurns();
+    });
   }
 
   async steerActiveTurn(
@@ -1546,6 +1610,7 @@ export class PiRpcAgentSession implements AgentSession {
           turnId,
           error: terminalError,
         });
+        this.drainPendingTurns();
       }
       throw error;
     }
@@ -1570,6 +1635,7 @@ export class PiRpcAgentSession implements AgentSession {
         reason: "interrupted",
         turnId,
       });
+      this.drainPendingTurns();
     }
     if (this.interruptingTurn === interruption) {
       this.interruptingTurn = null;
@@ -1626,6 +1692,8 @@ export class PiRpcAgentSession implements AgentSession {
       return;
     }
     this.closed = true;
+    // The daemon synthesizes cancellation for runs bound to queued turns.
+    this.pendingTurns.clear();
     this.closeController.abort();
     this.extensionHost.close();
     this.usagePoller.close();
@@ -2187,6 +2255,7 @@ export class PiRpcAgentSession implements AgentSession {
       turnId,
       error,
     });
+    this.drainPendingTurns();
   }
 
   private handleSessionEvent(event: PiAgentSessionEvent): void {
@@ -2549,6 +2618,7 @@ export class PiRpcAgentSession implements AgentSession {
         turnId,
         error: errorMessage,
       });
+      this.drainPendingTurns();
       return;
     }
     const finalUsage = this.usagePoller.completeTurn(turnId);
@@ -2557,6 +2627,7 @@ export class PiRpcAgentSession implements AgentSession {
       provider: this.provider,
       turnId,
     });
+    this.drainPendingTurns();
     void this.refreshAfterTurn(finalUsage);
   }
 
