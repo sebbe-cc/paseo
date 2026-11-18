@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
 import type { DesktopWindowChromeMode } from "./window/chrome.js";
+import type {
+  HidBrokerSnapshot,
+  HidClaimResult,
+  HidDeviceOwner,
+  HidInputReport,
+  HidWriteResult,
+} from "./features/hid/types.js";
 
 // This preload runs in Electron's sandbox and is tsc-compiled (not bundled), so it MUST
 // NOT emit any runtime module load other than "electron" — a require() of a local or
@@ -43,6 +50,34 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
         agentId: string;
       } | null>,
   },
+  hid: {
+    identity: () => ipcRenderer.invoke("paseo:hid:identity") as Promise<{ windowId: string }>,
+    enumerate: () => ipcRenderer.invoke("paseo:hid:enumerate") as Promise<HidBrokerSnapshot>,
+    claim: (input: HidDeviceOwner & { deviceKey: string }) =>
+      ipcRenderer.invoke("paseo:hid:claim", input) as Promise<HidClaimResult>,
+    release: (input: HidDeviceOwner & { deviceKey: string }) =>
+      ipcRenderer.invoke("paseo:hid:release", input) as Promise<boolean>,
+    write: (input: HidDeviceOwner & { deviceKey: string; data: number[] }) =>
+      ipcRenderer.invoke("paseo:hid:write", input) as Promise<HidWriteResult>,
+    onDevicesChanged: (handler: EventHandler): (() => void) => {
+      const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => {
+        handler(payload as HidBrokerSnapshot);
+      };
+      ipcRenderer.on("paseo:hid:devices-changed", listener);
+      return () => {
+        ipcRenderer.removeListener("paseo:hid:devices-changed", listener);
+      };
+    },
+    onInput: (handler: EventHandler): (() => void) => {
+      const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => {
+        handler(payload as HidInputReport);
+      };
+      ipcRenderer.on("paseo:hid:input", listener);
+      return () => {
+        ipcRenderer.removeListener("paseo:hid:input", listener);
+      };
+    },
+  },
   events: {
     on: (event: string, handler: EventHandler): Promise<() => void> => {
       const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => {
@@ -58,6 +93,7 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
     openNew: (options?: { pendingOpenProjectPath?: string | null }) =>
       ipcRenderer.invoke("paseo:window:openNew", options),
     getCurrentWindow: () => ({
+      focusSelf: () => ipcRenderer.invoke("paseo:window:focusSelf"),
       minimize: () => ipcRenderer.invoke("paseo:window:minimize"),
       close: () => ipcRenderer.invoke("paseo:window:close"),
       toggleMaximize: () => ipcRenderer.invoke("paseo:window:toggleMaximize"),
