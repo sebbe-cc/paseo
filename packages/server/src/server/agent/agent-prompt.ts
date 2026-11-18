@@ -6,6 +6,7 @@ import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
+import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
@@ -353,9 +354,29 @@ export async function sendPromptToAgent(
   });
 }
 
+/**
+ * Title a session that has neither a title nor a user message yet from the text of its first
+ * turn. Human sends do this in the session; agent-driven first turns pass the text the sending
+ * agent wrote, not the wrapped prompt (fl-jgjrt7).
+ */
+export async function titleUntitledAgentFromText(params: {
+  agentManager: Pick<AgentManager, "setTitle">;
+  agentStorage: Pick<AgentStorage, "get">;
+  agentId: string;
+  text: string;
+}): Promise<void> {
+  const stored = await params.agentStorage.get(params.agentId);
+  if (!stored || stored.title || stored.lastUserMessageAt) return;
+  const { provisionalTitle } = resolveCreateAgentTitles({ initialPrompt: params.text });
+  if (provisionalTitle) await params.agentManager.setTitle(params.agentId, provisionalTitle);
+}
+
 /** Dispatch daemon-prepared context without reclassifying it as human input. */
 export async function sendPreparedPromptToAgent(
-  params: Omit<SendPromptToAgentParams, "source" | "messageId">,
+  params: Omit<SendPromptToAgentParams, "source" | "messageId"> & {
+    /** The sending agent's own text; titles the recipient when it has no title yet. */
+    titleText?: string | null;
+  },
 ): Promise<{ disposition: PromptDispatchDisposition }> {
   const unarchive = params.unarchive ?? true;
 
@@ -383,6 +404,15 @@ export async function sendPreparedPromptToAgent(
       await params.agentManager.archiveSnapshot(params.agentId, archivedAtToRestore);
     }
     throw error;
+  }
+
+  if (params.titleText) {
+    await titleUntitledAgentFromText({
+      agentManager: params.agentManager,
+      agentStorage: params.agentStorage,
+      agentId: params.agentId,
+      text: params.titleText,
+    });
   }
 
   if (params.sessionMode) {

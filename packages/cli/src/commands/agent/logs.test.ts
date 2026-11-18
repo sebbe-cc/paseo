@@ -37,7 +37,7 @@ describe("createFollowTranscriptWriter", () => {
       { type: "assistant_message", text: "-cycle label\n", messageId: "msg_1" },
     ]);
 
-    expect(output).toBe("the paseo-pr-cycle label\n");
+    expect(output).toBe("[Assistant] the paseo-pr-cycle label\n");
   });
 
   it("streams text as it arrives without inventing a line break", () => {
@@ -51,24 +51,24 @@ describe("createFollowTranscriptWriter", () => {
       text: "first line",
       messageId: "msg_1",
     });
-    expect(chunks.join("")).toBe("first line");
+    expect(chunks.join("")).toBe("[Assistant] first line");
 
     writer.push({
       type: "assistant_message",
       text: "\nsecond",
       messageId: "msg_1",
     });
-    expect(chunks.join("")).toBe("first line\nsecond");
+    expect(chunks.join("")).toBe("[Assistant] first line\nsecond");
 
     writer.push({
       type: "assistant_message",
       text: " line\n",
       messageId: "msg_1",
     });
-    expect(chunks.join("")).toBe("first line\nsecond line");
+    expect(chunks.join("")).toBe("[Assistant] first line\nsecond line");
 
     writer.end();
-    expect(chunks.join("")).toBe("first line\nsecond line\n");
+    expect(chunks.join("")).toBe("[Assistant] first line\nsecond line\n");
   });
 
   it("emits the same transcript the one-shot command prints for the same items", () => {
@@ -96,7 +96,7 @@ describe("createFollowTranscriptWriter", () => {
       { type: "assistant_message", text: "second", messageId: "msg_2" },
     ]);
 
-    expect(output).toBe("first\nsecond\n");
+    expect(output).toBe("[Assistant] first\n[Assistant] second\n");
   });
 
   it("does not merge fragments across turns", () => {
@@ -109,7 +109,7 @@ describe("createFollowTranscriptWriter", () => {
     writer.push({ type: "assistant_message", text: "second" }, "turn_2");
     writer.end();
 
-    expect(output).toBe("first\nsecond\n");
+    expect(output).toBe("[Assistant] first\n[Assistant] second\n");
   });
 
   it("prints the thought prefix once for a merged reasoning stream", () => {
@@ -150,7 +150,54 @@ describe("createFollowTranscriptWriter", () => {
       },
     ]);
 
-    expect(output).toBe("# Title\n\nBody\n");
+    expect(output).toBe("[Assistant] # Title\n\nBody\n");
+  });
+});
+
+describe("formatAgentActivityTranscript", () => {
+  it("labels an assistant reply that repeats the tool output above it", () => {
+    const items: AgentTimelineItem[] = [
+      {
+        type: "tool_call",
+        callId: "call_1",
+        name: "exec_command",
+        status: "completed",
+        error: null,
+        detail: { type: "plain_text", text: "Output:\nhello-qa-d1\n" },
+      },
+      { type: "assistant_message", text: "hello-qa-d1", messageId: "msg_1" },
+    ];
+
+    expect(formatAgentActivityTranscript(items).split("\n")).toEqual([
+      "[Exec command]",
+      "[Assistant] hello-qa-d1",
+    ]);
+  });
+
+  it("prints plugin timeline items with their plugin and kind", () => {
+    const items: AgentTimelineItem[] = [
+      {
+        type: "plugin",
+        id: "fork-origin",
+        pluginId: "letta-provider",
+        kind: "fork-origin",
+        version: 1,
+        data: { text: "Forked from conv-11bab72a" },
+      },
+      {
+        type: "plugin",
+        id: "telemetry",
+        pluginId: "top",
+        kind: "top-turn-telemetry",
+        version: 1,
+        data: { durationMs: 1392 },
+      },
+    ];
+
+    expect(formatAgentActivityTranscript(items).split("\n")).toEqual([
+      "[Plugin letta-provider: fork-origin] Forked from conv-11bab72a",
+      "[Plugin top: top-turn-telemetry]",
+    ]);
   });
 });
 

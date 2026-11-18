@@ -711,6 +711,37 @@ describe("WorkspaceGitServiceImpl", () => {
     );
   });
 
+  test("resolveRepoRoot re-reads a directory cached as not git before refusing it", async () => {
+    let isGit = false;
+    const service = createService({
+      getCheckoutSnapshotFacts: async (cwd: string) =>
+        isGit ? createCheckoutSnapshotFacts(cwd) : { isGit: false },
+      getCheckoutStatus: vi.fn(async (cwd: string) =>
+        isGit ? createCheckoutStatus(cwd) : ({ isGit: false } as const),
+      ),
+    });
+    expect((await service.getSnapshot(REPO_CWD)).git.isGit).toBe(false);
+
+    // The directory became a checkout (a new worktree) after it was first read.
+    isGit = true;
+    await expect(service.resolveRepoRoot(REPO_CWD)).resolves.toBe(REPO_CWD);
+
+    isGit = false;
+    service.dispose();
+  });
+
+  test("resolveRepoRoot names the directory when it is not a git checkout", async () => {
+    const service = createService({
+      getCheckoutSnapshotFacts: async () => ({ isGit: false }),
+      getCheckoutStatus: vi.fn(async () => ({ isGit: false }) as const),
+    });
+
+    await expect(service.resolveRepoRoot(REPO_CWD)).rejects.toThrow(
+      `Create worktree requires a git repository: ${REPO_CWD} is not a git checkout`,
+    );
+    service.dispose();
+  });
+
   test("non-forced workspace refresh does not reload GitHub or emit when state is unchanged", async () => {
     let nowMs = Date.parse("2026-04-12T00:00:00.000Z");
     const getPullRequestStatus = vi.fn(async () => createPullRequestStatusResult());
