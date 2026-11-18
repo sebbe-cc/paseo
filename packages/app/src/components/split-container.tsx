@@ -935,22 +935,25 @@ function removePaneFromSplitTree(node: SplitNode, paneId: string | null): SplitN
     return node.pane.id === paneId ? null : node;
   }
 
-  const children = node.group.children.flatMap((child) => {
+  const kept = node.group.children.flatMap((child, index) => {
     const nextChild = removePaneFromSplitTree(child, paneId);
-    return nextChild ? [nextChild] : [];
+    return nextChild ? [{ node: nextChild, size: node.group.sizes[index] ?? 0 }] : [];
   });
-  if (children.length === 0) {
+  if (kept.length === 0) {
     return null;
   }
-  if (children.length === 1) {
-    return children[0] ?? null;
+  if (kept.length === 1) {
+    return kept[0]?.node ?? null;
   }
+  // The remaining children keep their proportions, so a split sized beside the docked Explorer
+  // (a plugin's narrow pane) keeps its size; equal sizes only when none were recorded.
+  const total = kept.reduce((sum, one) => sum + one.size, 0);
   return {
     kind: "group",
     group: {
       ...node.group,
-      children,
-      sizes: children.map(() => 1 / children.length),
+      children: kept.map((one) => one.node),
+      sizes: kept.map((one) => (total > 0 ? one.size / total : 1 / kept.length)),
     },
   };
 }
