@@ -638,6 +638,52 @@ describe("PluginService", () => {
     await service.stopAllPlugins();
   });
 
+  it("exposes plugin CLI descriptors and runtime RPC methods in the list", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
+    roots.push(home);
+    const directory = await createPlugin("wf-plugin", "export default () => () => {};");
+    await writeFile(
+      path.join(directory, "paseo-plugin.json"),
+      JSON.stringify({
+        id: "wf-plugin",
+        cli: {
+          name: "wf",
+          commands: [
+            {
+              name: "start",
+              rpc: "runs.start",
+              args: [{ name: "workflow" }],
+              options: [{ name: "provider" }],
+            },
+          ],
+        },
+      }),
+    );
+    const paused = createPausedRuntime();
+    const store = createStore(home, { "wf-plugin": { source: "directory", path: directory } });
+    await store.patch({ pluginsEnabled: false });
+    const service = new PluginService(pino({ level: "silent" }), store, "0.4.0", {
+      runtime: {
+        ...paused.runtime,
+        getRpcMethods: (pluginId: string) =>
+          pluginId === "wf-plugin" ? ["runs.start", "runs.status"] : undefined,
+      },
+    });
+    await service.start();
+
+    expect(await service.listPlugins()).toMatchObject([
+      {
+        id: "wf-plugin",
+        cli: {
+          name: "wf",
+          commands: [{ name: "start", rpc: "runs.start" }],
+        },
+        rpcMethods: ["runs.start", "runs.status"],
+      },
+    ]);
+    await service.stopAllPlugins();
+  });
+
   it("names a missing explicit directory instead of trying a managed source", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
     roots.push(home);
