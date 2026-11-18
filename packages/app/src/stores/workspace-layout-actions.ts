@@ -216,6 +216,8 @@ interface SplitPaneEmptyInLayoutInput {
   layout: WorkspaceLayout;
   targetPaneId: string;
   position: "left" | "right" | "top" | "bottom";
+  /** The new pane's share of the target pane's space (0.1-0.9); half when absent. */
+  size?: number;
   createNodeId: (prefix: WorkspaceLayoutNodeIdPrefix) => string;
   maxTreeDepth: number;
 }
@@ -1973,13 +1975,17 @@ export function splitPaneEmptyInLayout(
   const targetIndex = targetPath[targetPath.length - 1] ?? 0;
   const parentNode = findParentGroup(layout.root, targetPath);
 
+  const share =
+    input.size === undefined || !Number.isFinite(input.size)
+      ? 0.5
+      : Math.min(1 - MIN_SPLIT_SIZE, Math.max(MIN_SPLIT_SIZE, input.size));
   let nextRoot: SplitNodeInternal;
   if (parentNode?.kind === "group" && parentNode.group.direction === direction) {
     const targetSize = parentNode.group.sizes[targetIndex] ?? 0;
     const nextSizes = parentNode.group.sizes.slice();
     const insertIndex = insertAfter ? targetIndex + 1 : targetIndex;
-    nextSizes.splice(insertIndex, 0, targetSize / 2);
-    nextSizes[targetIndex + (insertAfter ? 0 : 1)] = targetSize / 2;
+    nextSizes.splice(insertIndex, 0, targetSize * share);
+    nextSizes[targetIndex + (insertAfter ? 0 : 1)] = targetSize * (1 - share);
     nextRoot = replaceNodeAtPath(layout.root, parentPath, () =>
       insertChildIntoGroup(parentNode, { index: insertIndex, node: newPaneNode, sizes: nextSizes }),
     );
@@ -1988,7 +1994,7 @@ export function splitPaneEmptyInLayout(
       id: input.createNodeId("group"),
       direction,
       children: insertAfter ? [targetNode, newPaneNode] : [newPaneNode, targetNode],
-      sizes: [0.5, 0.5],
+      sizes: insertAfter ? [1 - share, share] : [share, 1 - share],
     });
     nextRoot = replaceNodeAtPath(layout.root, targetPath, () => newGroup);
   }

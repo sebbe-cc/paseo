@@ -27,6 +27,7 @@ export type {
   PluginIcon,
   PluginPanelLocation,
   PluginOpenPanelOptions,
+  PluginPanelSplit,
   PluginWorkspacePanelProps,
   PluginAgentPanelProps,
   PluginClientOpenPanelOptions,
