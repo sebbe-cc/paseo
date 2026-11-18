@@ -1004,9 +1004,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   async resolveRepoRoot(cwd: string, options?: WorkspaceGitReadOptions): Promise<string> {
-    const snapshot = await this.getSnapshot(cwd, options);
+    let snapshot = await this.getSnapshot(cwd, options);
+    // A cached "not git" can predate the checkout: a worktree created after the directory
+    // was first read gets no watcher event, so read it again before refusing (pa-i1fhe).
+    if (!snapshot.git.isGit && !options?.force) {
+      snapshot = await this.getSnapshot(cwd, { force: true, reason: "resolve-repo-root" });
+    }
     if (!snapshot.git.isGit) {
-      throw new Error("Create worktree requires a git repository");
+      throw new Error(
+        `Create worktree requires a git repository: ${resolve(cwd)} is not a git checkout. Use the project's main checkout or one of its worktrees as the source.`,
+      );
     }
 
     return snapshot.git.isPaseoOwnedWorktree

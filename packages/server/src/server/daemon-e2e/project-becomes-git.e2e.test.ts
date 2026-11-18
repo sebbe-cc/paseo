@@ -157,7 +157,7 @@ test("a failed worktree attempt before git init does not prevent creation afterw
     worktreeSlug: "after-init",
   };
   const before = await client.createWorkspace({ source });
-  expect(before.error).toBe("Create worktree requires a git repository");
+  expect(before.error).toContain("Create worktree requires a git repository");
 
   const gitProjectUpdate = waitForProjectUpdate(
     client,
@@ -193,4 +193,47 @@ test("a failed worktree attempt before git init does not prevent creation afterw
   expect(created.error).toBeNull();
   expect(created.workspace?.workspaceKind).toBe("worktree");
   expect(created.workspace?.projectId).toBe(added.project!.projectId);
+}, 30_000);
+
+test("creates a worktree workspace with another worktree's directory as the source", async () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "paseo-worktree-source-")));
+  const paseoHomeRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "paseo-wt-source-home-")));
+  cleanupPaths.add(root);
+  cleanupPaths.add(paseoHomeRoot);
+  const repo = path.join(root, "repo");
+  const linkedWorktree = path.join(root, "linked");
+  const git = (cwd: string, ...args: string[]) =>
+    execFile("git", ["-c", "user.name=Paseo Test", "-c", "user.email=test@getpaseo.dev", ...args], {
+      cwd,
+    });
+  await execFile("git", ["init", "-b", "main", repo]);
+  await writeFile(path.join(repo, "README.md"), "hi\n");
+  await git(repo, "add", "README.md");
+  await git(repo, "-c", "commit.gpgSign=false", "commit", "-m", "initial");
+  await git(repo, "worktree", "add", "-b", "linked", linkedWorktree);
+
+  const daemon = await createTestPaseoDaemon({ paseoHomeRoot, cleanup: false });
+  cleanupDaemons.add(daemon);
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  cleanupClients.add(client);
+  await client.connect();
+  await client.fetchAgents({ subscribe: {} });
+
+  const created = await client.createWorkspace({
+    source: {
+      kind: "worktree",
+      cwd: linkedWorktree,
+      action: "branch-off",
+      refName: "main",
+      branchName: "from-linked",
+      worktreeSlug: "from-linked",
+    },
+  });
+
+  expect(created.error).toBeNull();
+  expect(created.workspace?.workspaceKind).toBe("worktree");
+  const branch = await execFile("git", ["branch", "--show-current"], {
+    cwd: created.workspace!.workspaceDirectory,
+  });
+  expect(branch.stdout.trim()).toBe("from-linked");
 }, 30_000);
