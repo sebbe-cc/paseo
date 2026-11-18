@@ -20,10 +20,12 @@ export function nativeKeyboardInput(
 }
 
 import type { ChordState, ParsedShortcutBinding } from "../../keyboard-shortcuts";
+import type { BrowserShortcutPrefix } from "./electron-browser";
 export interface KeyboardPolicyInput {
   bindings: readonly ParsedShortcutBinding[];
   chordState?: ChordState;
   isMac: boolean;
   usesDesktopBindings: boolean;
   enabled: boolean;
+  extraPrefixes?: readonly BrowserShortcutPrefix[];
 }
