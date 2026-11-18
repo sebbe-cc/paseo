@@ -3,7 +3,7 @@
   "options": {
     "typeAware": false
   },
-  "ignorePatterns": [".dev/**"],
+  "ignorePatterns": [".dev/**", "packages/server/src/server/plugins/fixtures/**"],
   "plugins": ["react", "react-perf", "unicorn", "typescript", "oxc", "import", "promise"],
   "jsPlugins": ["./scripts/oxlint/paseo-plugin.mjs"],
   "categories": {
