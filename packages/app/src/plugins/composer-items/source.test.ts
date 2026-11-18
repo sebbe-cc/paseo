@@ -68,6 +68,9 @@ function plugin(): InstalledPlugin {
     themes: [],
     timelineTransformers: [],
     timelineRenderers: [],
+    timelineSelectionActions: [],
+    inlineDecorators: [],
+    workspaceLabelPresenters: [],
   };
 }
 
