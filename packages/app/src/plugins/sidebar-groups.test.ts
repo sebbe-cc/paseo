@@ -48,6 +48,8 @@ function installed(
     themes: [],
     timelineTransformers: [],
     timelineRenderers: [],
+    timelineSelectionActions: [],
+    inlineDecorators: [],
   };
 }
 
