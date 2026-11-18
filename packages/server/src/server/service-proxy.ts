@@ -794,16 +794,18 @@ export function createScriptProxyUpgradeHandler({
   routeStore: ServiceProxyRouteRegistry;
   logger: Logger;
   passthroughUnknown?: boolean;
-}): (req: IncomingMessage, socket: net.Socket, head: Buffer) => void {
+}): (req: IncomingMessage, socket: net.Socket, head: Buffer) => boolean {
   return (req, socket, head) => {
     const classification = routeStore.classifyHost(req.headers.host);
     if (classification.type !== "registered-service") {
       if (!passthroughUnknown) {
         socket.destroy();
+        return true;
       }
-      return;
+      return false;
     }
     proxyUpgradeRequest({ req, socket, head, route: classification.route, logger });
+    return true;
   };
 }
 
@@ -838,9 +840,10 @@ export interface ServiceProxySubsystem {
     publicBaseUrl?: string | null;
   }): ServiceProxyWorkspaceScriptProjection;
   middleware(): RequestHandler;
+  /** Returns true when the handler takes ownership of the upgrade socket. */
   upgradeHandler(options: {
     passthroughUnknown: boolean;
-  }): (req: IncomingMessage, socket: net.Socket, head: Buffer) => void;
+  }): (req: IncomingMessage, socket: net.Socket, head: Buffer) => boolean;
   startStandalone(options: {
     listenTarget: ServiceProxyListenTarget;
   }): Promise<ServiceProxyListenTarget>;
@@ -934,7 +937,7 @@ class NodeServiceProxySubsystem implements ServiceProxySubsystem {
 
   upgradeHandler(options: {
     passthroughUnknown: boolean;
-  }): (req: IncomingMessage, socket: net.Socket, head: Buffer) => void {
+  }): (req: IncomingMessage, socket: net.Socket, head: Buffer) => boolean {
     // Pass passthroughUnknown explicitly: the factory defaults it to true, the
     // subsystem requires callers to choose.
     return createScriptProxyUpgradeHandler({
