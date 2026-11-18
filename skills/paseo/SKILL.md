@@ -54,6 +54,8 @@ Choose `baseBranch` explicitly: `origin/main` selects the remote-tracking branch
 
 **`rename_workspace`** — `{ workspaceId, name }`. Rename workspace.
 
+**`set_workspace_background`** — `{ workspaceId, background }`. Hide a workspace from default lists and the sidebar (`true`) or show it again (`false`).
+
 ## Workspace scripts
 
 Configured `paseo.json` scripts use the same supervised lifecycle from tools and the CLI.
