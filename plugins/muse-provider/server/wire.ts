@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const fingerprint =
-  "sha256:e0e163db6ccf00dbe68402ce55d6319b3edc33c421f31e9583b587b2de8a118f";
+  "sha256:c94c3d1f2f51e6424074b9ec43eac3eedcf532d3dcd77351ec1383a87d3049c6";
 export const effortSchema = z.enum([
   "none",
   "minimal",
@@ -240,6 +240,9 @@ export const pageSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 export const gapSchema = z.object({ after: z.string(), next: z.string() });
+export const sessionReadSchema = z
+  .object({ session: z.object({ activeTurnId: z.string().nullable() }).passthrough() })
+  .passthrough();
 export const sessionListSchema = z.object({
   nextCursor: z.string().nullable(),
   sessions: z.array(
@@ -249,6 +252,12 @@ export const sessionListSchema = z.object({
       title: z.string().optional(),
       updatedAt: z.string(),
       modelId: z.string().nullable(),
+      // MSP Session.kind (spec 42713 FR-001, open enum: "root" | "subagent").
+      // Absence asserts nothing, so only a positive "subagent" filters.
+      kind: z.string().optional(),
+      // MSP Session.parentSessionId (spec 42713 FR-002): the containing
+      // session's id when kind is "subagent". A root carries none.
+      parentSessionId: z.string().nullable().optional(),
     }),
   ),
 });
