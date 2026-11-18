@@ -1204,6 +1204,15 @@ export const en = {
       description: "Check your connection and try again.",
     },
   },
+  globalVoice: {
+    choose: "Choose a voice target from an agent tab",
+    off: "Voice off · {{name}}",
+    makeTarget: "Make voice-target",
+    active: "Talking to {{name}}",
+    muted: "Muted · {{name}}",
+    connecting: "Connecting to {{name}}…",
+    agent: "agent",
+  },
   sidebar: {
     view: {
       failed: "Sidebar view failed to load.",
@@ -2657,6 +2666,8 @@ export const en = {
     diagnostics: {
       title: "Diagnostics",
       testAudio: "Test audio",
+      thinkingTone: "Thinking tone in voice mode",
+      thinkingToneHint: "Beep while the agent works on a voice reply",
       playTest: "Play test",
       playing: "Playing...",
       playbackFailed: "Playback failed: {{message}}",
@@ -2844,6 +2855,7 @@ export const en = {
         cycleTheme: "Cycle theme",
         focusMessageInput: "Focus message input",
         cycleAgentMode: "Cycle agent mode",
+        toggleGlobalVoice: "Toggle global voice",
         toggleVoiceMode: "Toggle voice mode",
         startStopDictation: "Start/stop dictation",
         interruptAgent: "Interrupt agent",
