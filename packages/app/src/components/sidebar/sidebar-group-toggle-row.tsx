@@ -8,6 +8,7 @@ import { isWeb } from "@/constants/platform";
 import { sidebarWorkspaceRowStyles } from "@/components/sidebar/sidebar-workspace-row-content";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { density, densityIconBox } from "@/styles/density";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 /**
  * The row that ends a truncated group. It is a workspace row that happens to say "Show more", so
@@ -50,6 +51,8 @@ export function SidebarGroupToggleRow({
       onPress={onPress}
       style={rowStyle}
       highlightStyle={styles.rowPressed}
+      aria-expanded={expanded}
+      dataSet={NAV_ROW_DATASET}
       testID={testID}
     >
       {({ hovered, pressed }) => (
