@@ -1,9 +1,13 @@
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render } from "../../output/index.js";
 import { permitResponseSchema, toPermissionResponseItem } from "./allow.js";
-import { listPendingPermissions } from "./ls.js";
+import type { Command } from "commander";
+import { listPendingPermissions, runLsCommand } from "./ls.js";
+
+const { connectToDaemon } = vi.hoisted(() => ({ connectToDaemon: vi.fn() }));
+vi.mock("../../utils/client.js", () => ({ connectToDaemon }));
 
 const agentId = "2d85f428-fdaf-4d98-906f-c583de2b805f";
 
@@ -41,5 +45,33 @@ describe("permit allow and deny output", () => {
       requestId: string;
     }>;
     expect(answered.map((item) => item.requestId)).toEqual([writeRequest.id]);
+  });
+});
+
+describe("permit ls", () => {
+  it("lists pending permissions of background agents on every directory page", async () => {
+    const pages = [
+      { entries: [{ agent: { id: "a1", pendingPermissions: [] } }], pageInfo: { nextCursor: "c" } },
+      {
+        entries: [{ agent: { ...agent, background: true } }],
+        pageInfo: { nextCursor: null },
+      },
+    ];
+    const requests: unknown[] = [];
+    const client = {
+      async fetchAgents(options: unknown) {
+        requests.push(options);
+        return pages[requests.length - 1];
+      },
+      async close() {},
+    };
+    connectToDaemon.mockResolvedValue(client);
+
+    const result = await runLsCommand({}, {} as Command);
+
+    expect(result.data.map((item) => item.id)).toEqual([writeRequest.id, editRequest.id]);
+    expect(requests[0]).toMatchObject({
+      filter: { includeArchived: true, includeBackground: true },
+    });
   });
 });
