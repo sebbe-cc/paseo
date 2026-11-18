@@ -8,7 +8,11 @@ import { currentBootId } from "../server/pid-lock.js";
 import { PRIVATE_FILE_MODE } from "../server/private-files.js";
 import { createTerminalManager } from "./terminal-manager.js";
 import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
-import type { TerminalExitInfo, LocalTerminalSession } from "./terminal.js";
+import type {
+  TerminalCommandCompletionState,
+  TerminalExitInfo,
+  LocalTerminalSession,
+} from "./terminal.js";
 import { attachFramedSocket, type FramedSocket } from "./terminal-worker-frames.js";
 import { createTerminalWorkerProcessInspector } from "./terminal-worker-processes.js";
 import {
@@ -174,6 +178,10 @@ function runWorker(argv: string[]): void {
   const manager = createTerminalManager();
   const inspector = createTerminalWorkerProcessInspector();
   const sessionsById = new Map<string, LocalTerminalSession>();
+  // Last foreground-command completion per terminal, counted from the worker's own
+  // subscriptions so nothing is lost while no daemon is attached. Survives daemon
+  // restarts with the worker; adoption carries it to the new daemon.
+  const lastCommandFinishedByTerminalId = new Map<string, TerminalCommandCompletionState>();
   const unsubscribeByTerminalId = new Map<string, Array<() => void>>();
   const outputCoalescerByTerminalId = new Map<string, TerminalOutputCoalescer>();
   // A terminal is published (terminalCreated) only once its program is recorded. An exit that
@@ -311,6 +319,7 @@ function runWorker(argv: string[]): void {
       }
     }
     unsubscribeByTerminalId.delete(terminalId);
+    lastCommandFinishedByTerminalId.delete(terminalId);
     const coalescer = outputCoalescerByTerminalId.get(terminalId);
     if (coalescer) {
       coalescer.dispose();
@@ -384,10 +393,16 @@ function runWorker(argv: string[]): void {
     });
     const unsubscribeCommandFinished = session.onCommandFinished((info) => {
       outputCoalescer.flush();
+      const previous = lastCommandFinishedByTerminalId.get(session.id);
+      const completed: TerminalCommandCompletionState = {
+        seq: (previous?.seq ?? 0) + 1,
+        exitCode: info.exitCode,
+      };
+      lastCommandFinishedByTerminalId.set(session.id, completed);
       sendToController({
         type: "terminalCommandFinished",
         terminalId: session.id,
-        info,
+        info: completed,
       });
     });
     const unsubscribeActivity = session.onActivityChange((transition) => {
@@ -526,6 +541,7 @@ function runWorker(argv: string[]): void {
         state: terminalMetadata(session),
         activityToken: manager.getTerminalActivityToken(session.id),
         replayPreamble: session.getReplayPreamble(),
+        lastCommandFinished: lastCommandFinishedByTerminalId.get(session.id) ?? null,
       };
     });
   }
