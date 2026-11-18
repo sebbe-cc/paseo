@@ -27,6 +27,9 @@ vi.hoisted(() => {
   });
 });
 
+// The timeline cursor registers with the app-level keyboard dispatcher, which these tests omit.
+vi.mock("@/hooks/use-keyboard-action-handler", () => ({ useKeyboardActionHandler: () => {} }));
+
 vi.mock("react-native-unistyles", () => ({
   StyleSheet: { create: () => ({}) },
   withUnistyles: (Component: React.ComponentType) => Component,
