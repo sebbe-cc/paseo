@@ -738,6 +738,7 @@ export class VoiceAssistantWebSocketServer {
           sessionMode: batch.sessionMode,
           clearPendingPermissions: batch.clearPendingPermissions,
           unarchive: batch.unarchive,
+          titleText: batch.titleText,
           runOptions: { clientMessageId: batch.messageIds[0] },
           onDispatch: batch.onDispatch,
           logger: this.logger,

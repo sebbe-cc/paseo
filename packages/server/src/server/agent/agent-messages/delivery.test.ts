@@ -313,3 +313,37 @@ test("runtime safety sees queued messages until provider dispatch settles", asyn
   await delivery.close();
   expect(delivery.hasPending("parent")).toBe(false);
 });
+
+test("a batch carries the first agent message's own text for titling, never a notification's", async () => {
+  const clock = createClock();
+  const titles: Array<string | null> = [];
+  const delivery = createAgentMessageDelivery({
+    schedule: clock.schedule,
+    dispatch: async (batch) => {
+      titles.push(batch.titleText);
+      return "steered";
+    },
+    onError: (error) => {
+      throw error;
+    },
+  });
+  delivery.enqueue({
+    recipientId: "child",
+    prompt: "Worker finished",
+    source: { kind: "agent-notification", agentId: "worker", event: "finished" },
+  });
+  delivery.enqueue({
+    recipientId: "child",
+    prompt: [{ type: "text", text: "  Audit the nightly build  " }],
+    source: { kind: "agent-message", agentId: "parent" },
+  });
+  delivery.enqueue({
+    recipientId: "notified",
+    prompt: "Worker finished",
+    source: { kind: "agent-notification", agentId: "worker", event: "finished" },
+  });
+  clock.advance(2000);
+  await delivery.close();
+
+  expect(titles).toEqual(["Audit the nightly build", null]);
+});

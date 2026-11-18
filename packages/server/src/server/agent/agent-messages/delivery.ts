@@ -33,6 +33,12 @@ interface DispatchRequest {
   sessionMode?: string;
   clearPendingPermissions: boolean;
   unarchive: boolean;
+  /**
+   * The text other agents wrote in this batch, before the agent-message wrapper. An untitled
+   * recipient takes its title from it, the way a human send titles from its text. Null when the
+   * batch holds only notifications, which never title a session.
+   */
+  titleText: string | null;
   onDispatch(disposition: PromptDispatchDisposition): void;
 }
 interface Dependencies {
@@ -49,6 +55,20 @@ export interface AgentMessageDelivery {
   close(): Promise<void>;
   /** Existing completion waits include agent messages admitted before the wait. */
   waitForDispatch(recipientId: string, signal: AbortSignal): Promise<void>;
+}
+
+function promptText(prompt: AgentPromptInput): string {
+  return typeof prompt === "string"
+    ? prompt
+    : prompt.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
+function agentMessageTitleText(messages: readonly Message[]): string | null {
+  const text = messages
+    .filter((message) => message.source.kind === "agent-message")
+    .map((message) => promptText(message.prompt).trim())
+    .find((entry) => entry.length > 0);
+  return text ?? null;
 }
 
 /** Recipient-owned agent delivery. Human prompts never enter this module. */
@@ -82,6 +102,7 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
       sessionMode: messages.find((message) => message.sessionMode)?.sessionMode,
       clearPendingPermissions: messages.some((message) => message.clearPendingPermissions),
       unarchive: messages.some((message) => message.unarchive !== false),
+      titleText: agentMessageTitleText(messages),
       onDispatch: (disposition) => {
         for (const message of messages) {
           try {
