@@ -18,6 +18,10 @@ const display: UsageDisplay = {
   setDisplayAs: () => {},
   isPinned: () => false,
   togglePin: () => {},
+  arrange: (reports) => [...reports],
+  arrangeCards: () => {},
+  isCardOn: () => true,
+  setCardOn: () => {},
 };
 
 function entryWithObservedAt(observedAt: string): UsageReportEntry {
