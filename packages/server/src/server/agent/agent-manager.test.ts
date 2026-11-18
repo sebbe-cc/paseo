@@ -14597,6 +14597,8 @@ test("idle cleanup gives a newly restored runtime a fresh idle window while keep
   // Sweeping 61 minutes after restoration collects the runtime as expected.
   expect((await h.sweep({ now: h.later(61) })).collected).toHaveLength(1);
   expect(h.closes).toBe(closesBeforeRestore + 1);
+});
+
 test("plugin reload hot-swaps native tools without restarting the live session", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-plugin-refresh-"));
   const toolV1: AttachedAgentTool = {
