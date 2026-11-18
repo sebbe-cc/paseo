@@ -5,7 +5,18 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { MuseError, classifyExit } from "./errors.js";
+import { assertDaemonSocket } from "./options.js";
 import { frameSchema, initializedSchema, fingerprint } from "./wire.js";
+
+/**
+ * Budget for session/start and session/resume (pa-89is1.21). The first session
+ * operation on a fresh `muse serve` (an own host, or the shared daemon after a
+ * restart) scans every session in the store before it answers: with 3000
+ * sessions that took 1.5-3.7 s at load 30, 2.3-6.6 s for a cold daemon, and up
+ * to 13.5 s for an own host at load 40 with fsync-heavy IO, against 0.1-0.25 s
+ * on an empty store. A daemon that does not answer still fails, after this.
+ */
+export const SESSION_OPEN_TIMEOUT_MS = 30000;
 
 export function commandId(): string {
   const bytes = randomBytes(16);
@@ -25,6 +36,7 @@ export interface Notification {
   method: string;
   params: unknown;
 }
+export type MspHost = Pick<MspConnection, "request" | "command">;
 
 export class MspConnection {
   private readonly child;
@@ -48,6 +60,9 @@ export class MspConnection {
     },
   ) {
     const { launch, cwd } = options;
+    // `--join` starts a daemon of its own when none runs; a session meant for
+    // the shared daemon must fail instead (no silent own-process fallback).
+    if (options.serveArgs?.includes("--join")) assertDaemonSocket(launch.env);
     this.child = spawnProcess(
       launch.command,
       [...launch.args, "serve", ...(options.serveArgs ?? [])],
@@ -113,7 +128,12 @@ export class MspConnection {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
   }
-  async command<T, P extends object>(method: string, params: P, schema: z.ZodType<T>): Promise<T> {
+  async command<T, P extends object>(
+    method: string,
+    params: P,
+    schema: z.ZodType<T>,
+    timeoutMs?: number,
+  ): Promise<T> {
     const id =
       "commandId" in params && typeof params.commandId === "string"
         ? params.commandId
@@ -121,7 +141,7 @@ export class MspConnection {
     const input = { ...params, commandId: id };
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.request(method, input, schema);
+        return await this.request(method, input, schema, timeoutMs);
       } catch (error) {
         const retryable =
           error instanceof MuseError && ["overloaded", "backpressured"].includes(error.kind);
@@ -134,15 +154,16 @@ export class MspConnection {
     method: string,
     params: object,
     schema: z.ZodType<T>,
-    timeoutMs = this.options.timeoutMs ?? 10000,
+    timeoutMs: number | undefined = undefined,
   ): Promise<T> {
+    timeoutMs ??= this.options.timeoutMs ?? 10000;
     if (this.failure) throw this.failure;
     if (this.closing) throw new MuseError("closed", "Muse host is closing");
     const id = ++this.sequence;
     const response = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new MuseError("timeout", `Muse ${method} timed out`));
+        reject(new MuseError("timeout", `Muse ${method} timed out after ${timeoutMs / 1000} s`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
@@ -162,12 +183,25 @@ export class MspConnection {
       delay(1000, undefined, { ref: false }).then(() => false),
     ]);
     if (drained) return;
-    await terminateProcess(this.child);
+    await terminateProcess(this.child).catch(() => {});
     const stopped = await Promise.race([
       this.exited.then(() => true),
       delay(5000, undefined, { ref: false }).then(() => false),
     ]);
-    if (!stopped) throw new MuseError("timeout", "Muse host did not close after termination");
+    if (stopped) return;
+    // A host that stays up (or whose pipe a child keeps open) must not take
+    // the daemon down with an unhandled rejection: log, kill again, and
+    // release the pipes instead of throwing.
+    process.stderr.write(
+      `Muse host did not close after termination (pid ${this.child.pid ?? "unknown"}); force-killing it\n`,
+    );
+    await terminateProcess(this.child).catch(() => {});
+    try {
+      this.child.kill("SIGKILL");
+    } catch {}
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
   }
   private write(frame: object): void {
     this.child.stdin.write(JSON.stringify(frame) + "\n");
