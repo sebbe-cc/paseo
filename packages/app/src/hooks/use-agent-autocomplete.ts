@@ -167,6 +167,8 @@ function mapDirectorySuggestionsToEntries(payload: {
 const CLIENT_COMMAND_ICONS = {
   "archive-agent": "archive",
   "replace-agent-with-draft": "new-draft",
+  // Fork voice command (feat/plugin-voice-provider); 0.16 #8905 needs an icon per client command.
+  "make-voice-target": "command",
 } as const satisfies Record<ClientSlashCommand["kind"], AutocompleteOption["icon"]>;
 
 interface CommandOptionContext {

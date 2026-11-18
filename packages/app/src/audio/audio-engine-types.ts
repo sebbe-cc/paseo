@@ -10,6 +10,13 @@ export interface AudioPlaybackSource {
   arrayBuffer(): Promise<ArrayBuffer>;
   size: number;
   type: string;
+  /** Ordered PCM chunks share one queue entry and one continuous playback clock. */
+  stream?: (signal: AbortSignal) => AsyncIterable<AudioPlaybackStreamChunk>;
+}
+
+export interface AudioPlaybackStreamChunk {
+  audio: AudioPlaybackSource;
+  onPlayed(): void;
 }
 
 export interface AudioEngine {

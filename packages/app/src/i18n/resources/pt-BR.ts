@@ -1220,6 +1220,7 @@ export const ptBR: TranslationResources = {
       description: "Verifique sua conexão e tente novamente.",
     },
   },
+  globalVoice: en.globalVoice,
   sidebar: {
     view: {
       failed: "Não foi possível carregar a visualização da barra lateral.",
@@ -2564,6 +2565,8 @@ export const ptBR: TranslationResources = {
     diagnostics: {
       title: "Diagnósticos",
       testAudio: "Testar áudio",
+      thinkingTone: "Tom de espera no modo de voz",
+      thinkingToneHint: "Bipar enquanto o agente prepara uma resposta de voz",
       playTest: "Reproduzir teste",
       playing: "Reproduzindo...",
       playbackFailed: "Falha na reprodução: {{message}}",
@@ -2753,6 +2756,7 @@ export const ptBR: TranslationResources = {
         cycleTheme: "Alternar tema",
         focusMessageInput: "Focar entrada de mensagem",
         cycleAgentMode: "Alternar modo do agente",
+        toggleGlobalVoice: "Ativar ou desativar voz global",
         toggleVoiceMode: "Alternar modo de voz",
         startStopDictation: "Iniciar/parar ditado",
         interruptAgent: "Interromper agente",

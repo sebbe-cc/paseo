@@ -19,6 +19,7 @@ export type MessageInputKeyboardActionKind =
   | "mode-cycle";
 
 export type KeyboardActionId =
+  | "voice.global.toggle"
   | "agent.interrupt"
   | "agent.new"
   | "workspace.tab.menu.open"
