@@ -831,6 +831,14 @@ export interface RetiredInternalAgent {
   lastMessage: string | null;
 }
 
+/** A reload's launch env: a new one replaces the stored one for this session and later resumes. */
+function reloadLaunchEnv(
+  stored: Record<string, string> | undefined,
+  options: { launchEnv?: Record<string, string> } | undefined,
+): Record<string, string> | undefined {
+  return options?.launchEnv ? { ...options.launchEnv } : stored;
+}
+
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly retiredInternalAgents = new Map<
@@ -1945,7 +1953,7 @@ export class AgentManager {
   reloadAgentSession(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: { rehydrateFromDisk?: boolean; launchEnv?: Record<string, string> },
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
@@ -2000,11 +2008,12 @@ export class AgentManager {
   private async reloadAgentSessionInternal(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: { rehydrateFromDisk?: boolean; launchEnv?: Record<string, string> },
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     let existing = await this.cancelRunForReload(agentId);
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
+    const launchEnv = reloadLaunchEnv(existing.launchEnv, options);
     const preservedHistoryPrimed = existing.historyPrimed;
     const preservedLastUsage = existing.lastUsage;
     const preservedLastError = existing.lastError;
@@ -2020,7 +2029,7 @@ export class AgentManager {
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       refreshConfig,
       agentId,
-      { env: existing.launchEnv },
+      { env: launchEnv },
     );
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
@@ -2029,7 +2038,7 @@ export class AgentManager {
       client,
       storedConfig.cwd,
       paseoToolPolicy,
-      existing.launchEnv,
+      launchEnv,
       {
         reason: "refresh",
         purpose: "interactive",
@@ -2087,7 +2096,7 @@ export class AgentManager {
         workspaceId: existing.workspaceId,
         owner: existing.owner,
         background: existing.background,
-        launchEnv: existing.launchEnv,
+        launchEnv,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
         lastUserMessageAt: existing.lastUserMessageAt,
