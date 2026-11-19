@@ -1692,6 +1692,72 @@ test("gap backfill repairs a missing completion without duplicating item revisio
     1,
   );
 });
+// pa-89is1.25: a view/page read can outlast the 10 s request budget while the
+// native run stays healthy. The first page times out here; the retry replays
+// the same cursor and the turn completes once, with no session failure.
+test("a timed-out first view/page read retries with the same cursor and completes the turn", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_GAP: "1",
+    MUSE_TEST_HANG_FIRST_VIEW_PAGE: "1",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((e) => e.type === "session.turn" && e.state === "started");
+  await expect
+    .poll(() => h.events.find((e) => e.type === "session.turn" && e.state === "completed"), {
+      timeout: 25000,
+    })
+    .toBeDefined();
+  expect(h.events.filter((e) => e.type === "session.runtime_failed")).toEqual([]);
+  expect(h.events.filter((e) => e.type === "session.turn" && e.state === "completed")).toHaveLength(
+    1,
+  );
+  const pages = (await h.recorded()).filter((f) => f.method === "view/page");
+  expect(pages).toHaveLength(2);
+  expect(pages[0].params.cursor).toBe("fixture-last-cursor");
+  expect(pages[1].params.cursor).toBe(pages[0].params.cursor);
+  const messages = h.events.filter(
+    (e) => e.type === "timeline.item" && e.item.type === "assistant_message",
+  );
+  expect(messages.at(-1)).toMatchObject({ item: { text: expect.stringContaining("49/20") } });
+}, 45000);
+// pa-89is1.25: repeat timeouts stay bounded — three attempts, then one
+// observable session failure instead of an endless repair loop.
+test("repeated view/page timeouts fail the session after a bounded number of attempts", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_GAP: "1",
+    MUSE_TEST_HANG: "view/page",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((e) => e.type === "session.turn" && e.state === "started");
+  await expect
+    .poll(() => h.events.find((e) => e.type === "session.runtime_failed"), { timeout: 45000 })
+    .toMatchObject({ error: { message: expect.stringContaining("view/page timed out") } });
+  expect((await h.recorded()).filter((f) => f.method === "view/page")).toHaveLength(3);
+  await delay(12000);
+  expect((await h.recorded()).filter((f) => f.method === "view/page")).toHaveLength(3);
+  expect(h.events.filter((e) => e.type === "session.runtime_failed")).toHaveLength(1);
+}, 90000);
+// pa-89is1.25: closing while a view/page repair is hung ends the session
+// without failing it after the fact.
+test("closing during a hung view/page repair does not fail the session", async () => {
+  const h = await harness("text-reasoning", {
+    MUSE_TEST_GAP: "1",
+    MUSE_TEST_HANG: "view/page",
+  });
+  await h.open();
+  await h.prompt();
+  await h.wait((e) => e.type === "session.turn" && e.state === "started");
+  await expect
+    .poll(async () => (await h.recorded()).some((f) => f.method === "view/page"), {
+      timeout: 10000,
+    })
+    .toBe(true);
+  await h.send({ type: "session.close", sessionId: "paseo-session", requestId: "close" });
+  await h.wait((e) => e.type === "session.closed");
+  expect(h.events.filter((e) => e.type === "session.runtime_failed")).toEqual([]);
+}, 30000);
 test("silent active turns page after two minutes and stop polling on recovered terminal", async () => {
   const h = await harness("text-reasoning", { MUSE_TEST_SILENT: "1" });
   await h.open();

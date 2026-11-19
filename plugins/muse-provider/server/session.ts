@@ -236,6 +236,10 @@ export class Session {
             .then(async () => {
               const live = this.live();
               await live.recovery.backfill();
+              // A close during the repair ends the session: skip the child
+              // refresh so its host-closed read cannot fail the session after
+              // the fact (pa-89is1.25).
+              if (this.closing) return;
               return live.children.refresh();
             })
             .catch((error) => this.runtimeFailed(error));

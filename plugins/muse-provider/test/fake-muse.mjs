@@ -44,6 +44,8 @@ if (process.env.MUSE_TEST_REQUESTS)
 const catalogRows = readFixture("catalog-controls");
 const replacements = new Map();
 const counts = new Map();
+const hangFirstViewPages = Number(process.env.MUSE_TEST_HANG_FIRST_VIEW_PAGE || 0) || 0;
+let hungViewPages = 0;
 const receipts = new Set();
 let liveTurnId;
 const lines = createInterface({ input: process.stdin });
@@ -165,6 +167,13 @@ function rejectLoadedMcpConflict(frame) {
   }
   return false;
 }
+// pa-89is1.25: hang only the first N view/page reads so a client-side retry
+// can succeed; the hung reads are logged but never answered.
+function hangFirstViewPage(frame) {
+  if (frame.method !== "view/page" || hungViewPages >= hangFirstViewPages) return false;
+  hungViewPages++;
+  return true;
+}
 function controlResponse(frame) {
   if (refuseSaturatedJoin(frame)) return true;
   if (rejectLoadedMcpConflict(frame)) return true;
@@ -183,6 +192,7 @@ function controlResponse(frame) {
     return true;
   }
   if (process.env.MUSE_TEST_HANG === frame.method) return true;
+  if (hangFirstViewPage(frame)) return true;
   if (frame.method === "session/setReasoningEffort") {
     if (process.env.MUSE_TEST_REJECT_EFFORT) {
       rpcError(frame, -32601, "unknownMethod", "session/setReasoningEffort is not supported");
