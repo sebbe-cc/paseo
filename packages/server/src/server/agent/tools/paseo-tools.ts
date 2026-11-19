@@ -2387,6 +2387,51 @@ function createToolCatalog(
   );
 
   registerTool(
+    "set_workspace_background",
+    {
+      title: "Set workspace background",
+      description:
+        "Hide a workspace from default lists and the sidebar (background: true), or show it again (false). Its agents follow its visibility.",
+      inputSchema: {
+        workspaceId: z.string().trim().min(1, "workspaceId is required").describe("Workspace id."),
+        background: z.boolean().describe("True hides the workspace; false shows it."),
+      },
+      outputSchema: {
+        success: z.boolean(),
+        workspaceId: z.string(),
+        background: z.boolean(),
+      },
+    },
+    async ({ workspaceId, background }) => {
+      if (!options.workspaceRegistry) {
+        throw new Error("Workspace registry is required to change workspace visibility");
+      }
+      if (!options.emitWorkspaceUpdatesForWorkspaceIds) {
+        throw new Error("Workspace update emitter is required to change workspace visibility");
+      }
+      const existing = await options.workspaceRegistry.get(workspaceId);
+      if (!existing) {
+        throw new PaseoToolInputError(`Workspace ${workspaceId} not found`);
+      }
+      if (existing.archivedAt) {
+        throw new PaseoToolInputError(`Workspace ${workspaceId} is archived`);
+      }
+
+      await options.workspaceRegistry.upsert({
+        ...existing,
+        background,
+        updatedAt: new Date().toISOString(),
+      });
+      await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
+
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ success: true, workspaceId, background }),
+      };
+    },
+  );
+
+  registerTool(
     "list_workspace_scripts",
     {
       title: "List workspace scripts",

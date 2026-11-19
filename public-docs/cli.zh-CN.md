@@ -199,6 +199,7 @@ paseo workspace ls --background               # Also include background workspac
 paseo run --workspace <workspace-id> "implement authentication"
 paseo workspace rename <workspace-id> "Auth rework"
 paseo workspace rename <workspace-id> --reset   # back to the branch or directory name
+paseo workspace background <workspace-id> off   # show a background workspace again; on hides it
 paseo workspace archive <workspace-id>
 ```
 
