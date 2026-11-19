@@ -1,6 +1,6 @@
 import type { ProviderEvent, ProviderPermissionResponse } from "@getpaseo/plugin/server/provider";
 import type { z } from "zod";
-import { MspConnection } from "./connection.js";
+import type { MspHost } from "./connection.js";
 import { MuseError } from "./errors.js";
 import { ackSchema, questionSchema, questionAnswersSchema, settledQuestionSchema } from "./wire.js";
 
@@ -8,7 +8,7 @@ export class Questions {
   private readonly pending = new Map<string, z.infer<typeof questionSchema>>();
   private readonly settled = new Set<string>();
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly sessionId: string,
     private readonly id: string,
     private readonly emit: (event: ProviderEvent) => void,
