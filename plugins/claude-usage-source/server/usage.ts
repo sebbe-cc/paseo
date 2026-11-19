@@ -10,6 +10,7 @@ import {
   hashAccountKey,
   toneFromUsedPct,
   unavailable,
+  verifiedAccountIdentity,
   type UsageAccount,
   type UsageScope,
   windowFromUsedPct,
@@ -394,7 +395,19 @@ export async function discover(
         fetchApi,
         lookup.now ?? Date.now,
       );
-      accounts.push("status" in profile ? fallback : { ...profile, harness, input });
+      if ("status" in profile) {
+        accounts.push(fallback);
+      } else {
+        // Verified identity: the OAuth profile's account+organization, in
+        // the shared `claude:` namespace. Locator-hash accounts never carry
+        // one, so they can never authorize native fallback.
+        accounts.push({
+          ...profile,
+          identity: verifiedAccountIdentity("claude", profile.key),
+          harness,
+          input,
+        });
+      }
     } catch {
       // Keep the login visible; fetching usage reports the vendor failure.
       accounts.push(fallback);
@@ -605,6 +618,7 @@ export async function fetchUsage(
 
   return {
     status: "available",
+    ...attestedIdentity(profile),
     planLabel: plan ?? undefined,
     windows,
     balances: [],
@@ -636,6 +650,18 @@ function formatWait(ms: number): string {
 
 // The OAuth usage endpoint meters the active organization selected by the token.
 type ClaudeIdentity = { key: string; label?: string } | { status: number };
+
+/**
+ * Attests the verified identity whose credentials were actually read for
+ * this quota response. A rotated login file yields a different token here,
+ * so the registry discards the read instead of serving another account's
+ * quota. Omitted when no verified profile was available.
+ */
+function attestedIdentity(profile: ClaudeIdentity | undefined): { accountIdentity?: string } {
+  if (profile && !("status" in profile))
+    return { accountIdentity: verifiedAccountIdentity("claude", profile.key) };
+  return {};
+}
 const PROFILE_TTL_MS = 300_000;
 const PROFILE_CACHE_LIMIT = 128;
 const profileCache = new Map<string, { at: number; result: Promise<ClaudeIdentity> }>();

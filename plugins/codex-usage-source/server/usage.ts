@@ -5,6 +5,7 @@ import {
   balanceToneFromRemaining,
   hashAccountKey,
   unavailable,
+  verifiedAccountIdentity,
   type UsageAccount,
   type UsageScope,
   toneFromUsedPct,
@@ -214,6 +215,11 @@ export async function fetchUsage(
   const text = await response.text();
   if (text.trim().startsWith("<")) throw new Error("Codex usage API returned HTML");
   const usage = responseSchema.parse(JSON.parse(text));
+  // Attests the verified identity whose credentials were actually read for
+  // this quota response; omitted for unverified (locator) logins. A rotated
+  // login file yields a different identity here, so the registry discards
+  // the read instead of serving another account's quota.
+  const { identity: attestedIdentity } = accountIdentity(auth, input);
   const windows = [
     ...usageWindows({ rateLimit: usage.rate_limit, summary: true }),
     ...(usage.additional_rate_limits ?? []).flatMap((limit) => {
@@ -235,6 +241,7 @@ export async function fetchUsage(
   const balance = usage.credits?.balance;
   return {
     status: "available",
+    ...(attestedIdentity ? { accountIdentity: attestedIdentity } : {}),
     planLabel: usage.plan_type,
     windows,
     balances:
@@ -277,12 +284,15 @@ function claimString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function accountIdentity(auth: Auth, input: CodexUsageInput): { key: string; label?: string } {
+function accountIdentity(
+  auth: Auth,
+  input: CodexUsageInput,
+): { key: string; identity?: string; label?: string } {
   const access = jwtClaims(auth.token);
   const id = jwtClaims(auth.idToken);
   const accessAuth = claimObject(access, "https://api.openai.com/auth");
   const idAuth = claimObject(id, "https://api.openai.com/auth");
-  const key =
+  const verified =
     auth.accountId ??
     claimString(accessAuth?.["chatgpt_account_id"]) ??
     claimString(access?.["chatgpt_account_id"]) ??
@@ -293,7 +303,13 @@ function accountIdentity(auth: Auth, input: CodexUsageInput): { key: string; lab
     claimString(access?.["email"]) ??
     claimString(claimObject(id, "https://api.openai.com/profile")?.["email"]) ??
     claimString(id?.["email"]);
-  return { key: key ?? hashAccountKey(JSON.stringify(input.route)), ...(label ? { label } : {}) };
+  // Only a verified account id yields an identity; a locator hash never
+  // does, so unverified logins can never authorize native fallback.
+  return {
+    key: verified ?? hashAccountKey(JSON.stringify(input.route)),
+    ...(verified ? { identity: verifiedAccountIdentity("codex", verified) } : {}),
+    ...(label ? { label } : {}),
+  };
 }
 
 function harnessLabel(input: CodexUsageInput): string {
