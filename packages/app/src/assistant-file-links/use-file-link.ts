@@ -1,26 +1,33 @@
 import { useCallback, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import type { OpenFileDisposition } from "@/workspace/file-open";
+import type { AssistantFileResolveResult } from "@getpaseo/client/internal/daemon-client";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { formatFileLinkTooltipPath } from "./tooltip-path";
 import type { InlinePathTarget } from "./parse";
 import {
   useAssistantFileLinkResolverContext,
+  type AssistantFileLinkResolverConfig,
   type AssistantFileLinkResolverContextValue,
 } from "./provider";
+import { ASSISTANT_FILE_GC_MS, ASSISTANT_FILE_STALE_MS, assistantFileQueryKey } from "./queries";
 import {
+  classifyForBatch,
   classifyForResolution,
   fetchDaemonResolution,
   type AssistantFileLinkResolution,
   type AssistantFileLinkSource,
-  type AssistantFileLinkContext,
 } from "./resolver";
 
 export interface UseFileLinkResult {
   target: InlinePathTarget | null;
   tooltipPath: string | null;
+  /** The daemon batch check finished and the file does not exist. */
+  missing: boolean;
+  /** Roots the daemon searched, for the missing-file hint. */
+  searchedRoots: string[];
   onHoverIn: () => void;
   onPress: () => void;
   open: (source: AssistantFileLinkSource, disposition: OpenFileDisposition) => void;
@@ -30,6 +37,8 @@ export interface AssistantFileLinkActions {
   open(source: AssistantFileLinkSource, disposition: OpenFileDisposition): void;
   canOpen(source: AssistantFileLinkSource): boolean;
   canResolveFile(source: AssistantFileLinkSource): boolean;
+  /** True when the batch check already proved the file missing: no link, no toast. */
+  isMissingFile(source: AssistantFileLinkSource): boolean;
 }
 
 interface AssistantFileLinkLookupKey {
@@ -47,6 +56,49 @@ type AssistantFileLinkQueryKey = readonly [
 ];
 
 const DISABLED_QUERY_KEY = ["assistantFileLink", null, null, null] as const;
+const EMPTY_SEARCHED_ROOTS: string[] = [];
+
+function isBatchSupported(context: AssistantFileLinkResolverContextValue): boolean {
+  return context.batchSupported;
+}
+
+function batchQueryOptions(
+  context: AssistantFileLinkResolverContextValue,
+  serverId: string | undefined,
+  workspaceRoot: string | undefined,
+  candidate: string,
+) {
+  return {
+    queryKey: assistantFileQueryKey(serverId, workspaceRoot, candidate),
+    queryFn: async (): Promise<AssistantFileResolveResult | null> => {
+      const resolve = context.getAssistantFileResolution(candidate);
+      if (!resolve) {
+        throw new Error("Assistant file batch resolution is unavailable.");
+      }
+      return resolve;
+    },
+    staleTime: ASSISTANT_FILE_STALE_MS,
+    gcTime: ASSISTANT_FILE_GC_MS,
+    retry: 0,
+    refetchOnMount: false,
+  };
+}
+
+function batchTarget(
+  batch: { kind: "file"; candidate: string; lineStart?: number; lineEnd?: number },
+  result: AssistantFileResolveResult | null | undefined,
+  raw: string,
+): InlinePathTarget | null {
+  if (result?.status === "found" && result.absolutePath) {
+    return {
+      raw,
+      path: result.absolutePath,
+      ...(batch.lineStart !== undefined ? { lineStart: batch.lineStart } : {}),
+      ...(batch.lineEnd !== undefined ? { lineEnd: batch.lineEnd } : {}),
+    };
+  }
+  return null;
+}
 
 export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult {
   const { t } = useTranslation();
@@ -57,6 +109,27 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
   const workspaceRoot = activeConfig.workspaceRoot;
   const relativePathBase = activeConfig.relativePathBase;
   const serverId = activeConfig.serverId;
+  const batch = useMemo(
+    () => classifyForBatch(stableSource, { workspaceRoot, relativePathBase }),
+    [stableSource, workspaceRoot, relativePathBase],
+  );
+  const batchEnabled = batch.kind === "file" && isBatchSupported(context);
+  const batchQuery = useQuery({
+    ...batchQueryOptions(
+      context,
+      serverId,
+      workspaceRoot,
+      batch.kind === "file" ? batch.candidate : "",
+    ),
+    enabled: batchEnabled,
+  });
+  const batchResult = batchEnabled ? batchQuery.data : undefined;
+  const missing: boolean = batchEnabled ? batchResult?.status === "missing" : false;
+  const searchedRoots =
+    batchEnabled && batchResult
+      ? (batchResult.searchedRoots ?? EMPTY_SEARCHED_ROOTS)
+      : EMPTY_SEARCHED_ROOTS;
+
   const resolution = useMemo(
     () =>
       classifyForResolution(stableSource, {
@@ -133,21 +206,26 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
   });
 
   const target = useMemo(() => {
+    if (batchEnabled) {
+      if (batch.kind !== "file") return null;
+      return batchTarget(batch, batchResult, stableSource.text ?? stableSource.href);
+    }
     if (resolution.kind === "resolved") {
       return resolution.value.kind === "file" ? resolution.value.target : null;
     }
     return query.data ?? null;
-  }, [query.data, resolution]);
+  }, [batchEnabled, batch, batchResult, stableSource, resolution, query.data]);
 
   const tooltipPath = target ? formatFileLinkTooltipPath({ target, workspaceRoot }) : null;
   return useMemo(
-    () => ({ target, tooltipPath, onHoverIn, onPress, open }),
-    [target, tooltipPath, onHoverIn, onPress, open],
+    () => ({ target, tooltipPath, missing, searchedRoots, onHoverIn, onPress, open }),
+    [target, tooltipPath, missing, searchedRoots, onHoverIn, onPress, open],
   );
 }
 
 export function useAssistantFileLinkActions(): AssistantFileLinkActions {
   const context = useAssistantFileLinkResolverContext();
+  const queryClient = useQueryClient();
   const actionLink = useFileLink(ACTION_LINK_SOURCE);
 
   const open = useStableEvent(
@@ -157,19 +235,110 @@ export function useAssistantFileLinkActions(): AssistantFileLinkActions {
   );
   const canOpen = useCallback(
     (source: AssistantFileLinkSource) =>
-      canOpenAssistantFileLink(source, context.configRef.current),
-    [context.configRef],
+      canOpenAssistantFileLink(source, context.configRef.current, queryClient),
+    [context.configRef, queryClient],
   );
   const canResolveFile = useCallback(
     (source: AssistantFileLinkSource) =>
-      canResolveAssistantFileLinkToFile(source, context.configRef.current),
-    [context.configRef],
+      canResolveAssistantFileLinkToFile(source, context.configRef.current, queryClient),
+    [context.configRef, queryClient],
+  );
+  const isMissingFile = useCallback(
+    (source: AssistantFileLinkSource) =>
+      isBatchMissingFile(source, context.configRef.current, queryClient),
+    [context.configRef, queryClient],
   );
 
-  return useMemo(() => ({ open, canOpen, canResolveFile }), [open, canOpen, canResolveFile]);
+  return useMemo(
+    () => ({ open, canOpen, canResolveFile, isMissingFile }),
+    [open, canOpen, canResolveFile, isMissingFile],
+  );
+}
+
+function cachedBatchResult(
+  source: AssistantFileLinkSource,
+  config: AssistantFileLinkResolverConfig,
+  queryClient: ReturnType<typeof useQueryClient>,
+): AssistantFileResolveResult | null | undefined {
+  const batch = classifyForBatch(source, {
+    workspaceRoot: config.workspaceRoot,
+    relativePathBase: config.relativePathBase,
+  });
+  if (batch.kind !== "file") {
+    return undefined;
+  }
+  return (
+    queryClient.getQueryData<AssistantFileResolveResult | null>(
+      assistantFileQueryKey(config.serverId, config.workspaceRoot, batch.candidate),
+    ) ?? undefined
+  );
+}
+
+function isBatchMissingFile(
+  source: AssistantFileLinkSource,
+  config: AssistantFileLinkResolverConfig,
+  queryClient: ReturnType<typeof useQueryClient>,
+): boolean {
+  return cachedBatchResult(source, config, queryClient)?.status === "missing";
 }
 
 function openAssistantFileLink(input: {
+  source: AssistantFileLinkSource;
+  disposition: OpenFileDisposition;
+  context: AssistantFileLinkResolverContextValue;
+  queryClient: ReturnType<typeof useQueryClient>;
+  formatNoFileFoundMessage: (token: string) => string;
+}): void {
+  const capturedConfig = input.context.configRef.current;
+  const capturedBatch = classifyForBatch(input.source, {
+    workspaceRoot: capturedConfig.workspaceRoot,
+    relativePathBase: capturedConfig.relativePathBase,
+  });
+  if (capturedBatch.kind === "file" && isBatchSupported(input.context)) {
+    const run = async () => {
+      try {
+        const result = await input.queryClient.fetchQuery(
+          batchQueryOptions(
+            input.context,
+            capturedConfig.serverId,
+            capturedConfig.workspaceRoot,
+            capturedBatch.candidate,
+          ),
+        );
+        if (result?.status === "found" && result.absolutePath) {
+          await dispatchFileTarget({
+            target: {
+              raw: input.source.text ?? input.source.href,
+              path: result.absolutePath,
+              ...(capturedBatch.lineStart !== undefined
+                ? { lineStart: capturedBatch.lineStart }
+                : {}),
+              ...(capturedBatch.lineEnd !== undefined ? { lineEnd: capturedBatch.lineEnd } : {}),
+            },
+            disposition: input.disposition,
+            capturedServerId: capturedConfig.serverId,
+            capturedWorkspaceRoot: capturedConfig.workspaceRoot,
+            context: input.context,
+          });
+          return;
+        }
+        if (result?.status === "missing") {
+          // Proven missing: stay silent. The link already renders as plain
+          // code with a "saknas" mark — no error toast on click.
+          return;
+        }
+      } catch {
+        // Fall through to the legacy resolution below.
+      }
+      openAssistantFileLinkLegacy(input);
+    };
+    void run();
+    return;
+  }
+  openAssistantFileLinkLegacy(input);
+}
+
+function openAssistantFileLinkLegacy(input: {
   source: AssistantFileLinkSource;
   disposition: OpenFileDisposition;
   context: AssistantFileLinkResolverContextValue;
@@ -237,16 +406,26 @@ function openAssistantFileLink(input: {
 
 function canOpenAssistantFileLink(
   source: AssistantFileLinkSource,
-  context: AssistantFileLinkContext,
+  context: AssistantFileLinkResolverConfig,
+  queryClient: ReturnType<typeof useQueryClient>,
 ): boolean {
+  const cached = cachedBatchResult(source, context, queryClient);
+  if (cached) {
+    return cached.status === "found";
+  }
   const resolution = classifyForResolution(source, context);
   return resolution.kind === "needsLookup" || resolution.value.kind !== "ignored";
 }
 
 function canResolveAssistantFileLinkToFile(
   source: AssistantFileLinkSource,
-  context: AssistantFileLinkContext,
+  context: AssistantFileLinkResolverConfig,
+  queryClient: ReturnType<typeof useQueryClient>,
 ): boolean {
+  const cached = cachedBatchResult(source, context, queryClient);
+  if (cached) {
+    return cached.status === "found";
+  }
   const resolution = classifyForResolution(source, context);
   return resolution.kind === "needsLookup" || resolution.value.kind === "file";
 }
@@ -361,3 +540,46 @@ async function dispatchUnresolvedError(input: {
 const ACTION_LINK_SOURCE: AssistantFileLinkSource = {
   href: "",
 };
+
+/**
+ * Batch existence check for every file-link token of one message. One daemon
+ * `assistant_file_resolve_request` covers the message (react-query dedupes
+ * with the per-link hooks, the provider coalesces in-flight checks).
+ * Lives here because raw query hooks are confined to the burn-down list.
+ */
+export function useAssistantFileBatch(
+  candidates: string[],
+  input: { workspaceRoot?: string; serverId?: string },
+): { missing: ReadonlySet<string>; supported: boolean } {
+  const context = useAssistantFileLinkResolverContext();
+  const supported = Boolean(
+    context.batchSupported && input.workspaceRoot?.trim() && input.serverId,
+  );
+  const results = useQueries({
+    queries: candidates.map((candidate) => ({
+      queryKey: assistantFileQueryKey(input.serverId, input.workspaceRoot, candidate),
+      queryFn: async (): Promise<AssistantFileResolveResult | null> => {
+        const resolve = context.getAssistantFileResolution(candidate);
+        if (!resolve) {
+          throw new Error("Assistant file batch resolution is unavailable.");
+        }
+        return resolve;
+      },
+      staleTime: ASSISTANT_FILE_STALE_MS,
+      gcTime: ASSISTANT_FILE_GC_MS,
+      retry: 0,
+      refetchOnMount: false,
+      enabled: supported,
+    })),
+  });
+  const missing = useMemo(() => {
+    const absent = new Set<string>();
+    candidates.forEach((candidate, index) => {
+      if (results[index]?.data?.status === "missing") {
+        absent.add(candidate);
+      }
+    });
+    return absent;
+  }, [candidates, results]);
+  return useMemo(() => ({ missing, supported }), [missing, supported]);
+}
