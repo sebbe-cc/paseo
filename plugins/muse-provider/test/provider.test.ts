@@ -357,6 +357,62 @@ test("multi-stage approvals surface Stage 2 then Stage 3 and send the current re
       .map((frame) => frame.params.requirementId.sourceIndex),
   ).toEqual([1, 2]);
 });
+test("a readOutput that times out leaves the turn running and marks the diff unavailable", async () => {
+  const h = await harness("tools-edit", {
+    MUSE_TEST_DELAY_METHOD: "item/readOutput",
+    MUSE_TEST_DELAY_MS: "10000",
+  });
+  await h.open();
+  // Fake the clock before the prompt so the patch read's 30 s budget is a
+  // fake timer. Real I/O still flows; fake time only moves on advance, so the
+  // delayed host response cannot beat the budget for real.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  await h.prompt();
+  await h.wait((event) => event.type === "session.turn" && event.state === "started");
+  // The edit fold blocks on the delayed patch read, so the queue stalls with
+  // the turn still active. Settle for stillness: without the read attempt the
+  // queue would drain and the turn would complete on its own.
+  let settled = 0;
+  while (!h.events.some((event) => event.type === "session.turn" && event.state === "completed")) {
+    const seen = h.events.length;
+    await delay(50);
+    settled = h.events.length === seen ? settled + 1 : 0;
+    if (settled >= 40) break;
+  }
+  expect(
+    h.events.some((event) => event.type === "session.turn" && event.state === "completed"),
+  ).toBe(false);
+  // Trip the 30 s patch budget without waiting it out for real.
+  await vi.advanceTimersByTimeAsync(31000);
+  // The delayed response lands later in real time; the timed-out request is
+  // already gone, so it is ignored and the turn completes on the marker.
+  let completed = false;
+  for (let i = 0; i < 400 && !completed; i++) {
+    await delay(50);
+    completed = h.events.some(
+      (event) => event.type === "session.turn" && event.state === "completed",
+    );
+  }
+  expect(completed).toBe(true);
+  expect(h.events.filter((event) => event.type === "session.runtime_failed")).toEqual([]);
+  expect(h.events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "timeline.item",
+        item: expect.objectContaining({
+          type: "tool_call",
+          status: "completed",
+          detail: expect.objectContaining({
+            type: "edit",
+            unifiedDiff: expect.stringContaining(
+              "diff unavailable: Muse item/readOutput timed out after 30 s",
+            ),
+          }),
+        }),
+      }),
+    ]),
+  );
+}, 30000);
 test("Full access automatically answers every escalated stage with the published allow-once choice", async () => {
   const h = await harness("multi-stage-approval");
   await h.open(undefined, "allowAll");
@@ -1331,6 +1387,33 @@ test("interrupt timeout terminates the turn so a retry does not re-target the de
   expect(requests.filter((frame) => frame.method === "turn/interrupt")).toHaveLength(1);
   await h.connection.close();
 }, 60000);
+test("closing with an active turn sends turn/cancel for that turn", async () => {
+  const h = await harness("interrupt", { MUSE_TEST_ACTIVE_TURN: "1" });
+  await h.open();
+  await h.prompt();
+  const started = await h.wait(
+    (event) => event.type === "session.turn" && event.state === "started",
+  );
+  if (started.type !== "session.turn" || !started.turnId) throw new Error("Expected started turn");
+  await h.send({ type: "session.close", sessionId: "paseo-session", requestId: "close" });
+  await h.wait((event) => event.type === "session.closed");
+  expect(h.events.filter((event) => event.type === "session.runtime_failed")).toEqual([]);
+  const requests = await h.recorded();
+  const cancel = requests.find((frame) => frame.method === "turn/cancel");
+  expect(cancel?.params).toMatchObject({
+    turnId: started.turnId,
+    commandId: expect.stringMatching(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    ),
+  });
+  // The close path re-reads the session after the cancel: the run must be gone.
+  const cancelIndex = requests.findIndex((frame) => frame.method === "turn/cancel");
+  const reads = requests.filter((frame) => frame.method === "session/read");
+  expect(reads).toHaveLength(1);
+  expect(requests.findIndex((frame) => frame.method === "session/read")).toBeGreaterThan(
+    cancelIndex,
+  );
+});
 for (const [behavior, choiceId] of [
   ["allow", "allow_once"],
   ["deny", "abort"],

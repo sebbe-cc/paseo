@@ -54,6 +54,10 @@ import { Questions } from "./questions.js";
 import { Commands } from "./commands.js";
 import { installSessionEnvScripts, removeSessionEnv, writeSessionEnv } from "./session-env.js";
 
+// Bound for one turn/cancel on session close (pa-razvr0). Stopping an agent
+// must not wait out a wedged daemon: a miss is logged and close proceeds.
+const TURN_CANCEL_TIMEOUT_MS = 10000;
+
 interface SessionOptions {
   serveArgs: string[];
   // Daemon mode serves every host of this session from the shared Muse session
@@ -592,6 +596,9 @@ export class Session {
     });
   }
   async close(): Promise<void> {
+    // Cancel first: host.close() ends the --join host, and a turn the daemon
+    // still runs would otherwise keep working the worktree orphaned (pa-razvr0).
+    await this.cancelActiveTurn();
     this.closing = true;
     if (this.liveState) this.live().recovery.close();
     if (this.envDir && this.liveState)
@@ -599,6 +606,37 @@ export class Session {
     await this.host.close();
     await this.notifications;
     if (this.liveState) this.live().children.close();
+  }
+  // Stop or archive must leave no native run behind: when the session ends
+  // with a turn active, cancel it on the host before the host closes. Never
+  // throws: a failed cancel is logged and close still proceeds.
+  private async cancelActiveTurn(): Promise<void> {
+    const live = this.liveState;
+    if (!live) return;
+    // Local bookkeeping knows the usual case. When it lost the turn, ask the
+    // host — but not a sleeping one: it proved the native run idle when it
+    // slept, and only this session can start a turn (which wakes the host).
+    const turnId =
+      this.activeTurnIds().at(-1) ?? (this.host.awake ? await this.nativeActiveTurnId() : null);
+    if (!turnId) return;
+    try {
+      await this.host.request(
+        "turn/cancel",
+        { commandId: commandId(), sessionId: live.nativeId, turnId },
+        ackSchema,
+        TURN_CANCEL_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[muse-provider] Muse session ${live.nativeId}: turn/cancel for turn ${turnId} failed on close: ${reason}`,
+      );
+      return;
+    }
+    const stillActive = await this.nativeActiveTurnId();
+    console.warn(
+      `[muse-provider] Muse session ${live.nativeId}: cancelled turn ${turnId} on close; activeTurnId after cancel: ${stillActive ?? "none"}`,
+    );
   }
   private enqueue(notification: Notification): void {
     this.notifications = this.notifications

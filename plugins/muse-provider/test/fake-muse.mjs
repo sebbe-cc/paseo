@@ -264,7 +264,7 @@ function parityResponse(frame) {
     return true;
   }
   if (frame.method === "session/read" && sessionReadResponse(frame)) return true;
-  if (frame.method === "turn/interrupt" && interruptCancelResponse(frame)) return true;
+  if (cancelResponse(frame)) return true;
   if (frame.method === "usage/read") {
     const result = process.env.MUSE_TEST_USAGE
       ? JSON.parse(process.env.MUSE_TEST_USAGE)
@@ -332,9 +332,37 @@ function sessionReadResponse(frame) {
   respond(frame, result);
   return true;
 }
+function cancelResponse(frame) {
+  if (frame.method === "turn/interrupt") return interruptCancelResponse(frame);
+  if (frame.method === "turn/cancel") return stopCancelResponse(frame);
+  return false;
+}
 function interruptCancelResponse(frame) {
   if (!process.env.MUSE_TEST_ACTIVE_TURN) return false;
   respond(frame, {});
+  send({
+    jsonrpc: "2.0",
+    method: "turn/completed",
+    params: {
+      sessionId: frame.params.sessionId,
+      turnId: frame.params.turnId,
+      terminal: "cancelled",
+    },
+  });
+  return true;
+}
+// turn/cancel on session close (pa-razvr0): admit the cancel, end the tracked
+// run so a later session/read reports idle, and emit the cancelled terminal.
+function stopCancelResponse(frame) {
+  if (!process.env.MUSE_TEST_ACTIVE_TURN) return false;
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      frame.params.commandId,
+    )
+  )
+    throw new Error("Not UUIDv7");
+  if (frame.params.turnId === liveTurnId) liveTurnId = null;
+  respond(frame, { status: "accepted", commandId: frame.params.commandId });
   send({
     jsonrpc: "2.0",
     method: "turn/completed",

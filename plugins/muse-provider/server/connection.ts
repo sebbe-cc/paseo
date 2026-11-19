@@ -18,6 +18,14 @@ import { frameSchema, initializedSchema, fingerprint } from "./wire.js";
  */
 export const SESSION_OPEN_TIMEOUT_MS = 30000;
 
+/**
+ * Budget for item/readOutput (pa-razvr0). Patch bodies ride the same store
+ * scan as session open, so under host IO load they can outlast the 10 s
+ * default request budget while the turn itself is healthy. A miss still
+ * fails, after this.
+ */
+export const READ_OUTPUT_TIMEOUT_MS = 30000;
+
 export function commandId(): string {
   const bytes = randomBytes(16);
   bytes.writeUIntBE(Date.now(), 0, 6);

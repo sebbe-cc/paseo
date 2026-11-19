@@ -1,4 +1,5 @@
 import type { MspHost } from "./connection.js";
+import { READ_OUTPUT_TIMEOUT_MS } from "./connection.js";
 import { MuseError } from "./errors.js";
 import { todoSchema, outputSchema } from "./wire.js";
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
@@ -180,16 +181,28 @@ export class Timeline {
     if (item.kind === "reminderChild") return false;
     const previous = this.items.get(item.itemId);
     if (previous && previous.revision >= item.revision) return false;
-    let patch;
+    let patch: string | undefined;
     if (item.patchRef && item.status === "completed") {
-      const output = await this.host.request(
-        "item/readOutput",
-        { sessionId: this.nativeId, itemId: item.itemId, outputRef: item.patchRef.id },
-        outputSchema,
-      );
-      if (output.encoding !== "utf8" || !output.eof)
-        throw new MuseError("invalidPatch", "Muse edit patch is not a complete UTF-8 document");
-      patch = unifiedDiff(output.content);
+      try {
+        const output = await this.host.request(
+          "item/readOutput",
+          { sessionId: this.nativeId, itemId: item.itemId, outputRef: item.patchRef.id },
+          outputSchema,
+          READ_OUTPUT_TIMEOUT_MS,
+        );
+        if (output.encoding !== "utf8" || !output.eof)
+          throw new MuseError("invalidPatch", "Muse edit patch is not a complete UTF-8 document");
+        patch = unifiedDiff(output.content);
+      } catch (error) {
+        // A patch body is presentation only: a slow or failing store read must
+        // not fail the turn (pa-razvr0). The item stays, marked where the diff
+        // would render; the client shows the marker as context lines.
+        const reason = error instanceof Error ? error.message : String(error);
+        patch = `diff unavailable: ${reason}`;
+        process.stderr.write(
+          `[muse-provider] item/readOutput for ${item.itemId} failed, emitting without diff: ${reason}\n`,
+        );
+      }
     }
     this.items.set(item.itemId, item);
     this.emit({
