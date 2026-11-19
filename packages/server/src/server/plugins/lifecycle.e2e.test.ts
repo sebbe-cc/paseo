@@ -1584,3 +1584,69 @@ test("worktree includes reach the first agent without copying tracked or unignor
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }, 60_000);
+
+async function createTerminalThroughPlugin(hookBody: string): Promise<string> {
+  const pluginDirectory = await mkdtemp(path.join(tmpdir(), "paseo-terminal-hook-plugin-"));
+  const workspaceDirectory = await realpath(
+    await mkdtemp(path.join(tmpdir(), "paseo-terminal-hook-workspace-")),
+  );
+  const daemon = await createTestPaseoDaemon({ daemonVersion: "0.8.0" });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.8.0" });
+  onTestFinished(async () => {
+    await client.close();
+    await daemon.close();
+    await rm(pluginDirectory, { recursive: true, force: true });
+    await rm(workspaceDirectory, { recursive: true, force: true });
+  });
+  await writeFile(
+    path.join(pluginDirectory, "paseo-plugin.json"),
+    JSON.stringify({ id: "terminal-hook", requirements: { paseo: ">=0.8.0" } }),
+  );
+  await writeFile(
+    path.join(pluginDirectory, "index.server.ts"),
+    `
+export default function contribute(server) {
+  server.addHook("terminal.create.before", async ({ request }) => {
+    ${hookBody}
+  });
+  return () => {};
+}
+`,
+  );
+  await client.connect();
+  await client.patchDaemonConfig({ pluginsEnabled: true });
+  await client.installDirectoryPlugin(pluginDirectory);
+  const opened = await client.openProject(workspaceDirectory);
+  const workspaceId = opened.workspace!.id;
+  const created = await client.createTerminal(workspaceDirectory, undefined, undefined, {
+    workspaceId,
+    command: "/bin/sh",
+    args: ["-c", 'printf "FOO=[%s] PWD=[%s]\\n" "$FOO" "$PWD"; sleep 30'],
+  });
+  expect(created.error).toBeNull();
+  const terminalId = created.terminal!.id;
+  let output = "";
+  await expect
+    .poll(
+      async () => {
+        output = (await client.captureTerminal(terminalId)).lines.join("\n");
+        return output;
+      },
+      { timeout: 10_000 },
+    )
+    .toContain("FOO=[");
+  return output;
+}
+
+test("terminal.create.before adds env entries before the terminal process starts", async () => {
+  const output = await createTerminalThroughPlugin(
+    `console.log(JSON.stringify({ workspaceId: request.workspaceId, cwd: request.cwd }));
+    return { ...request, env: { ...request.env, FOO: "1" } };`,
+  );
+  expect(output).toContain("FOO=[1]");
+}, 60_000);
+
+test("a throwing terminal.create.before leaves the terminal starting with the original env", async () => {
+  const output = await createTerminalThroughPlugin(`throw new Error("hook exploded");`);
+  expect(output).toContain("FOO=[]");
+}, 60_000);
