@@ -212,6 +212,13 @@ paseo workspace archive <workspace-id>
 ```
 
 Inside an agent session, `PASEO_WORKSPACE_ID` holds the agent's own workspace ID, so an agent can run `paseo workspace rename "$PASEO_WORKSPACE_ID" "Auth rework"` or `paseo workspace archive "$PASEO_WORKSPACE_ID"` even when other workspaces share its directory.
+Label workspaces so agents and automations can find them later:
+
+```bash
+paseo workspace labels <workspace-id>
+paseo workspace label-set <workspace-id> "Needs review" --color sky
+paseo workspace label-remove <workspace-id> "Needs review"
+```
 
 Add `--forge <name>` to PR checkout when Paseo cannot infer the forge from the source checkout. See [Git worktrees](/docs/worktrees) for setup hooks and services.
 
