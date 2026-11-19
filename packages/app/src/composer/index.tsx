@@ -132,7 +132,10 @@ import { useIsInputLive } from "./input/use-input-live";
 import { resolveActiveSendBehavior } from "./input/state";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
 import type { KeyboardActionDefinition } from "@/keyboard/keyboard-action-dispatcher";
-import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
+import {
+  dispatchComposerKeyboardAction,
+  type DispatchComposerKeyboardActionArgs,
+} from "./keyboard-dispatch";
 import { submitAgentInput } from "@/composer/submit";
 import { ComposerRecall } from "@/composer/recall";
 import { createMessageSubmissionWriter } from "@/composer/submission/writer";
@@ -553,53 +556,9 @@ function focusMessageInputWithPlatformStrategy(messageInputRef: {
   });
 }
 
-interface DispatchComposerKeyboardActionArgs {
-  action: KeyboardActionDefinition;
-  isPaneFocused: boolean;
-  messageInputRef: { current: MessageInputRef | null };
-  isAgentRunning: boolean;
-  isCancellingAgent: boolean;
-  isConnected: boolean;
-  handleCancelAgent: () => void;
-  focusMessageInputForKeyboardAction: () => void;
-}
-
-function dispatchComposerKeyboardAction(args: DispatchComposerKeyboardActionArgs): boolean {
-  const {
-    action,
-    isPaneFocused,
-    messageInputRef,
-    isAgentRunning,
-    isCancellingAgent,
-    isConnected,
-    handleCancelAgent,
-    focusMessageInputForKeyboardAction,
-  } = args;
-  if (!isPaneFocused) return false;
-
-  if (action.id === "agent.interrupt") {
-    if (messageInputRef.current?.runKeyboardAction("dictation-cancel")) return true;
-    if (!isAgentRunning || isCancellingAgent || !isConnected) return false;
-    handleCancelAgent();
-    return true;
-  }
-
-  if (action.id === "message-input.focus") {
-    focusMessageInputForKeyboardAction();
-    return true;
-  }
-
-  const passthroughAction = resolveMessageInputPassthroughAction(action.id);
-  if (!passthroughAction) return false;
-  const result = messageInputRef.current?.runKeyboardAction(passthroughAction);
-  if (passthroughAction === "send" || passthroughAction === "dictation-confirm") {
-    return result ?? false;
-  }
-  return true;
-}
-
 function ComposerKeyboardRegistration({
   messageInputRef,
+  isPopupOpen,
   isAgentRunning,
   isCancellingAgent,
   isConnected,
@@ -618,6 +577,7 @@ function ComposerKeyboardRegistration({
         action,
         isPaneFocused: isActiveComposer,
         messageInputRef,
+        isPopupOpen,
         isAgentRunning,
         isCancellingAgent,
         isConnected,
@@ -631,6 +591,7 @@ function ComposerKeyboardRegistration({
       isAgentRunning,
       isCancellingAgent,
       isConnected,
+      isPopupOpen,
       messageInputRef,
     ],
   );
@@ -658,27 +619,6 @@ function ComposerKeyboardRegistration({
 function ComposerAutocomplete(props: React.ComponentProps<typeof AutocompletePopover>) {
   const { isActiveComposer } = useComposerKeyboardScope();
   return <AutocompletePopover {...props} visible={isActiveComposer && props.visible} />;
-}
-
-function resolveMessageInputPassthroughAction(
-  actionId: string,
-): MessageInputKeyboardActionKind | null {
-  switch (actionId) {
-    case "message-input.send":
-      return "send";
-    case "message-input.dictation-confirm":
-      return "dictation-confirm";
-    case "message-input.dictation-toggle":
-      return "dictation-toggle";
-    case "message-input.dictation-cancel":
-      return "dictation-cancel";
-    case "message-input.voice-toggle":
-      return "voice-toggle";
-    case "message-input.voice-mute-toggle":
-      return "voice-mute-toggle";
-    default:
-      return null;
-  }
 }
 
 interface QueuedMessageRowProps {
@@ -1015,6 +955,7 @@ const StableMessageInput = memo(MessageInput);
 
 interface ComposerAutocompleteHandle {
   onKeyPress: (event: ComposerKeyPressEvent) => boolean;
+  isOpen: () => boolean;
 }
 
 function ComposerAutocompleteBinding({
@@ -1052,10 +993,12 @@ function ComposerAutocompleteBinding({
   // A recalled message is sent as is; its leading `/command` must not open the picker.
   const isShown = show && !recall.isShowing(userInput);
   const handleKeyPress = autocomplete.onKeyPress;
-  useImperativeHandle(ref, () => ({ onKeyPress: (event) => isShown && handleKeyPress(event) }), [
-    isShown,
-    handleKeyPress,
-  ]);
+  const isOpen = autocomplete.isVisible && isShown;
+  useImperativeHandle(
+    ref,
+    () => ({ onKeyPress: (event) => isShown && handleKeyPress(event), isOpen: () => isOpen }),
+    [isShown, isOpen, handleKeyPress],
+  );
   const selectOption = autocomplete.onSelectOption;
   const onSelect = useCallback(
     (option: AutocompleteOption) => selectOption(option, inputRef.current?.getInputSnapshot()),
@@ -1063,7 +1006,7 @@ function ComposerAutocompleteBinding({
   );
   return (
     <ComposerAutocomplete
-      visible={autocomplete.isVisible && isShown}
+      visible={isOpen}
       anchorStyle={anchorStyle}
       options={autocomplete.options}
       selectedIndex={autocomplete.selectedIndex}
@@ -1406,6 +1349,7 @@ function ComposerContentImpl({
   );
   useEffect(() => () => cursorPublication.cancel(), [cursorPublication]);
   const autocompleteRef = useRef<ComposerAutocompleteHandle>(null);
+  const isComposerPopupOpen = useCallback(() => autocompleteRef.current?.isOpen() ?? false, []);
   const recall = useMemo(() => new ComposerRecall(), []);
   const [isProcessing, setIsProcessing] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFileAttachment[]>([]);
@@ -2558,6 +2502,7 @@ function ComposerContentImpl({
       <ComposerKeyboardRegistration
         handlerId={keyboardHandlerIdRef.current}
         messageInputRef={messageInputRef}
+        isPopupOpen={isComposerPopupOpen}
         isAgentRunning={isAgentRunning}
         isCancellingAgent={isCancellingAgent}
         isConnected={isConnected}

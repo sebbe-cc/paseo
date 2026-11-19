@@ -331,6 +331,25 @@ second line'`,
     expect(result).toContain("[Compacted]");
   });
 
+  it("renders plugin items as their plugin, kind and first text field", () => {
+    const timeline: AgentTimelineItem[] = [
+      {
+        type: "plugin",
+        id: "notice",
+        pluginId: "letta-provider",
+        kind: "fork-origin",
+        version: 1,
+        data: { title: "Forked", message: "from conv-11bab72a" },
+      },
+      { type: "plugin", id: "raw", pluginId: "top", kind: "telemetry", version: 1, data: [1] },
+    ];
+
+    expect(curateAgentActivity(timeline).split("\n")).toEqual([
+      "[Plugin letta-provider: fork-origin] from conv-11bab72a",
+      "[Plugin top: telemetry]",
+    ]);
+  });
+
   it("truncates to maxItems", () => {
     const timeline: AgentTimelineItem[] = [
       { type: "user_message", text: "Message 1" },

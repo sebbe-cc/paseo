@@ -927,6 +927,24 @@ export class ScheduleService {
     requireSchedule(updatedSchedule, params.scheduleId);
   }
 
+  /**
+   * A busy agent gets the prompt when its turn ends: steering it in would interrupt providers
+   * that cannot steer, and refusing it lost the run (pa-9g85j).
+   */
+  private async waitUntilAgentIdle(scheduleId: string, runId: string, agentId: string) {
+    if (!this.agentManager.hasInFlightRun(agentId)) return;
+    this.logger.info(
+      { scheduleId, runId, agentId },
+      "Scheduled agent is busy; waiting for its turn to end",
+    );
+    const busyWait = await this.agentManager.waitForAgentEvent(agentId);
+    if (busyWait.permission) {
+      throw new Error(
+        `Agent ${agentId} was busy and is now waiting for permission; the scheduled prompt was not sent`,
+      );
+    }
+  }
+
   private async executeSchedule(
     schedule: StoredSchedule,
     runId: string,
@@ -946,9 +964,7 @@ export class ScheduleService {
         agentStorage: this.agentStorage,
         logger: this.logger,
       });
-      if (this.agentManager.hasInFlightRun(agent.id)) {
-        throw new Error(`Agent ${agent.id} already has an active run`);
-      }
+      await this.waitUntilAgentIdle(schedule.id, runId, agent.id);
       await startAgentRun(this.agentManager, agent.id, wrappedPrompt, this.logger, {
         replaceRunning: true,
         activeTurnBehavior: "steer",

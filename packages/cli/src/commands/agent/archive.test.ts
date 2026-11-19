@@ -19,6 +19,7 @@ function makeAgent(
 
 class FakeAgentClient implements AgentArchiveClient, AgentReloadClient, AgentDetachClient {
   readonly archived: string[] = [];
+  readonly listFilters: unknown[] = [];
   readonly refreshed: string[] = [];
   readonly detached: string[] = [];
   readonly fetchAgentCalls: string[] = [];
@@ -30,8 +31,12 @@ class FakeAgentClient implements AgentArchiveClient, AgentReloadClient, AgentDet
     private readonly stored: AgentSnapshotPayload[] = listed,
   ) {}
 
-  async fetchAgents() {
-    return { entries: this.listed.map((agent) => ({ agent })), pageInfo: { nextCursor: null } };
+  async fetchAgents(options?: { filter?: { includeBackground?: boolean } }) {
+    this.listFilters.push(options?.filter);
+    const listed = options?.filter?.includeBackground
+      ? this.listed
+      : this.listed.filter((agent) => !agent.background);
+    return { entries: listed.map((agent) => ({ agent })), pageInfo: { nextCursor: null } };
   }
 
   async fetchAgent({ agentId }: { agentId: string }) {
@@ -135,5 +140,23 @@ describe("unlisted agent resolution", () => {
       code: "DETACH_FAILED",
       message: 'Failed to detach agent: Agent identifier "9eac" is ambiguous',
     });
+  });
+});
+
+describe("background agent resolution", () => {
+  const backgroundId = "2bc9de1f-4af6-4a29-bcb7-1b9c0e9915ee";
+
+  it("archives and reloads a background agent by prefix and by title", async () => {
+    const agent = makeAgent(backgroundId, { title: "Letta QA preflight", background: true });
+    const archiveClient = new FakeAgentClient([agent], []);
+    expect((await archiveAgent("2bc9de1f", {}, async () => archiveClient)).data.agentId).toBe(
+      backgroundId,
+    );
+    expect(archiveClient.archived).toEqual([backgroundId]);
+    expect(archiveClient.listFilters).toEqual([{ includeArchived: true, includeBackground: true }]);
+
+    const reloadClient = new FakeAgentClient([agent], []);
+    await reloadAgent("QA preflight", {}, async () => reloadClient);
+    expect(reloadClient.refreshed).toEqual([backgroundId]);
   });
 });

@@ -1412,6 +1412,147 @@ describe("ScheduleService", () => {
     );
   });
 
+  test("prompts a busy agent target when its running turn ends instead of refusing", async () => {
+    class HeldTurnSession implements AgentSession {
+      readonly provider = "claude";
+      readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
+      readonly id = "held-turn-session";
+      readonly prompts: string[] = [];
+      private turnCount = 0;
+      private releaseHeldTurn: (() => void) | null = null;
+      private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
+
+      async run(): Promise<AgentRunResult> {
+        throw new Error("not used");
+      }
+
+      async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+        const turnId = `turn-${++this.turnCount}`;
+        const text = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+        this.prompts.push(text);
+        const complete = () => {
+          this.emit({
+            type: "timeline",
+            provider: this.provider,
+            turnId,
+            item: { type: "assistant_message", text: `reply ${turnId}` },
+          });
+          this.emit({ type: "turn_completed", provider: this.provider, turnId });
+        };
+        setImmediate(() => {
+          this.emit({ type: "turn_started", provider: this.provider, turnId });
+          if (this.turnCount === 1) this.releaseHeldTurn = complete;
+          else complete();
+        });
+        return { turnId };
+      }
+
+      releaseFirstTurn(): void {
+        this.releaseHeldTurn?.();
+      }
+
+      subscribe(callback: (event: AgentStreamEvent) => void): () => void {
+        this.subscribers.add(callback);
+        return () => {
+          this.subscribers.delete(callback);
+        };
+      }
+
+      async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+
+      async getRuntimeInfo() {
+        return { provider: this.provider, sessionId: this.id, model: null, modeId: null };
+      }
+
+      async getAvailableModes(): Promise<AgentMode[]> {
+        return [];
+      }
+
+      async getCurrentMode(): Promise<string | null> {
+        return null;
+      }
+
+      async setMode(_modeId: string): Promise<void> {}
+
+      getPendingPermissions(): AgentPermissionRequest[] {
+        return [];
+      }
+
+      async respondToPermission(
+        _requestId: string,
+        _response: AgentPermissionResponse,
+      ): Promise<void> {}
+
+      describePersistence(): AgentPersistenceHandle {
+        return { provider: this.provider, sessionId: this.id };
+      }
+
+      async interrupt(): Promise<void> {}
+
+      async close(): Promise<void> {}
+
+      private emit(event: AgentStreamEvent): void {
+        for (const subscriber of this.subscribers) subscriber(event);
+      }
+    }
+
+    const session = new HeldTurnSession();
+    const client: AgentClient = {
+      provider: "claude",
+      capabilities: SCHEDULE_TEST_CAPABILITIES,
+      createSession: async () => session,
+      resumeSession: async () => session,
+      fetchCatalog: async () => ({ models: [], modes: [] }),
+      isAvailable: async () => true,
+    } as AgentClient;
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: { claude: client },
+      registry: agentStorage,
+    });
+    const agent = await manager.createAgent({ provider: "claude", cwd: tempDir }, undefined, {
+      workspaceId: undefined,
+    });
+    const userTurn = manager.streamAgent(agent.id, "long user turn");
+    const drained = (async () => {
+      for await (const _ of userTurn) {
+        // drain
+      }
+    })();
+    await vi.waitFor(() => expect(manager.hasInFlightRun(agent.id)).toBe(true));
+
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const schedule = await service.create({
+      prompt: "Check scheduled work",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: agent.id },
+      runOnCreate: false,
+    });
+    const run = service.runOnce(schedule.id);
+    await vi.waitFor(async () =>
+      expect((await service.inspect(schedule.id)).runs[0]?.status).toBe("running"),
+    );
+    expect(session.prompts).toEqual(["long user turn"]);
+
+    session.releaseFirstTurn();
+    await run;
+    await drained;
+
+    expect(session.prompts).toHaveLength(2);
+    expect(session.prompts[1]).toContain(`Schedule fired (id=${schedule.id}, run=`);
+    expect((await service.inspect(schedule.id)).runs[0]).toMatchObject({
+      status: "succeeded",
+      output: "reply turn-2",
+    });
+  });
+
   test("shows scheduled new-agent prompts as normal user turns", async () => {
     class PromptEchoScheduleSession implements AgentSession {
       readonly provider = "claude";

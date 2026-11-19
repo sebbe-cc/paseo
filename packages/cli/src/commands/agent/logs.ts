@@ -64,10 +64,11 @@ export function formatAgentActivityTranscript(
   if (tailCount === 0) {
     return "";
   }
-  return curateAgentActivity(
-    timelineItems,
-    tailCount !== undefined ? { maxItems: tailCount } : undefined,
-  );
+  // An unlabelled assistant line reads as the output of the tool line above it.
+  return curateAgentActivity(timelineItems, {
+    labelAssistantMessages: true,
+    ...(tailCount !== undefined ? { maxItems: tailCount } : {}),
+  });
 }
 
 /**
@@ -102,6 +103,7 @@ function usesJsonOutput(options: AgentLogsOptions): boolean {
 type StreamingTextType = "assistant_message" | "reasoning";
 
 const THOUGHT_PREFIX = "[Thought] ";
+const ASSISTANT_PREFIX = "[Assistant] ";
 
 interface PendingStreamingText {
   type: StreamingTextType;
@@ -143,9 +145,7 @@ export function createFollowTranscriptWriter(
   const emit = (chain: PendingStreamingText, text: string): void => {
     if (!chain.emitted) {
       chain.emitted = true;
-      if (chain.type === "reasoning") {
-        write(THOUGHT_PREFIX);
-      }
+      write(chain.type === "reasoning" ? THOUGHT_PREFIX : ASSISTANT_PREFIX);
     }
     write(text);
   };
