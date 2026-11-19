@@ -1,4 +1,6 @@
-export type KeyboardActionScope = "global" | "message-input" | "sidebar" | "workspace";
+import type { ListKeyboardActionId } from "@/keyboard/actions";
+
+export type KeyboardActionScope = "global" | "message-input" | "sidebar" | "workspace" | "list";
 
 export type WorkspacePanelTarget = "changes" | "files" | "pull-request";
 export type WorkspacePanelPlacement = "supporting" | "side-pane" | "focused-pane";
@@ -55,7 +57,8 @@ export type KeyboardActionId =
   | "workspace.pin"
   // Command-center only: no keybind, so these are absent from route-shortcut.ts.
   | "workspace.rename"
-  | "workspace.setup.show";
+  | "workspace.setup.show"
+  | ListKeyboardActionId;
 
 export type KeyboardActionDefinition =
   | { id: "agent.interrupt"; scope: KeyboardActionScope }
@@ -113,7 +116,8 @@ export type KeyboardActionDefinition =
   | { id: "workspace.archive.undo"; scope: KeyboardActionScope }
   | { id: "workspace.pin"; scope: KeyboardActionScope }
   | { id: "workspace.rename"; scope: KeyboardActionScope }
-  | { id: "workspace.setup.show"; scope: KeyboardActionScope };
+  | { id: "workspace.setup.show"; scope: KeyboardActionScope }
+  | { id: ListKeyboardActionId; scope: KeyboardActionScope };
 
 export interface KeyboardActionHandler {
   handlerId: string;

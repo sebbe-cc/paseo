@@ -77,5 +77,12 @@ export function resolveKeyboardFocusScope(input: {
     return commandCenterOpen ? "command-center" : "editable";
   }
 
+  if (
+    !commandCenterOpen &&
+    candidates.some((element) => Boolean(element.closest("[data-keyboard-list]")))
+  ) {
+    return "list";
+  }
+
   return commandCenterOpen ? "command-center" : "other";
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SplitNode } from "@/stores/workspace-layout-store";
-import { findAdjacentPane } from "./split-navigation";
+import { findAdjacentBounds, findAdjacentPane } from "./split-navigation";
 
 function createPaneNode(id: string, hidden = false): SplitNode {
   return {
@@ -91,5 +91,42 @@ describe("findAdjacentPane", () => {
 
     expect(findAdjacentPane(root, "left", "right")).toBe("right");
     expect(findAdjacentPane(root, "hidden", "right")).toBeNull();
+  });
+});
+
+describe("findAdjacentBounds", () => {
+  const box = (paneId: string, left: number, top: number, right: number, bottom: number) => ({
+    paneId,
+    left,
+    top,
+    right,
+    bottom,
+    centerX: (left + right) / 2,
+    centerY: (top + bottom) / 2,
+  });
+  // Sidebar | two stacked panes | Explorer, in pixels; edges are off by a rounding pixel.
+  const bounds = [
+    box("sidebar", 0, 0, 240, 800),
+    box("top", 240.5, 0, 1000, 400.5),
+    box("bottom", 240.5, 400, 1000, 800),
+    box("explorer", 1000, 0, 1300, 800),
+  ];
+
+  it("walks sidebar, panes and Explorer by screen position", () => {
+    expect(findAdjacentBounds(bounds, "top", "left", 1)).toBe("sidebar");
+    expect(findAdjacentBounds(bounds, "top", "right", 1)).toBe("explorer");
+    expect(findAdjacentBounds(bounds, "top", "down", 1)).toBe("bottom");
+    expect(findAdjacentBounds(bounds, "bottom", "up", 1)).toBe("top");
+    expect(findAdjacentBounds(bounds, "sidebar", "right", 1)).toBe("top");
+  });
+
+  it("returns null at an edge", () => {
+    expect(findAdjacentBounds(bounds, "sidebar", "left", 1)).toBeNull();
+    expect(findAdjacentBounds(bounds, "explorer", "right", 1)).toBeNull();
+    expect(findAdjacentBounds(bounds, "top", "up", 1)).toBeNull();
+  });
+
+  it("drops overlapping neighbours without a pixel of tolerance", () => {
+    expect(findAdjacentBounds(bounds, "bottom", "up")).toBeNull();
   });
 });

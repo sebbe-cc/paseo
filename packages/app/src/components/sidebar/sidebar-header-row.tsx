@@ -7,6 +7,7 @@ import { DensityIcon } from "@/components/ui/density-icon";
 import { Shortcut } from "@/components/ui/shortcut";
 import { density, densityIconBox } from "@/styles/density";
 import type { ShortcutKey } from "@/utils/format-shortcut";
+import { NAV_ROW_DATASET } from "@/keyboard/nav-row-markers";
 
 type SidebarHeaderRowVariant = "header" | "compact" | "inline";
 
@@ -85,6 +86,7 @@ export function SidebarHeaderRow({
           accessibilityLabel={accessibilityLabel ?? label}
           accessibilityState={isActive ? SELECTED_STATE : undefined}
           aria-selected={isActive}
+          dataSet={NAV_ROW_DATASET}
           style={styles.button}
         >
           {icon ? (
