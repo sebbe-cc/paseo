@@ -65,6 +65,38 @@ const CLOSED_PARENT: ManagedAgent = {
 };
 const TEST_REFRESH_TIMEOUT_MS = 120_000;
 
+test.each([false, true])(
+  "publishes catalog hook results and keeps native models on failure (%s)",
+  async (fails) => {
+    const native = { provider: "codex", id: "native", label: "Native" };
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      pluginLifecycle: {
+        before: vi.fn(async (_name, request) => {
+          if (fails) throw new Error("Catalog is offline");
+          return { ...request, models: [{ ...native, id: "gateway", label: "Gateway" }] };
+        }),
+      },
+      extraClients: {
+        codex: createExtraClient("codex", {
+          async isAvailable() {
+            return true;
+          },
+          async fetchCatalog() {
+            return { models: [native], modes: [] };
+          },
+        }),
+      },
+    });
+    try {
+      const models = await manager.listModels({ provider: "codex", wait: true });
+      expect(models.map((model) => model.id)).toEqual([fails ? "native" : "gateway"]);
+    } finally {
+      manager.destroy();
+    }
+  },
+);
+
 // Builds an AgentClient that can be injected via the public extraClients option.
 // extraClients is the only injection surface the manager exposes for tests.
 function createExtraClient(

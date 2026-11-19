@@ -1,5 +1,6 @@
 import type { AgentToolDefinition } from "./agent-tools.js";
 import type {
+  AgentModelDefinition,
   AgentPermissionRequest,
   AgentPermissionResponse,
   AgentSessionConfig,
@@ -133,6 +134,10 @@ export interface PluginHookRequests {
     metadata?: Record<string, JsonValue>;
   };
   "agent.open.before": PluginSessionOpenRequest;
+  "provider.catalog.before": {
+    readonly provider: string;
+    models: AgentModelDefinition[];
+  };
   "workspace.create.before": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }
 
@@ -204,6 +209,7 @@ export const pluginHookRegistry = {
   "agent.create.before": { waits: true },
   "agent.create.after": { waits: false },
   "agent.open.before": { waits: true },
+  "provider.catalog.before": { waits: true },
   "agent.close.after": { waits: false },
   "agent.archive.after": { waits: false },
   "agent.turn.before": { waits: false },

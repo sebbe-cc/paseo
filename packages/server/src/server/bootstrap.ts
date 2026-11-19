@@ -997,6 +997,7 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     logger,
     snapshotManager: {
+      pluginLifecycle: pluginRuntime,
       refreshTimeoutMs: config.providerCatalogRefreshTimeoutMs,
       runtimeSettings: config.agentProviderSettings,
       providerOverrides: config.providerOverrides,

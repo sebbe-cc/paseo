@@ -28,6 +28,7 @@ import type { ManagedAgent } from "./agent-manager.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import type { ManagedProcessRegistry } from "../managed-processes/managed-processes.js";
 import type { OpenCodeBridge } from "./providers/opencode/bridge.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
@@ -113,6 +114,7 @@ type ProviderSnapshotChangeListener = (transition: ProviderSnapshotTransition) =
 
 export interface ProviderSnapshotManagerOptions {
   logger: Logger;
+  pluginLifecycle?: Pick<PluginLifecycle, "before">;
   runtimeSettings?: AgentProviderRuntimeSettingsMap;
   providerOverrides?: Record<string, ProviderOverride>;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
@@ -241,6 +243,7 @@ export class ProviderSnapshotManager {
   private refreshTimeoutMs: number;
   private diagnosticTimeoutMs: number;
   private readonly logger: Logger;
+  private readonly pluginLifecycle?: Pick<PluginLifecycle, "before">;
   private readonly workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly openCodeBridge?: OpenCodeBridge;
@@ -257,6 +260,7 @@ export class ProviderSnapshotManager {
 
   constructor(options: ProviderSnapshotManagerOptions) {
     this.logger = options.logger;
+    this.pluginLifecycle = options.pluginLifecycle;
     this.pluginProviders = new PluginAgentClientRegistry(
       options.logger.child({ module: "plugin-providers" }),
     );
@@ -1035,7 +1039,21 @@ export class ProviderSnapshotManager {
             return null;
           }
 
-          return await definition.fetchCatalog(catalogOptions, client, context);
+          const nativeCatalog = await definition.fetchCatalog(catalogOptions, client, context);
+          const lifecycle = this.pluginLifecycle;
+          if (!lifecycle) return nativeCatalog;
+          try {
+            const { models } = await context.runActivity("catalog.plugins", () =>
+              lifecycle.before("provider.catalog.before", {
+                provider,
+                models: nativeCatalog.models,
+              }),
+            );
+            return { ...nativeCatalog, models };
+          } catch (error) {
+            this.logger.warn({ err: error, provider }, "Provider catalog hook failed");
+            return nativeCatalog;
+          }
         },
       });
       if (!catalog) {

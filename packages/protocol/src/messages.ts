@@ -403,7 +403,7 @@ export const AgentOptionControlSchema = z.discriminatedUnion("type", [
   AgentOptionSelectControlSchema,
 ]);
 
-const AgentModelDefinitionSchema = z.object({
+export const AgentModelDefinitionSchema = z.object({
   provider: AgentProviderSchema,
   id: z.string(),
   aliases: z.array(z.string()).optional(),

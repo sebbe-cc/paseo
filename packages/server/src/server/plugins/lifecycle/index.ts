@@ -14,7 +14,10 @@ import type { AgentToolDefinition } from "@getpaseo/plugin/server";
 import type { AgentStreamEvent } from "../../agent/agent-sdk-types.js";
 import { z } from "zod";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
-import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
+import {
+  AgentModelDefinitionSchema,
+  CreateAgentRequestMessageSchema,
+} from "@getpaseo/protocol/messages";
 import type {
   PluginHookAgent,
   PluginHookPayload,
@@ -88,6 +91,9 @@ const worktreeRequestSchema = z.discriminatedUnion("kind", [
 ]);
 
 const beforeSchemas = {
+  "provider.catalog.before": z
+    .object({ provider: z.string(), models: z.array(AgentModelDefinitionSchema) })
+    .strict(),
   "worktree.create.before": worktreeRequestSchema,
   "agent.create.before": CreateAgentRequestMessageSchema.pick({
     config: true,
@@ -244,6 +250,13 @@ export async function validateBeforeResult<Name extends keyof PluginWireBeforeRe
   output: unknown,
 ): Promise<PluginWireBeforeRequests[Name]> {
   const result = validateBeforeRequest(name, output);
+  if (name === "provider.catalog.before") {
+    const { provider } = beforeSchemas["provider.catalog.before"].parse(input);
+    const next = beforeSchemas["provider.catalog.before"].parse(result);
+    if (next.provider !== provider || next.models.some((model) => model.provider !== provider)) {
+      throw new Error("provider.catalog.before hooks cannot change a model's provider");
+    }
+  }
   if (name === "agent.open.before") {
     const previous = beforeSchemas["agent.open.before"].parse(input);
     const next = beforeSchemas["agent.open.before"].parse(result);
