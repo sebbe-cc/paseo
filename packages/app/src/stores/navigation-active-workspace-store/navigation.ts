@@ -27,6 +27,7 @@ export interface NavigateToWorkspaceInput {
   pin?: boolean;
   placement?: WorkspaceTabPlacement;
   asTab?: boolean;
+  newTab?: boolean;
 }
 
 export interface NavigateToWorkspaceDeps extends PrepareWorkspaceTabDeps {
