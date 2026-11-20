@@ -2,7 +2,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { removeSkill, syncSkills } from "./sync";
+import {
+  isSkillTargetReadOnlyError,
+  removeSkill,
+  SkillTargetReadOnlyError,
+  syncSkills,
+} from "./sync";
 
 interface Sandbox {
   root: string;
@@ -323,6 +328,133 @@ describe("syncSkills", () => {
     expect(errors).toContain("paseo");
     expect(result.processedSkills).toBe(0);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "routes a read-only target to onSkillError and still converges the other targets",
+    async () => {
+      await writeBundleSkill(sandbox.sourceDir, "paseo", { "SKILL.md": "new content" });
+      const agentsSkill = path.join(sandbox.agentsDir, "paseo");
+      await fs.mkdir(agentsSkill, { recursive: true });
+      await fs.writeFile(path.join(agentsSkill, "SKILL.md"), "old content");
+      await fs.chmod(path.join(agentsSkill, "SKILL.md"), 0o444);
+      await fs.chmod(agentsSkill, 0o555);
+      try {
+        const errors: Array<{ name: string; error: unknown }> = [];
+        const result = await syncSkills({
+          sourceDir: sandbox.sourceDir,
+          agentsDir: sandbox.agentsDir,
+          claudeDir: sandbox.claudeDir,
+          codexDir: sandbox.codexDir,
+          skillNames: ["paseo"],
+          onSkillError: (name, error) => errors.push({ name, error }),
+        });
+
+        expect(errors.map(({ name }) => name)).toEqual(["paseo"]);
+        expect(isSkillTargetReadOnlyError(errors[0]!.error)).toBe(true);
+        // The writable target still converges.
+        expect(
+          await fs.readFile(path.join(sandbox.claudeDir, "paseo", "SKILL.md"), "utf-8"),
+        ).toBe("new content");
+        // The read-only target is left untouched.
+        expect(await fs.readFile(path.join(agentsSkill, "SKILL.md"), "utf-8")).toBe(
+          "old content",
+        );
+        expect(result.processedSkills).toBe(0);
+      } finally {
+        await fs.chmod(agentsSkill, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "treats a skill symlinked into a read-only store as read-only (fleet deploy)",
+    async () => {
+      await writeBundleSkill(sandbox.sourceDir, "paseo-plugin", {
+        "SKILL.md": "bundle content",
+      });
+      // Mirror the fleet deploy: ~/.agents/skills/<skill> is a symlink into
+      // the read-only nix store owned by home-manager.
+      const storeSkill = path.join(sandbox.root, "store", "paseo-plugin");
+      await fs.mkdir(storeSkill, { recursive: true });
+      await fs.writeFile(path.join(storeSkill, "SKILL.md"), "store content");
+      await fs.chmod(path.join(storeSkill, "SKILL.md"), 0o444);
+      await fs.chmod(storeSkill, 0o555);
+      await fs.mkdir(sandbox.agentsDir, { recursive: true });
+      await fs.symlink(storeSkill, path.join(sandbox.agentsDir, "paseo-plugin"), "dir");
+      try {
+        const errors: Array<{ name: string; error: unknown }> = [];
+        await syncSkills({
+          sourceDir: sandbox.sourceDir,
+          agentsDir: sandbox.agentsDir,
+          claudeDir: sandbox.claudeDir,
+          codexDir: sandbox.codexDir,
+          skillNames: ["paseo-plugin"],
+          onSkillError: (name, error) => errors.push({ name, error }),
+        });
+
+        expect(errors.map(({ name }) => name)).toEqual(["paseo-plugin"]);
+        const error = errors[0]!.error;
+        expect(isSkillTargetReadOnlyError(error)).toBe(true);
+        expect((error as SkillTargetReadOnlyError).targets).toEqual([
+          {
+            skillName: "paseo-plugin",
+            targetDir: path.join(sandbox.agentsDir, "paseo-plugin"),
+          },
+        ]);
+        // The store content is untouched and the writable target converges.
+        expect(await fs.readFile(path.join(storeSkill, "SKILL.md"), "utf-8")).toBe(
+          "store content",
+        );
+        expect(
+          await fs.readFile(
+            path.join(sandbox.claudeDir, "paseo-plugin", "SKILL.md"),
+            "utf-8",
+          ),
+        ).toBe("bundle content");
+      } finally {
+        await fs.chmod(storeSkill, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "throws one aggregated read-only error after converging the remaining skills",
+    async () => {
+      await writeBundleSkill(sandbox.sourceDir, "paseo", { "SKILL.md": "paseo-new" });
+      await writeBundleSkill(sandbox.sourceDir, "paseo-loop", { "SKILL.md": "loop-new" });
+      const agentsSkill = path.join(sandbox.agentsDir, "paseo");
+      await fs.mkdir(agentsSkill, { recursive: true });
+      await fs.writeFile(path.join(agentsSkill, "SKILL.md"), "paseo-old");
+      await fs.chmod(path.join(agentsSkill, "SKILL.md"), 0o444);
+      await fs.chmod(agentsSkill, 0o555);
+      try {
+        const failure = await syncSkills({
+          sourceDir: sandbox.sourceDir,
+          agentsDir: sandbox.agentsDir,
+          claudeDir: sandbox.claudeDir,
+          codexDir: sandbox.codexDir,
+          skillNames: ["paseo", "paseo-loop"],
+        }).then(
+          () => null,
+          (error: unknown) => error,
+        );
+
+        expect(isSkillTargetReadOnlyError(failure)).toBe(true);
+        expect((failure as SkillTargetReadOnlyError).targets).toEqual([
+          { skillName: "paseo", targetDir: agentsSkill },
+        ]);
+        // Both writable targets converged despite the aggregated failure.
+        expect(
+          await fs.readFile(path.join(sandbox.claudeDir, "paseo-loop", "SKILL.md"), "utf-8"),
+        ).toBe("loop-new");
+        expect(await fs.readFile(path.join(agentsSkill, "SKILL.md"), "utf-8")).toBe(
+          "paseo-old",
+        );
+      } finally {
+        await fs.chmod(agentsSkill, 0o755);
+      }
+    },
+  );
 });
 
 describe("removeSkill", () => {
