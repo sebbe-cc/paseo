@@ -1,3 +1,4 @@
+import equal from "fast-deep-equal";
 import { normalizeWorkspaceFileLocation, workspaceFileLocationsEqual } from "@/workspace/file-open";
 import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/workspace-tabs/model";
 
@@ -121,7 +122,8 @@ export function workspaceTabTargetsEqual(
       left.panelId === right.panelId &&
       left.context === right.context &&
       (left.context === "workspace" ||
-        (right.context === "agent" && left.agentId === right.agentId))
+        (right.context === "agent" && left.agentId === right.agentId)) &&
+      equal(left.params, right.params)
     );
   }
   return secondaryWorkspaceTabTargetsEqual(left, right);
@@ -237,11 +239,27 @@ function normalizePluginTabTarget(
   const pluginId = trimNonEmpty(value.pluginId);
   const panelId = trimNonEmpty(value.panelId);
   if (!pluginId || !panelId) return null;
+  const params = value.params === undefined ? undefined : (value.params as typeof value.params);
   if (value.context === "workspace") {
-    return { kind: "plugin", pluginId, panelId, context: "workspace" };
+    return {
+      kind: "plugin",
+      pluginId,
+      panelId,
+      context: "workspace",
+      ...(params === undefined ? {} : { params }),
+    };
   }
   const agentId = trimNonEmpty(value.agentId);
-  return agentId ? { kind: "plugin", pluginId, panelId, context: "agent", agentId } : null;
+  return agentId
+    ? {
+        kind: "plugin",
+        pluginId,
+        panelId,
+        context: "agent",
+        agentId,
+        ...(params === undefined ? {} : { params }),
+      }
+    : null;
 }
 
 function trimNonEmpty(value: string | null | undefined): string | null {
