@@ -93,6 +93,16 @@ export interface PluginSessionOpenRequest {
   mcpServers: NonNullable<AgentSessionConfig["mcpServers"]>;
 }
 
+/**
+ * A workspace terminal before its process starts. `env` holds only the entries the request adds
+ * on top of the daemon's terminal environment; it starts empty.
+ */
+export interface PluginTerminalCreateRequest {
+  cwd: string;
+  workspaceId: string | null;
+  env: Record<string, string>;
+}
+
 export type PluginTurnOutcome =
   | { kind: "completed" }
   | { kind: "failed"; error: { message: string; code?: string } }
@@ -134,6 +144,7 @@ export interface PluginHookRequests {
   };
   "agent.open.before": PluginSessionOpenRequest;
   "workspace.create.before": Omit<WorkspaceCreateRequest, "type" | "requestId">;
+  "terminal.create.before": PluginTerminalCreateRequest;
 }
 
 /** What a hook may return. An omitted `metadata` stays as it was. */
@@ -213,6 +224,7 @@ export const pluginHookRegistry = {
   "agent.turn.after": { waits: false },
   "agent.permission.before": { waits: false },
   "agent.permission.after": { waits: false },
+  "terminal.create.before": { waits: true },
 } as const satisfies Record<keyof PluginHooks, { waits: boolean }>;
 
 // COMPAT(pluginHookNames): added in v0.14, remove after 2027-04-30
