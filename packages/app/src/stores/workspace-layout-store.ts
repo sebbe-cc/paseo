@@ -62,6 +62,7 @@ import {
 import {
   buildDeterministicWorkspaceTabId,
   normalizeWorkspaceTabTarget,
+  workspaceTabTargetsEqual,
 } from "@/workspace-tabs/identity";
 import { isSheetTabModified, resolveCompactSheetPolicy } from "@/workspace-tabs/compact-sheet";
 import { panelResourceKey, type CompactSheetPolicy } from "@/panels/panel-manifest";
@@ -211,7 +212,19 @@ interface WorkspaceLayoutStore {
     input: {
       targetPaneId: string;
       position: "left" | "right" | "top" | "bottom";
+      /** The new pane's share of the target pane's space; half when absent. */
+      size?: number;
     },
+  ) => string | null;
+  /**
+   * A pane for a target that asks for its own split (a plugin's openPanel split): null when a tab
+   * for the target is already open (reveal it where it is), when the workspace shows one pane at a
+   * time, or when the tree is too deep; else a new empty pane split off the main pane.
+   */
+  splitPaneForTarget: (
+    workspaceKey: string,
+    target: WorkspaceTabTarget,
+    split: { position: "left" | "right" | "top" | "bottom"; size?: number },
   ) => string | null;
   moveTabToPane: (workspaceKey: string, tabId: string, toPaneId: string) => void;
   /**
@@ -1914,6 +1927,7 @@ export function createWorkspaceLayoutStore(
             layout: currentLayout,
             targetPaneId: normalizedTargetPaneId,
             position: input.position,
+            ...(input.size === undefined ? {} : { size: input.size }),
             maxTreeDepth: MAX_TREE_DEPTH,
             createNodeId: ids.createNodeId,
           });
@@ -1930,6 +1944,31 @@ export function createWorkspaceLayoutStore(
           }));
 
           return result.paneId;
+        },
+        splitPaneForTarget: (workspaceKey, target, split) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const normalizedTarget = normalizeWorkspaceTabTarget(target);
+          if (!normalizedWorkspaceKey || !normalizedTarget) return null;
+          if (get().layoutMode !== "split-panes") return null;
+          const layout = getWorkspaceLayout(get().layoutByWorkspace, normalizedWorkspaceKey);
+          const open = collectAllTabs(layout.root).some((tab) =>
+            workspaceTabTargetsEqual(tab.target, normalizedTarget),
+          );
+          if (open) return null;
+          const explorerSidebarPaneId = resolveExplorerSidebarPaneId(
+            layout,
+            get().explorerSidebarPaneIdByWorkspace[normalizedWorkspaceKey],
+          );
+          const main =
+            collectAllPanes(layout.root).find(
+              (pane) => pane.id === DEFAULT_PANE_ID && pane.id !== explorerSidebarPaneId,
+            ) ?? collectAllPanes(layout.root).find((pane) => pane.id !== explorerSidebarPaneId);
+          if (!main) return null;
+          return get().splitPaneEmpty(normalizedWorkspaceKey, {
+            targetPaneId: main.id,
+            position: split.position,
+            ...(split.size === undefined ? {} : { size: split.size }),
+          });
         },
         moveTabToPane: (workspaceKey, tabId, toPaneId) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
