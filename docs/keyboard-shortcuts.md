@@ -91,7 +91,10 @@ surface must not clear a newer owner's declaration during a tab switch. Web keep
 its DOM-derived scope.
 
 Escape interrupts an agent only in the message input or an unclaimed surface.
-A focused terminal excludes that binding. The source leaves terminal Escape alone;
+A focused terminal excludes that binding. The composer's autocomplete (slash
+commands, mentions, files) is not a registered overlay: it reads keys in the text
+input, after the capture listener. While it is open the composer leaves
+`agent.interrupt` unhandled, so Escape reaches the input and never cancels the turn. The source leaves terminal Escape alone;
 terminal Escape/Ctrl forwarding is a separate feature.
 
 Terminal arrows never pass through the shortcut pipeline. The Android hardware

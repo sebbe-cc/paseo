@@ -79,6 +79,7 @@ import {
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
 import {
   sendPromptToAgent,
+  titleUntitledAgentFromText,
   waitForAgentRunStartWithTimeout,
   unarchiveAgentState,
 } from "./agent/agent-prompt.js";
@@ -9100,11 +9101,12 @@ export class Session {
       agentStorage: this.agentStorage,
       logger: this.sessionLogger,
     });
-    const stored = await this.agentStorage.get(agentId);
-    if (stored && !stored.title && !stored.lastUserMessageAt) {
-      const { provisionalTitle } = resolveCreateAgentTitles({ initialPrompt: text });
-      if (provisionalTitle) await this.agentManager.setTitle(agentId, provisionalTitle);
-    }
+    await titleUntitledAgentFromText({
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
+      agentId,
+      text,
+    });
   }
 
   private async handleSendAgentMessageRequest(

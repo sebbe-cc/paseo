@@ -53,7 +53,10 @@ export async function resolveAgentEntry(
     return null;
   }
 
-  const agents = await fetchAllAgents(client, { filter: { includeArchived: true } });
+  // Background agents are left out of default listings, but a command that names one acts on it.
+  const agents = await fetchAllAgents(client, {
+    filter: { includeArchived: true, includeBackground: true },
+  });
   const listedId = resolveAgentId(agentIdArg, agents);
   if (listedId) {
     const match = agents.find((entry) => entry.id === listedId);

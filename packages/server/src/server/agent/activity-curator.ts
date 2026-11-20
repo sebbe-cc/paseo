@@ -138,6 +138,20 @@ function appendAgentMessageEntries(entries: ActivityEntry[], message: AgentMessa
   if (body) entries.push(activityEntry(body));
 }
 
+const PLUGIN_TEXT_KEYS = ["text", "message", "summary", "title"] as const;
+
+/** A plugin item is opaque data; show its kind and the first text field it carries. */
+function formatPluginEntry(item: Extract<AgentTimelineItem, { type: "plugin" }>): ActivityEntry {
+  const label = `[Plugin ${item.pluginId}: ${item.kind}]`;
+  const data = item.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return activityEntry(label);
+  for (const key of PLUGIN_TEXT_KEYS) {
+    const summary = formatToolSummary(typeof data[key] === "string" ? data[key] : undefined);
+    if (summary) return activityEntry(`${label} ${summary}`);
+  }
+  return activityEntry(label);
+}
+
 function curateProjectedActivityEntries(
   items: readonly AgentTimelineItem[],
   options?: ActivityCuratorOptions,
@@ -185,6 +199,9 @@ function curateProjectedActivityEntries(
         break;
       case "compaction":
         entries.push(activityEntry("[Compacted]"));
+        break;
+      case "plugin":
+        entries.push(formatPluginEntry(item));
         break;
     }
   }

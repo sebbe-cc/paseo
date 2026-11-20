@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { connectToDaemon } from "../../utils/client.js";
+import { fetchAllAgents } from "../../utils/agent-directory.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 
 /** Permission list item for display */
@@ -67,8 +68,10 @@ export async function runLsCommand(
   const client = await connectToDaemon({ target: options.daemonTarget });
 
   try {
-    const agentsPayload = await client.fetchAgents({ filter: { includeArchived: true } });
-    const agents = agentsPayload.entries.map((entry) => entry.agent);
+    // Every page, and background agents too: a pending permission blocks the agent wherever it is listed.
+    const agents = await fetchAllAgents(client, {
+      filter: { includeArchived: true, includeBackground: true },
+    });
     await client.close();
 
     return listPendingPermissions(agents);
