@@ -4846,6 +4846,69 @@ describe("rename_workspace MCP tool", () => {
     expect(emittedWorkspaceIds).toEqual([["wks_parent"]]);
   });
 
+  it("shows a background workspace again and rejects an archived one", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const hidden = createPersistedWorkspaceRecord({
+      workspaceId: "wks_hidden",
+      projectId: "proj_parent",
+      cwd: REPO_CWD,
+      kind: "local_checkout",
+      displayName: "main",
+      background: true,
+      createdAt: "2026-07-03T09:00:00.000Z",
+      updatedAt: "2026-07-03T09:00:00.000Z",
+    });
+    const archived = createPersistedWorkspaceRecord({
+      workspaceId: "wks_archived",
+      projectId: "proj_parent",
+      cwd: TARGET_CWD,
+      kind: "local_checkout",
+      displayName: "old",
+      background: true,
+      archivedAt: "2026-07-04T09:00:00.000Z",
+      createdAt: "2026-07-03T09:00:00.000Z",
+      updatedAt: "2026-07-03T09:00:00.000Z",
+    });
+    const workspaces = new Map([
+      [hidden.workspaceId, hidden],
+      [archived.workspaceId, archived],
+    ]);
+    const emittedWorkspaceIds: string[][] = [];
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      workspaceRegistry: {
+        get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        upsert: async (record) => {
+          workspaces.set(record.workspaceId, record);
+        },
+      },
+      emitWorkspaceUpdatesForWorkspaceIds: async (workspaceIds) => {
+        emittedWorkspaceIds.push(Array.from(workspaceIds));
+      },
+      logger,
+    });
+    const tool = registeredTool(server, "set_workspace_background");
+
+    const response = await invokeToolWithParsedInput(tool, {
+      workspaceId: "wks_hidden",
+      background: false,
+    });
+
+    expect(response.structuredContent).toEqual({
+      success: true,
+      workspaceId: "wks_hidden",
+      background: false,
+    });
+    expect(workspaces.get("wks_hidden")?.background).toBe(false);
+    expect(emittedWorkspaceIds).toEqual([["wks_hidden"]]);
+    await expect(
+      invokeToolWithParsedInput(tool, { workspaceId: "wks_archived", background: false }),
+    ).rejects.toThrow("Workspace wks_archived is archived");
+    expect(workspaces.get("wks_archived")?.background).toBe(true);
+  });
+
   it("renames an explicit workspace outside the caller workspace", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const parentWorkspace = createPersistedWorkspaceRecord({
