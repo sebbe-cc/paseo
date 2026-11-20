@@ -14,6 +14,7 @@ import {
 } from "@/git/diff-tree";
 import { FileHeader } from "@/git/file-header";
 import type { DiffFileHeader } from "@/git/diff-snapshot";
+import { NAV_ROW_LIST_DATASET } from "@/keyboard/nav-row-markers";
 
 export interface ChangedFilesTreeProps {
   files: DiffFileHeader[];
@@ -143,6 +144,7 @@ export function ChangedFilesTree({
       keyExtractor={keyExtractor}
       style={styles.scrollView}
       contentContainerStyle={styles.contentContainer}
+      dataSet={NAV_ROW_LIST_DATASET}
       testID="changes-file-tree"
     />
   );

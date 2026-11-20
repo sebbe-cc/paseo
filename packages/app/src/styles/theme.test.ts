@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   darkPureBlackTheme,
   darkTheme,
+  FOCUS_RING_INDIGO,
   FONT_SIZE,
   getNextThemePreference,
   lightTheme,
+  REGISTERED_THEMES,
   THEME_OPTIONS,
 } from "./theme";
 
@@ -85,6 +87,23 @@ describe("Sidebar interaction surfaces", () => {
   it("keeps Dark hover and selection where they were", () => {
     expectWithin(darkTheme.colors.surfaceSidebarHover, "#1e2120", 2);
     expectWithin(darkTheme.colors.surfaceSidebarSelected, "#272a29", 2);
+  });
+});
+
+describe("Focus ring token", () => {
+  it("is indigo in both themes so the focused pane reads the same light and dark", () => {
+    expect(FOCUS_RING_INDIGO).toBe("#6366F1");
+    expect(lightTheme.colors.focusRing).toBe(FOCUS_RING_INDIGO);
+    expect(darkTheme.colors.focusRing).toBe(FOCUS_RING_INDIGO);
+  });
+
+  it("exists on every registered theme, including plugin aliases", () => {
+    for (const [name, theme] of Object.entries(REGISTERED_THEMES)) {
+      expect(
+        (theme.colors as { focusRing?: string }).focusRing,
+        `theme ${name} misses focusRing`,
+      ).toBe(FOCUS_RING_INDIGO);
+    }
   });
 });
 

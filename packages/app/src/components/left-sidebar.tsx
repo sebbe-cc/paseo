@@ -91,6 +91,7 @@ import { UsageSidebarItem, UsageSidebarRoot, useUsageSummary, useOpenSidebarUsag
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
+import { NAV_ROW_LIST_DATASET } from "@/keyboard/nav-row-markers";
 
 type SidebarTheme = ReturnType<typeof useUnistyles>["theme"];
 
@@ -139,6 +140,8 @@ interface MobileSidebarProps extends SidebarSharedProps {
   insetsBottom: number;
   closeSidebar: () => void;
 }
+
+const SIDEBAR_REGION_DATASET = { focusRegion: "sidebar", ...NAV_ROW_LIST_DATASET };
 
 interface DesktopSidebarProps extends SidebarSharedProps {
   insetsTop: number;
@@ -822,7 +825,11 @@ function DesktopSidebar({
       dockVisible={active}
       closeGesture={closeGesture}
     >
-      <Animated.View style={desktopSidebarStyle}>
+      <Animated.View
+        style={desktopSidebarStyle}
+        dataSet={active ? SIDEBAR_REGION_DATASET : undefined}
+        tabIndex={-1}
+      >
         <View style={desktopSidebarBorderStyle}>
           <View style={styles.sidebarDragArea}>
             {ownsTopLeft || DEV_BUILD_LABEL ? (
@@ -931,6 +938,7 @@ const staticStyles = RNStyleSheet.create({
   desktopSidebar: {
     position: "relative" as const,
     flex: 1,
+    outlineWidth: 0,
   },
 });
 
