@@ -1,13 +1,13 @@
 import type { ProviderEvent, ProviderPrompt } from "@getpaseo/plugin/server/provider";
 import type { TurnStartParams } from "./msp.js";
-import { MspConnection } from "./connection.js";
+import type { MspHost } from "./connection.js";
 import { ackSchema, skillsSchema } from "./wire.js";
 import { MuseError } from "./errors.js";
 
 export class Commands {
   private selectors = new Set<string>();
   constructor(
-    private readonly host: MspConnection,
+    private readonly host: MspHost,
     private readonly sessionId: string,
     private readonly id: string,
     private readonly emit: (event: ProviderEvent) => void,
