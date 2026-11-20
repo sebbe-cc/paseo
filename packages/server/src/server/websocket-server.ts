@@ -15,6 +15,7 @@ import { createToolHosts } from "./agent/host-operations/index.js";
 import { HOST_ROUTE_OPCODE } from "@getpaseo/protocol/binary-frames/index";
 import { DaemonLinkEndpoint, VirtualHostSocket } from "./connected-hosts/index.js";
 import { ConnectedHosts } from "./connected-hosts/index.js";
+import { loadPersistedConfig } from "./persisted-config.js";
 import { stat } from "node:fs/promises";
 import {
   createWorkspaceBaseBranchService,
@@ -410,6 +411,28 @@ function resolveCapabilityReason(params: {
   return state.message;
 }
 
+function readPluginVoiceSelection(
+  paseoHome: string,
+): import("@getpaseo/plugin/server").VoiceProviderSelection | null {
+  const voice = loadPersistedConfig(paseoHome).features?.voiceMode;
+  const disabled =
+    voice?.enabled === false ||
+    process.env.PASEO_VOICE_MODE_ENABLED === "false" ||
+    process.env.PASEO_VOICE_MODE_ENABLED === "0";
+  return disabled ? null : (voice?.provider ?? null);
+}
+
+function readPluginDictationSelection(
+  paseoHome: string,
+): import("@getpaseo/plugin/server").DictationProviderSelection | null {
+  const dictation = loadPersistedConfig(paseoHome).features?.dictation;
+  const disabled =
+    dictation?.enabled === false ||
+    process.env.PASEO_DICTATION_ENABLED === "false" ||
+    process.env.PASEO_DICTATION_ENABLED === "0";
+  return disabled ? null : (dictation?.provider ?? null);
+}
+
 function buildServerCapabilities(params: {
   readiness: SpeechReadinessSnapshot | null;
 }): ServerCapabilities | undefined {
@@ -592,6 +615,13 @@ export class VoiceAssistantWebSocketServer {
   private readonly downloadTokenStore: DownloadTokenStore;
   private readonly paseoHome: string;
   private readonly connectedHosts: ConnectedHosts;
+  private readonly pluginVoiceSelection:
+    | import("@getpaseo/plugin/server").VoiceProviderSelection
+    | null;
+  private readonly pluginDictationSelection:
+    | import("@getpaseo/plugin/server").DictationProviderSelection
+    | null;
+  private unsubscribePluginVoice: (() => void) | null = null;
 
   toolHosts() {
     return createToolHosts(this.connectedHosts);
@@ -786,6 +816,8 @@ export class VoiceAssistantWebSocketServer {
     this.downloadTokenStore = downloadTokenStore;
     this.paseoHome = paseoHome;
     this.connectedHosts = new ConnectedHosts(paseoHome, { serverId, label: getHostName() });
+    this.pluginVoiceSelection = readPluginVoiceSelection(paseoHome);
+    this.pluginDictationSelection = readPluginDictationSelection(paseoHome);
     this.passwordHash = auth?.password;
     this.daemonConfigStore = daemonConfigStore;
     this.mcpBaseUrl = mcpBaseUrl;
@@ -806,9 +838,8 @@ export class VoiceAssistantWebSocketServer {
       throw new Error("providerSnapshotManager is required");
     }
     this.providerSnapshotManager = providerSnapshotManager;
-    this.serverCapabilities = buildServerCapabilities({
-      readiness: this.speech?.getReadiness() ?? null,
-    });
+    this.serverCapabilities = this.resolveVoiceCapabilities(this.speech?.getReadiness() ?? null);
+    this.subscribePluginVoice();
     this.unsubscribeSpeechReadiness =
       this.speech?.onReadinessChange((snapshot) => {
         this.publishSpeechReadiness(snapshot);
@@ -1092,8 +1123,97 @@ export class VoiceAssistantWebSocketServer {
     }
   }
 
+  private subscribePluginVoice(): void {
+    this.unsubscribePluginVoice =
+      this.pluginRuntime?.subscribe(() =>
+        this.publishSpeechReadiness(this.speech?.getReadiness() ?? null),
+      ) ?? null;
+  }
+
+  private createPluginVoiceOptions(): NonNullable<
+    import("./session/voice/voice-session.js").VoiceSessionOptions["voice"]
+  >["plugin"] {
+    return {
+      getSelection: () => this.pluginVoiceSelection,
+      host: {
+        hasVoiceProvider: (selection) => this.pluginRuntime?.hasVoiceProvider?.(selection) === true,
+        startVoiceProvider: (selection, context) => {
+          if (!this.pluginRuntime?.startVoiceProvider)
+            throw new Error("Plugin voice providers are unavailable");
+          return this.pluginRuntime.startVoiceProvider(selection, context);
+        },
+      },
+    };
+  }
+
+  private createPluginDictationOptions(): NonNullable<
+    import("./session/voice/voice-session.js").VoiceSessionOptions["dictation"]
+  >["plugin"] {
+    return {
+      getSelection: () => this.pluginDictationSelection,
+      host: {
+        hasDictationProvider: (selection) =>
+          this.pluginRuntime?.hasDictationProvider?.(selection) === true,
+        startDictationProvider: (selection, context) => {
+          if (!this.pluginRuntime?.startDictationProvider)
+            throw new Error("Plugin dictation providers are unavailable");
+          return this.pluginRuntime.startDictationProvider(selection, context);
+        },
+      },
+    };
+  }
+
+  private resolveVoiceCapabilities(
+    readiness: SpeechReadinessSnapshot | null,
+  ): ServerCapabilities | undefined {
+    return this.withPluginDictation(this.withPluginVoice(readiness));
+  }
+
+  private withPluginDictation(
+    capabilities: ServerCapabilities | undefined,
+  ): ServerCapabilities | undefined {
+    const dictationProvider = this.pluginDictationSelection;
+    if (!dictationProvider) return capabilities;
+    const available = this.pluginRuntime?.hasDictationProvider?.(dictationProvider) === true;
+    return {
+      ...capabilities,
+      voice: {
+        voice: capabilities?.voice?.voice ?? { enabled: false, reason: "Voice is unavailable" },
+        ...capabilities?.voice,
+        dictation: {
+          enabled: available,
+          reason: available ? "" : "Selected dictation plugin is unavailable",
+        },
+        dictationProvider,
+      },
+    };
+  }
+
+  private withPluginVoice(
+    readiness: SpeechReadinessSnapshot | null,
+  ): ServerCapabilities | undefined {
+    const capabilities = buildServerCapabilities({ readiness });
+    const provider = this.pluginVoiceSelection;
+    if (!provider) return capabilities;
+    const available = this.pluginRuntime?.hasVoiceProvider?.(provider) === true;
+    return {
+      ...capabilities,
+      voice: {
+        dictation: capabilities?.voice?.dictation ?? {
+          enabled: false,
+          reason: "Dictation is unavailable",
+        },
+        voice: {
+          enabled: available,
+          reason: available ? "" : "Selected voice plugin is unavailable",
+        },
+        provider,
+      },
+    };
+  }
+
   public publishSpeechReadiness(readiness: SpeechReadinessSnapshot | null): void {
-    this.updateServerCapabilities(buildServerCapabilities({ readiness }));
+    this.updateServerCapabilities(this.resolveVoiceCapabilities(readiness));
   }
 
   public updateServerCapabilities(capabilities: ServerCapabilities | null | undefined): void {
@@ -1180,6 +1300,8 @@ export class VoiceAssistantWebSocketServer {
     this.prepareForShutdown();
     await this.agentMessages.close();
     await this.connectedHosts.close();
+    this.unsubscribePluginVoice?.();
+    this.unsubscribePluginVoice = null;
     this.unsubscribeSpeechReadiness?.();
     this.unsubscribeSpeechReadiness = null;
     this.unsubscribeDaemonConfigChange?.();
@@ -1733,6 +1855,7 @@ export class VoiceAssistantWebSocketServer {
       serviceProxyPublicBaseUrl: this.serviceProxyPublicBaseUrl,
       resolveScriptHealth: this.resolveScriptHealth ?? undefined,
       voice: {
+        plugin: this.createPluginVoiceOptions(),
         turnDetection: () => this.speech?.resolveTurnDetection() ?? null,
       },
       voiceBridge: {
@@ -1752,12 +1875,13 @@ export class VoiceAssistantWebSocketServer {
         },
       },
       dictation:
-        this.dictation || this.speech
+        this.dictation || this.speech || this.pluginDictationSelection
           ? {
               finalTimeoutMs: this.dictation?.finalTimeoutMs,
               stt: () => this.speech?.resolveDictationStt() ?? null,
               sttLanguage: this.speech?.resolveDictationSttLanguage() ?? "en",
-              getSpeechReadiness: () => this.speech!.getReadiness(),
+              getSpeechReadiness: this.speech ? () => this.speech!.getReadiness() : undefined,
+              plugin: this.createPluginDictationOptions(),
             }
           : undefined,
       serverId: this.serverId,
@@ -2073,6 +2197,8 @@ export class VoiceAssistantWebSocketServer {
         workspaceSetupRun: true,
         workspaceSetupObservation: true,
         workspaceSortTimes: true,
+        pluginVoiceProviders: true,
+        pluginDictationProviders: true,
         // COMPAT(providersSnapshot): keep optional until all clients rely on snapshot flow.
         providersSnapshot: true,
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
